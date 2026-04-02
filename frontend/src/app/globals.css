@@ -1,0 +1,213 @@
+@import "tailwindcss";
+
+/* =========================================================
+   FinContext — Design System (Tailwind CSS v4)
+   Premium dark-mode financial dashboard
+   ========================================================= */
+
+/* ---------------------------------------------------------
+   Theme: Register CSS custom properties as design tokens
+   --------------------------------------------------------- */
+@theme {
+  --color-bg-primary: #0a0e17;
+  --color-bg-secondary: #111827;
+  --color-bg-card: #1a1f2e;
+  --color-bg-card-hover: #232940;
+
+  --color-accent-primary: #6366f1;
+  --color-accent-secondary: #818cf8;
+  --color-accent-blue: #3b82f6;
+  --color-accent-cyan: #06b6d4;
+  --color-accent-green: #10b981;
+  --color-accent-red: #ef4444;
+  --color-accent-amber: #f59e0b;
+
+  --color-text-primary: #f1f5f9;
+  --color-text-secondary: #94a3b8;
+  --color-text-muted: #64748b;
+}
+
+/* ---------------------------------------------------------
+   Base Layer: Global element styles
+   --------------------------------------------------------- */
+@layer base {
+  :root {
+    --bg-glass: rgba(26, 31, 46, 0.7);
+    --border-subtle: rgba(148, 163, 184, 0.1);
+    --border-active: rgba(99, 102, 241, 0.4);
+    --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.3);
+    --shadow-glow: 0 0 30px rgba(99, 102, 241, 0.15);
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-text-primary);
+    font-family: var(--font-inter, 'Inter', system-ui, -apple-system, sans-serif);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    min-height: 100vh;
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    width: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--color-bg-primary);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-text-muted);
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-text-secondary);
+  }
+}
+
+/* ---------------------------------------------------------
+   Keyframe Animations
+   --------------------------------------------------------- */
+@keyframes blink-caret {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.5); opacity: 0.5; }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+/* ---------------------------------------------------------
+   Custom Utility Classes (Tailwind v4 @utility syntax)
+   --------------------------------------------------------- */
+@utility glass-card {
+  background: var(--bg-glass);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-subtle);
+  border-radius: 16px;
+}
+
+@utility glow-border {
+  box-shadow: var(--shadow-glow);
+  border: 1px solid var(--border-active);
+}
+
+@utility typing-cursor {
+  &::after {
+    content: '▊';
+    animation: blink-caret 0.8s infinite;
+    color: var(--color-accent-primary);
+    margin-left: 2px;
+  }
+}
+
+@utility animate-fade-in {
+  animation: fadeInUp 0.4s ease-out forwards;
+}
+
+@utility pulse-dot {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+@utility shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--color-bg-card) 25%,
+    var(--color-bg-card-hover) 50%,
+    var(--color-bg-card) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+/* ---------------------------------------------------------
+   New Animations for Redesign
+   --------------------------------------------------------- */
+@keyframes ringFill {
+  from { stroke-dashoffset: 283; }
+}
+
+@keyframes countUp {
+  from { opacity: 0; transform: scale(0.5); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(24px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes pulseGlow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.4); }
+  50% { box-shadow: 0 0 20px 4px rgba(99, 102, 241, 0.15); }
+}
+
+@utility animate-count-up {
+  animation: countUp 0.6s ease-out forwards;
+}
+
+@utility animate-slide-in {
+  animation: slideInRight 0.5s ease-out forwards;
+}
+
+@utility animate-pulse-glow {
+  animation: pulseGlow 2s ease-in-out infinite;
+}
+
+@utility gradient-text {
+  background: linear-gradient(135deg, var(--color-accent-primary), var(--color-accent-cyan));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+@utility animate-fade-up {
+  animation: fadeInUp 0.5s ease-out forwards;
+}
+
+/* ---------------------------------------------------------
+   Globe Section Animations
+   --------------------------------------------------------- */
+@keyframes slideInPanel {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes markerPulse {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.4); }
+  50% { transform: scale(1.3); box-shadow: 0 0 12px 4px rgba(99, 102, 241, 0.15); }
+}
+
