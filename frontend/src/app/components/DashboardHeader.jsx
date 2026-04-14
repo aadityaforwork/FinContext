@@ -15,15 +15,7 @@ export default function DashboardHeader({ onSearch }) {
   };
 
   return (
-    <header
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        padding: "16px 24px",
-        borderBottom: "1px solid var(--border-subtle)",
-      }}
-    >
+    <header className="header-responsive">
       <div>
         <h2 style={{ fontSize: "24px", fontWeight: 700, color: "var(--color-text-primary)" }}>
           Dashboard
@@ -33,14 +25,14 @@ export default function DashboardHeader({ onSearch }) {
         </p>
       </div>
 
-      <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-        <div style={{ position: "relative" }}>
+      <div className="header-actions">
+        <div className="header-search" style={{ position: "relative" }}>
           <input
             type="text"
             placeholder="Search tickers..."
             onKeyDown={handleKeyDown}
             style={{
-              width: "260px",
+              width: "100%",
               padding: "8px 16px 8px 38px",
               borderRadius: "12px",
               fontSize: "13px",

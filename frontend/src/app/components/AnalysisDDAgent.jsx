@@ -146,7 +146,7 @@ export default function AnalysisDDAgent({ ticker, stockName }) {
               <span style={{ padding: "4px 8px", borderRadius: "4px", fontSize: "10px", fontWeight: 700, background: "var(--color-bg-tertiary)", color: "var(--color-text-secondary)", letterSpacing: "1px", textTransform: "uppercase" }}>ELI5 Explainer</span>
               <h4 style={{ fontSize: "22px", fontWeight: 700, color: "var(--color-text-primary)", marginTop: "12px" }}>{result.company} ({ticker})</h4>
             </div>
-            <div style={{ display: "flex", gap: "12px" }}>
+            <div className="dd-header-actions">
               <button
                  onClick={() => setShowVideo(true)}
                  style={{ background: "var(--color-text-primary)", color: "var(--color-bg-primary)", border: "none", padding: "6px 16px", borderRadius: "8px", fontSize: "12px", fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: "6px", transition: "all 0.2s" }}
@@ -164,7 +164,7 @@ export default function AnalysisDDAgent({ ticker, stockName }) {
             </div>
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: "24px", marginBottom: "24px" }}>
+          <div className="responsive-grid-dd-hero" style={{ marginBottom: "24px" }}>
             {/* Health Score */}
             <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.2)", borderRadius: "16px", padding: "24px", border: "1px solid var(--border-subtle)" }}>
               <span style={{ fontSize: "12px", color: "var(--color-text-muted)", textTransform: "uppercase", letterSpacing: "1px", fontWeight: 600, marginBottom: "8px" }}>Health Score</span>
@@ -195,7 +195,7 @@ export default function AnalysisDDAgent({ ticker, stockName }) {
             </div>
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "24px" }}>
+          <div className="responsive-grid-2">
             {/* Pros */}
             <div style={{ background: "rgba(16,185,129,0.05)", border: "1px solid rgba(16,185,129,0.1)", borderRadius: "12px", padding: "20px" }}>
               <h5 style={{ fontSize: "14px", color: "var(--color-accent-green)", fontWeight: 700, marginBottom: "16px", display: "flex", alignItems: "center", gap: "8px" }}>

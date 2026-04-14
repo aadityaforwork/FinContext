@@ -232,7 +232,7 @@ export default function GlobeNewsSection() {
         </div>
         <div style={{ flex: 1 }} />
         {/* Market Status Bar */}
-        <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+        <div className="market-status-bar">
           {Object.entries(COUNTRY_INFO).slice(0, 5).map(([code, c]) => (
             <div key={code} title={`${c.name}: ${marketStatus[code] ? "Market Open" : "Market Closed"}`}
               style={{ display: "flex", alignItems: "center", gap: "3px", padding: "3px 8px", borderRadius: "6px", background: "rgba(17,24,39,0.6)", border: "1px solid var(--border-subtle)", fontSize: "10px", cursor: "pointer" }}
@@ -249,10 +249,7 @@ export default function GlobeNewsSection() {
         </div>
       </div>
 
-      <div style={{
-        display: "flex",
-        flexDirection: selected ? "row" : "column",
-        alignItems: selected ? "stretch" : "center",
+      <div className={`globe-container ${selected ? '' : 'no-selection'}`} style={{
         background: "linear-gradient(135deg, rgba(6,8,18,0.95), rgba(10,14,28,0.9))",
         backdropFilter: "blur(20px)",
         border: "1px solid rgba(99,102,241,0.12)",
@@ -262,12 +259,10 @@ export default function GlobeNewsSection() {
         boxShadow: "0 4px 40px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.03)",
       }}>
         {/* LEFT: Globe */}
-        <div style={{
+        <div className={`globe-left ${selected ? '' : 'full-width'}`} style={{
           display: "flex", flexDirection: "column",
           alignItems: "center", justifyContent: "center",
           padding: "14px", position: "relative",
-          flexShrink: 0,
-          width: selected ? "340px" : "100%",
           borderRight: selected ? "1px solid rgba(99,102,241,0.1)" : "none",
         }}>
           {/* Globe Controls */}
@@ -509,7 +504,7 @@ export default function GlobeNewsSection() {
 
         {/* RIGHT: News + Impact Panel */}
         {selected && info && (
-          <div style={{ padding: "16px 18px", overflowY: "auto", overflowX: "hidden", maxHeight: "520px", minWidth: 0, flex: 1, animation: "fadeSlideUp 0.35s ease-out" }}>
+          <div className="globe-right" style={{ padding: "16px 18px", overflowY: "auto", overflowX: "hidden", maxHeight: "520px", animation: "fadeSlideUp 0.35s ease-out" }}>
             {/* Panel Header */}
             <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "18px" }}>
               <div style={{

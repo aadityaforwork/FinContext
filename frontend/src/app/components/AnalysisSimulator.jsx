@@ -44,7 +44,7 @@ export default function AnalysisSimulator({ ticker, stockName }) {
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: "12px", marginBottom: "24px" }}>
+      <div className="simulator-row" style={{ marginBottom: "24px" }}>
         <input
           type="text"
           placeholder="e.g., Crude oil hits $100/bbl, or RBI cuts rates by 50 bps..."

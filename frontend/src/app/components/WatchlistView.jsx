@@ -26,7 +26,7 @@ export default function WatchlistView({ onNavigate }) {
   return (
     <div>
       {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "24px" }}>
+      <div className="section-header">
         <div>
           <h2 style={{ fontSize: "24px", fontWeight: 700, color: "var(--color-text-primary)" }}>Watchlist</h2>
           <p style={{ fontSize: "13px", color: "var(--color-text-muted)", marginTop: "4px" }}>

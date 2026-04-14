@@ -211,3 +211,364 @@
   50% { transform: scale(1.3); box-shadow: 0 0 12px 4px rgba(99, 102, 241, 0.15); }
 }
 
+/* ---------------------------------------------------------
+   Responsive Layout System
+   --------------------------------------------------------- */
+
+/* --- App Shell --- */
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+  background: var(--color-bg-primary);
+}
+
+.main-content {
+  flex: 1;
+  margin-left: 240px;
+  min-width: 0;
+}
+
+.content-area {
+  padding: 24px;
+  overflow-x: hidden;
+}
+
+/* --- Sidebar --- */
+.sidebar-desktop {
+  display: flex;
+}
+
+.sidebar-mobile {
+  display: none;
+}
+
+/* --- Responsive Grid Utilities --- */
+.responsive-grid-4 {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+
+.responsive-grid-3 {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+
+.responsive-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+.responsive-grid-sidebar {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 24px;
+}
+
+.responsive-grid-holdings {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 24px;
+}
+
+.responsive-grid-intel {
+  display: grid;
+  grid-template-columns: 280px 1fr 1fr;
+  gap: 20px;
+}
+
+.responsive-grid-dd-hero {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: 24px;
+}
+
+/* --- Header --- */
+.header-responsive {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.header-search {
+  width: 260px;
+}
+
+/* --- Globe --- */
+.globe-container {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+}
+
+.globe-container.no-selection {
+  flex-direction: column;
+  align-items: center;
+}
+
+.globe-left {
+  flex-shrink: 0;
+  width: 340px;
+}
+
+.globe-left.full-width {
+  width: 100%;
+}
+
+.globe-right {
+  flex: 1;
+  min-width: 0;
+}
+
+.market-status-bar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+/* --- Portfolio --- */
+.portfolio-header-actions {
+  display: flex;
+  gap: 10px;
+}
+
+/* --- Analysis result layout --- */
+.valuation-result {
+  display: flex;
+  gap: 32px;
+  align-items: stretch;
+}
+
+.valuation-left {
+  flex: 1;
+  border-right: 1px solid var(--border-subtle);
+  padding-right: 32px;
+}
+
+.valuation-right {
+  flex: 1.5;
+}
+
+/* --- Simulator row --- */
+.simulator-row {
+  display: flex;
+  gap: 12px;
+}
+
+.simulator-input {
+  flex: 1;
+}
+
+/* --- DD Agent header --- */
+.dd-header-actions {
+  display: flex;
+  gap: 12px;
+}
+
+/* --- Financial statement tabs --- */
+.fin-tabs {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.fin-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.fin-tab-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+/* --- Section header with actions --- */
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+}
+
+/* --- Modal --- */
+.modal-content {
+  width: 420px;
+  max-width: 90vw;
+}
+
+/* ---------------------------------------------------------
+   TABLET: 769px — 1024px
+   --------------------------------------------------------- */
+@media (max-width: 1024px) and (min-width: 769px) {
+  .main-content {
+    margin-left: 72px;
+  }
+
+  .content-area {
+    padding: 20px;
+  }
+
+  .responsive-grid-4 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .responsive-grid-3 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .responsive-grid-intel {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .responsive-grid-holdings {
+    grid-template-columns: 1fr;
+  }
+
+  .globe-left {
+    width: 280px;
+  }
+
+  .header-search {
+    width: 200px;
+  }
+}
+
+/* ---------------------------------------------------------
+   MOBILE: ≤ 768px
+   --------------------------------------------------------- */
+@media (max-width: 768px) {
+  .main-content {
+    margin-left: 0;
+    padding-bottom: 72px;
+  }
+
+  .content-area {
+    padding: 16px;
+  }
+
+  .sidebar-desktop {
+    display: none;
+  }
+
+  .sidebar-mobile {
+    display: flex;
+  }
+
+  /* --- All grids become single column --- */
+  .responsive-grid-4,
+  .responsive-grid-3,
+  .responsive-grid-2,
+  .responsive-grid-sidebar,
+  .responsive-grid-holdings,
+  .responsive-grid-intel,
+  .responsive-grid-dd-hero {
+    grid-template-columns: 1fr;
+  }
+
+  .responsive-grid-4 { gap: 12px; }
+  .responsive-grid-3 { gap: 12px; }
+  .responsive-grid-2 { gap: 16px; }
+
+  /* --- Header --- */
+  .header-responsive {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 14px 16px;
+  }
+
+  .header-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .header-search {
+    width: 100%;
+    flex: 1;
+  }
+
+  /* --- Globe --- */
+  .globe-container,
+  .globe-container.no-selection {
+    flex-direction: column;
+  }
+
+  .globe-left,
+  .globe-left.full-width {
+    width: 100%;
+  }
+
+  .globe-right {
+    max-height: none;
+  }
+
+  .market-status-bar {
+    display: none;
+  }
+
+  /* --- Portfolio --- */
+  .portfolio-header-actions {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .section-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  /* --- Valuation result --- */
+  .valuation-result {
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  .valuation-left {
+    border-right: none;
+    padding-right: 0;
+    border-bottom: 1px solid var(--border-subtle);
+    padding-bottom: 20px;
+  }
+
+  /* --- Simulator --- */
+  .simulator-row {
+    flex-direction: column;
+  }
+
+  /* --- DD Agent header --- */
+  .dd-header-actions {
+    flex-wrap: wrap;
+  }
+
+  /* --- Financial tabs --- */
+  .fin-tab-bar {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 16px;
+  }
+
+  .fin-tabs {
+    width: 100%;
+  }
+
+  /* --- Modal --- */
+  .modal-content {
+    width: 95vw;
+  }
+}

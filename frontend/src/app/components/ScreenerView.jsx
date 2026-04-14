@@ -103,7 +103,7 @@ export default function ScreenerView({ onNavigate }) {
   return (
     <div>
       {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "24px" }}>
+      <div className="section-header">
         <div>
           <h2 style={{ fontSize: "24px", fontWeight: 700, color: "var(--color-text-primary)" }}>
             Stock Screener

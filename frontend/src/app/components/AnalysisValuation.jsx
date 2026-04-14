@@ -44,7 +44,7 @@ export default function AnalysisValuation({ ticker }) {
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: "16px", marginBottom: "20px" }}>
+      <div className="simulator-row" style={{ marginBottom: "20px" }}>
         <textarea
           placeholder='e.g., "Factory fire reported at Pune plant. Expected 2 month shutdown." or "Secures massive $2B order from European rail network..."'
           value={text}
@@ -75,13 +75,12 @@ export default function AnalysisValuation({ ticker }) {
       {error && <div style={{ color: "var(--color-accent-red)", fontSize: "13px", padding: "12px", background: "rgba(239,68,68,0.1)", borderRadius: "8px" }}>{error}</div>}
 
       {result && (
-        <div className="animate-fade-up" style={{ 
+        <div className="animate-fade-up valuation-result" style={{ 
           background: "linear-gradient(to right, rgba(99,102,241,0.05), rgba(99,102,241,0.01))", 
           border: "1px solid rgba(99,102,241,0.2)", borderRadius: "16px", padding: "24px",
-          display: "flex", gap: "32px", alignItems: "stretch"
         }}>
           {/* Sentiment & Action Dial */}
-          <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", textAlign: "center", borderRight: "1px solid var(--border-subtle)", paddingRight: "32px" }}>
+          <div className="valuation-left" style={{ display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", textAlign: "center" }}>
             <span style={{ fontSize: "12px", color: "var(--color-text-muted)", textTransform: "uppercase", letterSpacing: "1px", fontWeight: 600 }}>Algorithmic Action</span>
             <div style={{ 
               fontSize: "28px", fontWeight: 800, margin: "12px 0",
@@ -106,7 +105,7 @@ export default function AnalysisValuation({ ticker }) {
           </div>
 
           {/* Extracted Metrics */}
-          <div style={{ flex: 1.5, display: "flex", flexDirection: "column", justifyContent: "center" }}>
+          <div className="valuation-right" style={{ display: "flex", flexDirection: "column", justifyContent: "center" }}>
             <span style={{ fontSize: "12px", color: "var(--color-text-muted)", textTransform: "uppercase", letterSpacing: "1px", fontWeight: 600, marginBottom: "16px" }}>Quantitative Output</span>
             
             <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>

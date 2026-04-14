@@ -278,7 +278,7 @@ export default function CompanyView({ ticker: initialTicker, onNavigate }) {
             </div>
 
             {/* 52W Range + Day Range */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginTop: "20px" }}>
+            <div className="responsive-grid-2" style={{ marginTop: "20px" }}>
               <RangeBar low={overview.low_52w} current={overview.current_price} high={overview.high_52w} label="52 Week Range" />
               <RangeBar low={overview.day_low} current={overview.current_price} high={overview.day_high} label="Day Range" />
             </div>
@@ -287,7 +287,7 @@ export default function CompanyView({ ticker: initialTicker, onNavigate }) {
           {/* =============== KEY RATIOS =============== */}
           <div>
             <h3 style={{ fontSize: "13px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--color-text-muted)", marginBottom: "12px" }}>Key Ratios</h3>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "10px" }}>
+            <div className="responsive-grid-4" style={{ gap: "10px" }}>
               <RatioCard label="P/E Ratio" value={overview.pe_ratio} subtitle="Trailing TTM" />
               <RatioCard label="P/B Ratio" value={overview.pb_ratio} subtitle="Price to Book" />
               <RatioCard label="EPS" value={overview.eps ? `₹${overview.eps}` : null} subtitle="Earnings/Share" />
@@ -303,7 +303,7 @@ export default function CompanyView({ ticker: initialTicker, onNavigate }) {
           {ratios && (
             <div>
               <h3 style={{ fontSize: "13px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--color-text-muted)", marginBottom: "12px" }}>Detailed Analysis</h3>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: "16px" }}>
+              <div className="responsive-grid-4" style={{ gap: "16px" }}>
                 {/* Valuation */}
                 <div className="glass-card" style={{ padding: "18px" }}>
                   <h4 style={{ fontSize: "11px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--color-accent-primary)", marginBottom: "12px" }}>📈 Valuation</h4>
@@ -353,8 +353,8 @@ export default function CompanyView({ ticker: initialTicker, onNavigate }) {
 
           {/* =============== FINANCIAL STATEMENTS =============== */}
           <div className="glass-card" style={{ overflow: "hidden" }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px", borderBottom: "1px solid var(--border-subtle)" }}>
-              <div style={{ display: "flex", gap: "4px" }}>
+            <div className="fin-tab-bar">
+              <div className="fin-tabs">
                 {[
                   { id: "income_statement", label: "Income Statement" },
                   { id: "balance_sheet", label: "Balance Sheet" },
@@ -446,7 +446,7 @@ export default function CompanyView({ ticker: initialTicker, onNavigate }) {
 
           {/* =============== SHAREHOLDING =============== */}
           {shareholding && (shareholding.major_holders?.length > 0 || shareholding.top_institutions?.length > 0) && (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
+            <div className="responsive-grid-2">
               {/* Major Holders */}
               {shareholding.major_holders?.length > 0 && (
                 <div className="glass-card" style={{ padding: "20px" }}>

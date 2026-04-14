@@ -223,7 +223,7 @@ export default function AnalysisView({ initialTicker }) {
           {deepDive && (
             <>
               {/* Row 1: Moat + Financial Health */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
+              <div className="responsive-grid-2">
                 {/* Competitive Moat */}
                 <div className="glass-card animate-fade-in" style={{ padding: "24px" }}>
                   <h4 style={{ fontSize: "12px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "var(--color-text-muted)", marginBottom: "16px" }}>Competitive Moat</h4>
@@ -261,7 +261,7 @@ export default function AnalysisView({ initialTicker }) {
               </div>
 
               {/* Row 2: Catalyst Timeline + Smart Verdict */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
+              <div className="responsive-grid-2">
                 {/* Catalyst Radar */}
                 <div className="glass-card animate-fade-in" style={{ padding: "24px" }}>
                   <h4 style={{ fontSize: "12px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "var(--color-text-muted)", marginBottom: "16px", display: "flex", alignItems: "center", gap: "6px" }}>
@@ -319,7 +319,7 @@ export default function AnalysisView({ initialTicker }) {
                   <h4 style={{ fontSize: "12px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "var(--color-accent-cyan)", marginBottom: "16px", display: "flex", alignItems: "center", gap: "6px" }}>
                     🔄 Consider These Alternatives
                   </h4>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+                  <div className="responsive-grid-2">
                     {deepDive.alternatives.map((alt, i) => (
                       <div key={i} style={{ padding: "16px", background: "rgba(6,182,212,0.05)", border: "1px solid rgba(6,182,212,0.15)", borderRadius: "12px", cursor: "pointer", transition: "all 0.2s" }}
                         onClick={() => { setTicker(alt.ticker); setSearchQuery(alt.ticker); setStockMeta(null); }}

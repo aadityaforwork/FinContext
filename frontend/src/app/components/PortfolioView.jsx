@@ -181,14 +181,14 @@ export default function PortfolioView({ onNavigate }) {
   return (
     <div>
       {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "24px" }}>
+      <div className="section-header">
         <div>
           <h2 style={{ fontSize: "24px", fontWeight: 700, color: "var(--color-text-primary)" }}>Smart Portfolio</h2>
           <p style={{ fontSize: "13px", color: "var(--color-text-muted)", marginTop: "4px" }}>
             AI-powered portfolio intelligence & analysis
           </p>
         </div>
-        <div style={{ display: "flex", gap: "10px" }}>
+        <div className="portfolio-header-actions">
           <button onClick={handleConnectZerodha}
             style={{ padding: "10px 16px", borderRadius: "10px", fontSize: "13px", fontWeight: 600, border: "1px solid var(--color-accent-primary)", cursor: "pointer", background: "rgba(99,102,241,0.1)", color: "var(--color-accent-primary)" }}
           >⚡ Kite Sync</button>
@@ -217,7 +217,7 @@ export default function PortfolioView({ onNavigate }) {
       ) : (
         <>
           {/* Summary Cards */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "16px", marginBottom: "24px" }}>
+          <div className="responsive-grid-4" style={{ marginBottom: "24px" }}>
             {[
               { label: "Total Invested", value: `₹${portfolio.total_invested.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`, color: "var(--color-text-primary)" },
               { label: "Current Value", value: `₹${portfolio.current_value.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`, color: "var(--color-accent-secondary)" },
@@ -274,7 +274,7 @@ export default function PortfolioView({ onNavigate }) {
           {intel && (
             <div style={{ marginBottom: "24px", display: "flex", flexDirection: "column", gap: "20px" }}>
               {/* Health Score + Breakdown */}
-              <div style={{ display: "grid", gridTemplateColumns: "280px 1fr 1fr", gap: "20px" }}>
+              <div className="responsive-grid-intel">
                 <div className="glass-card" style={{ padding: "24px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", position: "relative" }}>
                   <ScoreGauge score={intel.portfolio_health_score} size={130} label="Portfolio Health" />
                 </div>
@@ -315,7 +315,7 @@ export default function PortfolioView({ onNavigate }) {
                   <h4 style={{ fontSize: "12px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "var(--color-accent-cyan)", marginBottom: "16px", display: "flex", alignItems: "center", gap: "6px" }}>
                     💡 Recommended Stocks
                   </h4>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "16px" }}>
+                  <div className="responsive-grid-3">
                     {intel.recommendations.map((rec, i) => (
                       <div key={i} style={{ padding: "16px", background: "rgba(6,182,212,0.05)", border: "1px solid rgba(6,182,212,0.15)", borderRadius: "12px", cursor: "pointer", transition: "all 0.2s" }}
                         onClick={() => onNavigate?.("analysis", rec.ticker)}
@@ -344,9 +344,10 @@ export default function PortfolioView({ onNavigate }) {
           )}
 
           {/* Main Grid: Holdings Table + Allocation Chart */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 320px", gap: "24px" }}>
+          <div className="responsive-grid-holdings">
             {/* Holdings Table */}
             <div className="glass-card" style={{ overflow: "hidden" }}>
+              <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
                 <thead>
                   <tr style={{ borderBottom: "1px solid var(--border-subtle)" }}>
@@ -396,6 +397,7 @@ export default function PortfolioView({ onNavigate }) {
                   })}
                 </tbody>
               </table>
+              </div>
             </div>
 
             {/* Allocation Chart */}
@@ -436,7 +438,7 @@ export default function PortfolioView({ onNavigate }) {
       {showAddModal && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}
           onClick={() => setShowAddModal(false)}>
-          <div className="glass-card" style={{ width: "420px", padding: "28px" }}
+          <div className="modal-content glass-card" style={{ padding: "28px" }}
             onClick={(e) => e.stopPropagation()}>
             <h3 style={{ fontSize: "18px", fontWeight: 700, color: "var(--color-text-primary)", marginBottom: "20px" }}>Add Position</h3>
             <form onSubmit={handleAddSubmit}>

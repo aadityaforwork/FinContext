@@ -41,13 +41,13 @@ export default function App() {
   };
 
   return (
-    <div style={{ display: "flex", minHeight: "100vh", background: "var(--color-bg-primary)" }}>
+    <div className="app-shell">
       <Sidebar activeNav={activeNav} onNavChange={(nav) => { setActiveNav(nav); setAnalysisTicker(null); setCompanyTicker(null); }} />
 
-      <main style={{ flex: 1, marginLeft: "240px" }}>
+      <main className="main-content">
         <DashboardHeader onSearch={(q) => { setActiveNav("screener"); }} />
 
-        <div style={{ padding: "24px", overflowX: "hidden" }}>
+        <div className="content-area">
           {activeNav === "dashboard" && <DashboardView onNavigate={handleNavigate} />}
           {activeNav === "screener" && <ScreenerView onNavigate={handleNavigate} />}
           {activeNav === "watchlist" && <WatchlistView onNavigate={handleNavigate} />}
@@ -93,7 +93,7 @@ function DashboardView({ onNavigate }) {
   return (
     <>
       {/* Market Overview Cards */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "16px", marginBottom: "24px" }}>
+      <div className="responsive-grid-4" style={{ marginBottom: "24px" }}>
         {indices.map((idx) => (
           <div key={idx.label} className="glass-card" style={{ padding: "16px" }}>
             <p style={{ fontSize: "10px", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--color-text-muted)" }}>{idx.label}</p>
@@ -107,7 +107,7 @@ function DashboardView({ onNavigate }) {
       <GlobeNewsSection />
 
       {/* Main Grid */}
-      <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: "24px" }}>
+      <div className="responsive-grid-sidebar">
         {/* Watchlist */}
         <div>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "16px" }}>
