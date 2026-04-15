@@ -57,7 +57,8 @@ def _get_price(ticker: str) -> tuple[float, float]:
         return (0.0, 0.0)
 
 
-@router.get("/", response_model=list[WatchlistItemResponse])
+@router.get("", response_model=list[WatchlistItemResponse])
+@router.get("/", response_model=list[WatchlistItemResponse], include_in_schema=False)
 async def get_watchlist(db: AsyncSession = Depends(get_db)):
     """Get all watchlisted stocks with live prices."""
     result = await db.execute(select(WatchlistItem))

@@ -149,10 +149,32 @@ def get_market_indices() -> list[dict]:
     for label, symbol in INDEX_MAP.items():
         try:
             tk = yf.Ticker(symbol)
-            info = tk.fast_info
 
-            price = float(info.last_price) if hasattr(info, 'last_price') else 0
-            prev = float(info.previous_close) if hasattr(info, 'previous_close') else 0
+            price = 0.0
+            prev = 0.0
+
+            # Try fast_info first
+            try:
+                info = tk.fast_info
+                if info is not None:
+                    price = float(getattr(info, 'last_price', 0) or 0)
+                    prev = float(getattr(info, 'previous_close', 0) or 0)
+            except Exception:
+                pass
+
+            # Fallback: use recent history if fast_info didn't work
+            if price == 0.0:
+                try:
+                    hist = tk.history(period="5d")
+                    if not hist.empty and len(hist) >= 1:
+                        price = float(hist["Close"].iloc[-1])
+                        prev = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else price
+                except Exception:
+                    pass
+
+            if price == 0.0:
+                raise ValueError("Could not fetch price data")
+
             change_pct = ((price - prev) / prev * 100) if prev else 0
 
             # Format the value
@@ -164,7 +186,7 @@ def get_market_indices() -> list[dict]:
             results.append({
                 "label": label,
                 "value": value,
-                "change": f"{'+' if change_pct >= 0 else ''}{change_pct:.2f}%",
+                "change": f"{'+'if change_pct >= 0 else ''}{change_pct:.2f}%",
                 "positive": change_pct >= 0,
             })
         except Exception as e:
