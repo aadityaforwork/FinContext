@@ -16,7 +16,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
-from app.db.models import PortfolioPosition
+from app.db.models import PortfolioPosition, User
+from app.core.deps import get_current_user
 from app.nse_universe import TICKER_TO_META
 
 load_dotenv()
@@ -110,9 +111,14 @@ Respond ONLY with a valid JSON object with these exact keys:
 
 
 @router.post("/portfolio")
-async def portfolio_intelligence(db: AsyncSession = Depends(get_db)):
+async def portfolio_intelligence(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Stream AI-powered portfolio intelligence as SSE."""
-    result = await db.execute(select(PortfolioPosition))
+    result = await db.execute(
+        select(PortfolioPosition).where(PortfolioPosition.user_id == current_user.id)
+    )
     rows = result.scalars().all()
 
     if not rows:

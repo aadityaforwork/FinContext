@@ -2,6 +2,7 @@
 Portfolio Router
 ================
 CRUD endpoints for portfolio management with SQLite persistence.
+Each user has their own portfolio.
 """
 
 from fastapi import APIRouter, HTTPException, Depends
@@ -12,7 +13,8 @@ from datetime import datetime, timezone
 import yfinance as yf
 from cachetools import TTLCache
 from app.db import get_db
-from app.db.models import PortfolioPosition
+from app.db.models import PortfolioPosition, User
+from app.core.deps import get_current_user
 from app.nse_universe import TICKER_TO_YF, TICKER_TO_META
 
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
@@ -86,9 +88,14 @@ def _get_live_price(ticker: str) -> tuple[float, float]:
 # Endpoints
 # ---------------------------------------------------------------------------
 @router.get("/", response_model=PortfolioSummary)
-async def get_portfolio(db: AsyncSession = Depends(get_db)):
+async def get_portfolio(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Get all portfolio positions with live P&L calculation."""
-    result = await db.execute(select(PortfolioPosition))
+    result = await db.execute(
+        select(PortfolioPosition).where(PortfolioPosition.user_id == current_user.id)
+    )
     rows = result.scalars().all()
 
     positions = []
@@ -153,15 +160,24 @@ async def get_portfolio(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/add")
-async def add_position(req: AddPositionRequest, db: AsyncSession = Depends(get_db)):
+async def add_position(
+    req: AddPositionRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Add a stock position to the portfolio (averages if already exists)."""
     ticker = req.ticker.upper()
 
     if ticker not in TICKER_TO_YF:
         raise HTTPException(status_code=404, detail=f"Ticker '{ticker}' not found in NSE universe.")
 
-    # Check if position exists
-    result = await db.execute(select(PortfolioPosition).where(PortfolioPosition.ticker == ticker))
+    # Check if position exists for this user
+    result = await db.execute(
+        select(PortfolioPosition).where(
+            PortfolioPosition.user_id == current_user.id,
+            PortfolioPosition.ticker == ticker,
+        )
+    )
     existing = result.scalar_one_or_none()
 
     if existing:
@@ -174,6 +190,7 @@ async def add_position(req: AddPositionRequest, db: AsyncSession = Depends(get_d
         return {"message": f"Updated position for {ticker}", "action": "averaged", "ticker": ticker}
     else:
         new_pos = PortfolioPosition(
+            user_id=current_user.id,
             ticker=ticker,
             quantity=req.quantity,
             buy_price=req.buy_price,
@@ -183,12 +200,26 @@ async def add_position(req: AddPositionRequest, db: AsyncSession = Depends(get_d
 
 
 @router.delete("/{ticker}")
-async def remove_position(ticker: str, db: AsyncSession = Depends(get_db)):
+async def remove_position(
+    ticker: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Remove a stock from the portfolio."""
     ticker = ticker.upper()
-    result = await db.execute(select(PortfolioPosition).where(PortfolioPosition.ticker == ticker))
+    result = await db.execute(
+        select(PortfolioPosition).where(
+            PortfolioPosition.user_id == current_user.id,
+            PortfolioPosition.ticker == ticker,
+        )
+    )
     existing = result.scalar_one_or_none()
     if not existing:
         raise HTTPException(status_code=404, detail=f"{ticker} not in portfolio.")
-    await db.execute(delete(PortfolioPosition).where(PortfolioPosition.ticker == ticker))
+    await db.execute(
+        delete(PortfolioPosition).where(
+            PortfolioPosition.user_id == current_user.id,
+            PortfolioPosition.ticker == ticker,
+        )
+    )
     return {"message": f"Removed {ticker} from portfolio", "ticker": ticker}
