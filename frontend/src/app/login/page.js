@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "../context/AuthContext";
@@ -11,7 +11,8 @@ import AuthCard, {
   GoogleIcon,
 } from "../components/AuthCard";
 
-export default function LoginPage() {
+// useSearchParams() must live inside a Suspense boundary for static builds
+function LoginForm() {
   const { user, loading, login, googleLogin, providers } = useAuth();
   const router = useRouter();
   const search = useSearchParams();
@@ -125,6 +126,14 @@ export default function LoginPage() {
         </Link>
       </p>
     </AuthCard>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense>
+      <LoginForm />
+    </Suspense>
   );
 }
 
