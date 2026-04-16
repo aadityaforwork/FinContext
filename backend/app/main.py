@@ -10,8 +10,20 @@ Run with: uvicorn app.main:app --reload --port 8000
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import stocks, market, portfolio, watchlist, analysis, zerodha, portfolio_intelligence, global_news, company_data
+from app.routers import (
+    stocks,
+    market,
+    portfolio,
+    watchlist,
+    analysis,
+    zerodha,
+    portfolio_intelligence,
+    global_news,
+    company_data,
+    auth,
+)
 from app.db import init_db
+from app.core.config import settings
 
 
 # ---------------------------------------------------------------------------
@@ -19,27 +31,10 @@ from app.db import init_db
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize DB tables on startup, seed default watchlist."""
+    """Initialize DB tables on startup."""
     await init_db()
-    await _seed_default_watchlist()
     yield  # app runs here
     # shutdown: nothing to clean up for SQLite
-
-
-async def _seed_default_watchlist():
-    """Pre-populate watchlist with default tickers if table is empty."""
-    from sqlalchemy import select, func
-    from app.db import async_session
-    from app.db.models import WatchlistItem
-
-    async with async_session() as session:
-        result = await session.execute(select(func.count(WatchlistItem.id)))
-        count = result.scalar()
-        if count == 0:
-            defaults = ["RECLTD", "RVNL", "HBLPOWER", "TATAMOTORS", "RELIANCE"]
-            for ticker in defaults:
-                session.add(WatchlistItem(ticker=ticker))
-            await session.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -53,19 +48,20 @@ app = FastAPI(
         "Explains why stocks are moving by synthesizing global macro trends, "
         "local news, and sector updates using a RAG pipeline."
     ),
-    version="0.3.0",
+    version="0.4.0",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan,
 )
 
 # ---------------------------------------------------------------------------
-# CORS Middleware — allow Next.js frontend
+# CORS Middleware — allow Next.js frontend with credentials (cookies)
 # ---------------------------------------------------------------------------
+# NOTE: with credentials we cannot use "*" — must list explicit origins.
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -75,6 +71,7 @@ app.add_middleware(
 # Router Registration
 # ---------------------------------------------------------------------------
 
+app.include_router(auth.router)
 app.include_router(stocks.router)
 app.include_router(market.router)
 app.include_router(portfolio.router)
@@ -94,7 +91,7 @@ async def health_check():
     """Health check endpoint for monitoring and load balancers."""
     return {
         "status": "healthy",
-        "version": "0.3.0",
+        "version": "0.4.0",
         "service": "fincontext-api",
         "database": "sqlite",
     }

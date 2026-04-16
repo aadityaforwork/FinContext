@@ -1,6 +1,8 @@
 "use client";
 
-export default function DashboardHeader({ onSearch }) {
+import { useState, useRef, useEffect } from "react";
+
+export default function DashboardHeader({ onSearch, user, onLogout }) {
   const today = new Date().toLocaleDateString("en-IN", {
     weekday: "long",
     year: "numeric",
@@ -8,11 +10,30 @@ export default function DashboardHeader({ onSearch }) {
     day: "numeric",
   });
 
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef(null);
+
+  useEffect(() => {
+    function onDocClick(e) {
+      if (menuRef.current && !menuRef.current.contains(e.target)) {
+        setMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, []);
+
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && e.target.value.trim()) {
       onSearch?.(e.target.value.trim());
     }
   };
+
+  const initial =
+    (user?.name && user.name.trim()[0]) ||
+    (user?.email && user.email[0]) ||
+    "A";
+  const displayName = user?.name || user?.email || "";
 
   return (
     <header className="header-responsive">
@@ -101,21 +122,90 @@ export default function DashboardHeader({ onSearch }) {
           />
         </button>
 
-        <div
-          style={{
-            width: "36px",
-            height: "36px",
-            borderRadius: "50%",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: "14px",
-            fontWeight: 700,
-            color: "white",
-            background: "linear-gradient(135deg, var(--color-accent-primary), var(--color-accent-cyan))",
-          }}
-        >
-          A
+        {/* User menu */}
+        <div ref={menuRef} style={{ position: "relative" }}>
+          <button
+            type="button"
+            onClick={() => setMenuOpen((v) => !v)}
+            title={displayName}
+            style={{
+              width: "36px",
+              height: "36px",
+              borderRadius: "50%",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: "14px",
+              fontWeight: 700,
+              color: "white",
+              border: "none",
+              cursor: "pointer",
+              overflow: "hidden",
+              padding: 0,
+              background:
+                "linear-gradient(135deg, var(--color-accent-primary), var(--color-accent-cyan))",
+            }}
+          >
+            {user?.avatar_url ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={user.avatar_url}
+                alt={displayName}
+                style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                referrerPolicy="no-referrer"
+              />
+            ) : (
+              <span style={{ textTransform: "uppercase" }}>{initial}</span>
+            )}
+          </button>
+
+          {menuOpen && (
+            <div
+              style={{
+                position: "absolute",
+                right: 0,
+                top: "44px",
+                minWidth: "220px",
+                background: "var(--color-bg-card)",
+                border: "1px solid var(--border-subtle)",
+                borderRadius: "12px",
+                boxShadow: "var(--shadow-card)",
+                padding: "8px",
+                zIndex: 100,
+              }}
+            >
+              <div style={{ padding: "8px 10px", borderBottom: "1px solid var(--border-subtle)", marginBottom: "6px" }}>
+                <p style={{ fontSize: "13px", fontWeight: 600, color: "var(--color-text-primary)" }}>
+                  {user?.name || "Signed in"}
+                </p>
+                <p style={{ fontSize: "12px", color: "var(--color-text-muted)", wordBreak: "break-all" }}>
+                  {user?.email}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onLogout?.();
+                }}
+                style={{
+                  width: "100%",
+                  textAlign: "left",
+                  padding: "8px 10px",
+                  borderRadius: "8px",
+                  border: "none",
+                  background: "transparent",
+                  color: "var(--color-text-primary)",
+                  cursor: "pointer",
+                  fontSize: "13px",
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = "var(--color-bg-card-hover)")}
+                onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+              >
+                Sign out
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </header>

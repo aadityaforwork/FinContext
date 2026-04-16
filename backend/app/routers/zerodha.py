@@ -17,7 +17,8 @@ except ImportError:
     KiteConnect = None
 
 from app.db import get_db
-from app.db.models import PortfolioPosition
+from app.db.models import PortfolioPosition, User
+from app.core.deps import get_current_user, get_current_user_optional
 from app.nse_universe import TICKER_TO_YF
 
 # Load environment variables (they should be loaded in main.py, but we use os.getenv directly)
@@ -36,18 +37,26 @@ def _get_kite():
 
 
 @router.get("/api/zerodha/login")
-async def get_kite_login_url():
+async def get_kite_login_url(current_user: User = Depends(get_current_user)):
     """Get the URL to redirect the user to Zerodha's login page."""
     kite = _get_kite()
     return {"url": kite.login_url()}
 
 
 @router.get("/callback")
-async def kite_callback(request: Request, db: AsyncSession = Depends(get_db)):
+async def kite_callback(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_current_user_optional),
+):
     """
     Handle the callback from Zerodha after successful login.
     Zerodha redirects to http://127.0.0.1:8000/callback?request_token=...
+    The user's auth cookie is sent along since this is a top-level navigation.
     """
+    if not current_user:
+        return RedirectResponse(f"{FRONTEND_URL}/login?error=Not+authenticated")
+
     request_token = request.query_params.get("request_token")
     if not request_token:
         # Redirect back with error if no token
@@ -58,31 +67,37 @@ async def kite_callback(request: Request, db: AsyncSession = Depends(get_db)):
         # Exchange request token for access token
         data = kite.generate_session(request_token, api_secret=KITE_API_SECRET)
         kite.set_access_token(data["access_token"])
-        
+
         # Fetch holdings
         holdings = kite.holdings()
-        
+
         # Process holdings iteratively
         for item in holdings:
             ticker = item.get("tradingsymbol", "")
             quantity = item.get("quantity", 0)
             avg_price = item.get("average_price", 0.0)
-            
+
             if quantity <= 0:
                 continue
-                
+
             # Optionally validate against TICKER_TO_YF, but Zerodha symbols usually match NSE symbols
-            
+
             # Upsert into DB (overwrite with actual broker truth)
-            result = await db.execute(select(PortfolioPosition).where(PortfolioPosition.ticker == ticker))
+            result = await db.execute(
+                select(PortfolioPosition).where(
+                    PortfolioPosition.user_id == current_user.id,
+                    PortfolioPosition.ticker == ticker,
+                )
+            )
             existing = result.scalar_one_or_none()
-            
+
             if existing:
                 existing.quantity = quantity
                 existing.buy_price = avg_price
                 existing.updated_at = datetime.now(timezone.utc)
             else:
                 new_pos = PortfolioPosition(
+                    user_id=current_user.id,
                     ticker=ticker,
                     quantity=quantity,
                     buy_price=avg_price
@@ -98,7 +113,11 @@ async def kite_callback(request: Request, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/api/zerodha/upload-csv")
-async def upload_holdings_csv(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
+async def upload_holdings_csv(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Upload a CSV downloaded from Zerodha Console (Holdings)."""
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files are allowed.")
@@ -137,7 +156,12 @@ async def upload_holdings_csv(file: UploadFile = File(...), db: AsyncSession = D
             if pd.isna(qty) or pd.isna(price) or qty <= 0:
                 continue
                 
-            result = await db.execute(select(PortfolioPosition).where(PortfolioPosition.ticker == ticker))
+            result = await db.execute(
+                select(PortfolioPosition).where(
+                    PortfolioPosition.user_id == current_user.id,
+                    PortfolioPosition.ticker == ticker,
+                )
+            )
             existing = result.scalar_one_or_none()
             if existing:
                 existing.quantity = float(qty)
@@ -145,6 +169,7 @@ async def upload_holdings_csv(file: UploadFile = File(...), db: AsyncSession = D
                 existing.updated_at = datetime.now(timezone.utc)
             else:
                 new_pos = PortfolioPosition(
+                    user_id=current_user.id,
                     ticker=ticker,
                     quantity=float(qty),
                     buy_price=float(price)

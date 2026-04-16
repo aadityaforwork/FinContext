@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import Sidebar from "./components/Sidebar";
 import DashboardHeader from "./components/DashboardHeader";
 import WatchlistCard from "./components/WatchlistCard";
@@ -12,20 +13,27 @@ import PortfolioView from "./components/PortfolioView";
 import AnalysisView from "./components/AnalysisView";
 import CompanyView from "./components/CompanyView";
 import GlobeNewsSection from "./components/GlobeNewsSection";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+import { useAuth } from "./context/AuthContext";
+import { API_BASE } from "./lib/api";
 
 export default function App() {
+  const { user, loading, logout } = useAuth();
+  const router = useRouter();
   const [activeNav, setActiveNav] = useState("dashboard");
   const [analysisTicker, setAnalysisTicker] = useState(null);
   const [companyTicker, setCompanyTicker] = useState(null);
+
+  // Redirect unauthenticated users to /login
+  useEffect(() => {
+    if (!loading && !user) router.replace("/login");
+  }, [loading, user, router]);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
       const nav = params.get("nav");
       if (nav) setActiveNav(nav);
-      
+
       const success = params.get("success");
       const error = params.get("error");
       if (success) setTimeout(() => alert("Successfully synced!"), 500);
@@ -40,12 +48,40 @@ export default function App() {
     if (page === "company" && ticker) setCompanyTicker(ticker);
   };
 
+  if (loading || !user) {
+    return (
+      <div
+        style={{
+          minHeight: "100vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "var(--color-text-secondary)",
+          fontSize: "14px",
+        }}
+      >
+        Loading…
+      </div>
+    );
+  }
+
   return (
     <div className="app-shell">
-      <Sidebar activeNav={activeNav} onNavChange={(nav) => { setActiveNav(nav); setAnalysisTicker(null); setCompanyTicker(null); }} />
+      <Sidebar
+        activeNav={activeNav}
+        onNavChange={(nav) => {
+          setActiveNav(nav);
+          setAnalysisTicker(null);
+          setCompanyTicker(null);
+        }}
+      />
 
       <main className="main-content">
-        <DashboardHeader onSearch={(q) => { setActiveNav("screener"); }} />
+        <DashboardHeader
+          onSearch={() => setActiveNav("screener")}
+          user={user}
+          onLogout={logout}
+        />
 
         <div className="content-area">
           {activeNav === "dashboard" && <DashboardView onNavigate={handleNavigate} />}
@@ -77,7 +113,10 @@ function DashboardView({ onNavigate }) {
   useEffect(() => {
     fetch(`${API_BASE}/api/watchlist/`)
       .then((r) => r.json())
-      .then((data) => { setStocks(data); setLoading(false); })
+      .then((data) => {
+        setStocks(Array.isArray(data) ? data : []);
+        setLoading(false);
+      })
       .catch(() => setLoading(false));
   }, []);
 
@@ -121,12 +160,20 @@ function DashboardView({ onNavigate }) {
             </div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-              {stocks.map((stock) => (
-                <WatchlistCard key={stock.ticker} stock={stock}
-                  isSelected={selectedTicker === stock.ticker}
-                  onClick={() => setSelectedTicker(stock.ticker)}
-                />
-              ))}
+              {stocks.length === 0 ? (
+                <div style={{ padding: "16px", borderRadius: "12px", border: "1px dashed var(--border-subtle)", color: "var(--color-text-muted)", fontSize: "13px" }}>
+                  Your watchlist is empty. Use the Screener to add stocks.
+                </div>
+              ) : (
+                stocks.map((stock) => (
+                  <WatchlistCard
+                    key={stock.ticker}
+                    stock={stock}
+                    isSelected={selectedTicker === stock.ticker}
+                    onClick={() => setSelectedTicker(stock.ticker)}
+                  />
+                ))
+              )}
             </div>
           )}
         </div>
