@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s http://127.0.0.1:8000/api/watchlist/ -w \"\\\\nStatus: %{http_code}\\\\n\")",
+      "Bash(python -c ' *)"
+    ]
+  }
+}

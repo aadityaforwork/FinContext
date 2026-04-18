@@ -1,136 +1,65 @@
 """
-Watchlist Router
-================
-CRUD endpoints for watchlist management with SQLite persistence.
-Each user has their own watchlist.
+Watchlist price-enrichment endpoint.
+Accepts a list of tickers, returns live prices from yfinance.
+No auth required — data scoping is handled by Supabase RLS on the frontend.
 """
 
-from fastapi import APIRouter, HTTPException, Depends
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+from fastapi import APIRouter
 from pydantic import BaseModel
-from sqlalchemy import select, delete
-from sqlalchemy.ext.asyncio import AsyncSession
-from datetime import datetime, timezone
-import yfinance as yf
 from cachetools import TTLCache
-from app.db import get_db
-from app.db.models import WatchlistItem, User
-from app.core.deps import get_current_user
+import yfinance as yf
 from app.nse_universe import TICKER_TO_YF, TICKER_TO_META
 
 router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])
 
-# Price cache (2 min TTL) — keyed by ticker (same price for all users)
-_wl_price_cache = TTLCache(maxsize=100, ttl=120)
+_price_cache = TTLCache(maxsize=500, ttl=180)
+_price_executor = ThreadPoolExecutor(max_workers=16)
 
 
-class AddToWatchlistRequest(BaseModel):
-    ticker: str
-
-
-class WatchlistItemResponse(BaseModel):
-    ticker: str
-    name: str
-    sector: str
-    current_price: float
-    change_percent: float
-    added_at: str
+class PriceRequest(BaseModel):
+    tickers: list[str]
 
 
 def _get_price(ticker: str) -> tuple[float, float]:
-    """Get current price and change% for a ticker."""
-    cache_key = f"wl_{ticker}"
-    if cache_key in _wl_price_cache:
-        return _wl_price_cache[cache_key]
-
+    if ticker in _price_cache:
+        return _price_cache[ticker]
     yf_symbol = TICKER_TO_YF.get(ticker)
     if not yf_symbol:
         return (0.0, 0.0)
-
     try:
-        stock = yf.Ticker(yf_symbol)
-        info = stock.fast_info
-        price = float(info.last_price) if hasattr(info, 'last_price') else 0.0
-        prev = float(info.previous_close) if hasattr(info, 'previous_close') else price
+        info = yf.Ticker(yf_symbol).fast_info
+        price = float(info.last_price) if hasattr(info, "last_price") else 0.0
+        prev = float(info.previous_close) if hasattr(info, "previous_close") else price
         change = ((price - prev) / prev * 100) if prev else 0.0
         result = (round(price, 2), round(change, 2))
-        _wl_price_cache[cache_key] = result
+        _price_cache[ticker] = result
         return result
     except Exception:
         return (0.0, 0.0)
 
 
-@router.get("", response_model=list[WatchlistItemResponse])
-@router.get("/", response_model=list[WatchlistItemResponse], include_in_schema=False)
-async def get_watchlist(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Get all watchlisted stocks with live prices."""
-    result = await db.execute(
-        select(WatchlistItem).where(WatchlistItem.user_id == current_user.id)
-    )
-    rows = result.scalars().all()
+@router.post("/prices")
+async def get_prices(req: PriceRequest):
+    """Return a map of ticker → {name, sector, current_price, change_percent}."""
+    tickers = [t.upper() for t in req.tickers]
+    if not tickers:
+        return {}
 
-    items = []
-    for row in rows:
-        meta = TICKER_TO_META.get(row.ticker, {"name": row.ticker, "sector": "Unknown"})
-        price, change = _get_price(row.ticker)
-        items.append(WatchlistItemResponse(
-            ticker=row.ticker,
-            name=meta["name"],
-            sector=meta["sector"],
-            current_price=price,
-            change_percent=change,
-            added_at=row.added_at.isoformat() if row.added_at else "",
-        ))
-    return items
+    loop = asyncio.get_running_loop()
+    quotes = await asyncio.gather(*[
+        loop.run_in_executor(_price_executor, _get_price, t) for t in tickers
+    ])
 
-
-@router.post("/add")
-async def add_to_watchlist(
-    req: AddToWatchlistRequest,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Add a stock to the watchlist."""
-    ticker = req.ticker.upper()
-    if ticker not in TICKER_TO_YF:
-        raise HTTPException(status_code=404, detail=f"Ticker '{ticker}' not found in NSE universe.")
-
-    # Check if already exists for this user
-    result = await db.execute(
-        select(WatchlistItem).where(
-            WatchlistItem.user_id == current_user.id,
-            WatchlistItem.ticker == ticker,
-        )
-    )
-    if result.scalar_one_or_none():
-        return {"message": f"{ticker} already in watchlist", "action": "exists"}
-
-    db.add(WatchlistItem(user_id=current_user.id, ticker=ticker))
-    return {"message": f"Added {ticker} to watchlist", "action": "added", "ticker": ticker}
-
-
-@router.delete("/{ticker}")
-async def remove_from_watchlist(
-    ticker: str,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Remove a stock from the watchlist."""
-    ticker = ticker.upper()
-    result = await db.execute(
-        select(WatchlistItem).where(
-            WatchlistItem.user_id == current_user.id,
-            WatchlistItem.ticker == ticker,
-        )
-    )
-    if not result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail=f"{ticker} not in watchlist.")
-    await db.execute(
-        delete(WatchlistItem).where(
-            WatchlistItem.user_id == current_user.id,
-            WatchlistItem.ticker == ticker,
-        )
-    )
-    return {"message": f"Removed {ticker} from watchlist", "ticker": ticker}
+    result = {}
+    for ticker, (price, change) in zip(tickers, quotes):
+        meta = TICKER_TO_META.get(ticker, {"name": ticker, "sector": "Unknown"})
+        result[ticker] = {
+            "name": meta["name"],
+            "sector": meta["sector"],
+            "current_price": price,
+            "change_percent": change,
+        }
+    return result

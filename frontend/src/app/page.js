@@ -14,6 +14,7 @@ import AnalysisView from "./components/AnalysisView";
 import CompanyView from "./components/CompanyView";
 import GlobeNewsSection from "./components/GlobeNewsSection";
 import { useAuth } from "./context/AuthContext";
+import { supabase } from "./lib/supabase";
 import { API_BASE } from "./lib/api";
 
 export default function App() {
@@ -29,15 +30,35 @@ export default function App() {
   }, [loading, user, router]);
 
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      const params = new URLSearchParams(window.location.search);
-      const nav = params.get("nav");
-      if (nav) setActiveNav(nav);
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const nav = params.get("nav");
+    if (nav) setActiveNav(nav);
 
-      const success = params.get("success");
-      const error = params.get("error");
-      if (success) setTimeout(() => alert("Successfully synced!"), 500);
-      if (error) setTimeout(() => alert("Sync failed: " + error), 500);
+    const error = params.get("error");
+    if (error) setTimeout(() => alert("Error: " + error), 500);
+
+    // Handle Zerodha import: positions arrive as base64 JSON in query param.
+    // Kite is source of truth — replace the user's snapshot entirely so sells in Kite are reflected.
+    const zerodhaImport = params.get("zerodha_import");
+    if (zerodhaImport) {
+      (async () => {
+        try {
+          const positions = JSON.parse(atob(zerodhaImport));
+          await supabase.from("portfolio").delete().neq("ticker", "__never__");
+          for (const pos of positions) {
+            await supabase.from("portfolio").upsert(
+              { ticker: pos.ticker, quantity: pos.quantity, buy_price: pos.buy_price },
+              { onConflict: "ticker,user_id", ignoreDuplicates: false }
+            );
+          }
+          setTimeout(() => alert(`Synced ${positions.length} positions from Zerodha`), 300);
+        } catch (e) {
+          console.error("Zerodha import error:", e);
+        }
+        // Clean up URL
+        window.history.replaceState({}, "", "/");
+      })();
     }
   }, []);
 
@@ -111,13 +132,27 @@ function DashboardView({ onNavigate }) {
   ]);
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/watchlist/`)
-      .then((r) => r.json())
-      .then((data) => {
-        setStocks(Array.isArray(data) ? data : []);
+    (async () => {
+      const { data: rows } = await supabase.from("watchlist").select("ticker").order("added_at", { ascending: false });
+      if (!rows || rows.length === 0) { setLoading(false); return; }
+      try {
+        const res = await fetch(`${API_BASE}/api/watchlist/prices`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tickers: rows.map((r) => r.ticker) }),
+        });
+        const priceMap = res.ok ? await res.json() : {};
+        setStocks(rows.map((r) => ({
+          ticker: r.ticker,
+          name: priceMap[r.ticker]?.name ?? r.ticker,
+          sector: priceMap[r.ticker]?.sector ?? "—",
+          current_price: priceMap[r.ticker]?.current_price ?? 0,
+          change_percent: priceMap[r.ticker]?.change_percent ?? 0,
+        })));
+      } finally {
         setLoading(false);
-      })
-      .catch(() => setLoading(false));
+      }
+    })();
   }, []);
 
   useEffect(() => {

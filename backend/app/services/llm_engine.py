@@ -8,25 +8,12 @@ Architecture:
     data_ingestion.py → context docs → llm_engine.py → synthesized analysis
 """
 
-import os
-import google.generativeai as genai
-from dotenv import load_dotenv
 import logging
 
 from app.seed_data import STOCKS
+from app.services import ai_client
 
 logger = logging.getLogger(__name__)
-
-load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-_model = None
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    _model = genai.GenerativeModel('gemini-2.0-flash')
-    logger.info("Gemini API enabled in llm_engine.py.")
-else:
-    logger.warning("No GEMINI_API_KEY found. Falling back to mocked engine.")
 
 
 def generate_analysis(ticker: str, context_docs: list[dict]) -> str:
@@ -42,12 +29,12 @@ def generate_analysis(ticker: str, context_docs: list[dict]) -> str:
     change = stock["change_percent"]
     direction = "gaining" if change > 0 else "declining" if change < 0 else "flat"
 
-    if _model:
+    if ai_client.is_available():
         context_text = "\n\n".join([
             f"[{d['source']}] {d['headline']}: {d['snippet']}"
             for d in context_docs
         ])
-        
+
         prompt = f"""
 You are a senior equity research analyst.
 Analyze the following Indian stock based strictly on the provided recent news context, without hallucinating.
@@ -65,10 +52,9 @@ Instructions:
 3. Keep it professional, objective, and around 100-150 words. Format with markdown (bolding key entities). Do not add a title.
 """
         try:
-            response = _model.generate_content(prompt)
-            # Filter out potentially empty responses due to safety blocks
-            if response.text:
-                return response.text
+            text = ai_client.generate_text(prompt, max_tokens=600)
+            if text:
+                return text
         except Exception as e:
             logger.error(f"Gemini generation failed: {e}")
 

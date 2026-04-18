@@ -9,7 +9,8 @@ import {
   Line,
 } from "react-simple-maps";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+import { API_BASE as _SHARED_API_BASE } from "../lib/api";
+const API_BASE = _SHARED_API_BASE;
 const GEO_URL = "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json";
 
 // ISO-3166-1 numeric → our country codes

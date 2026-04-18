@@ -10,22 +10,16 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import asyncio
 import json
+import logging
 import random
-import os
-import google.generativeai as genai
-from dotenv import load_dotenv
+import re
 
 from app.nse_universe import TICKER_TO_META
+from app.services import ai_client
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
-
-load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-_model = None
-
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    _model = genai.GenerativeModel('gemini-2.0-flash')
 
 
 # ---------------------------------------------------------------------------
@@ -46,17 +40,26 @@ class DDAgentRequest(BaseModel):
 # Helpers to parse JSON from generic text
 # ---------------------------------------------------------------------------
 def _extract_json_from_md(text: str) -> dict:
-    try:
-        # Simple extraction if bounded by ```json ... ```
-        if "```json" in text:
-            content = text.split("```json")[1].split("```")[0].strip()
-            return json.loads(content)
-        if "```" in text:
-            content = text.split("```")[1].split("```")[0].strip()
-            return json.loads(content)
-        return json.loads(text)
-    except Exception:
+    if not text:
+        logger.error("LLM returned empty text")
         return {}
+    candidates = []
+    if "```json" in text:
+        candidates.append(text.split("```json", 1)[1].split("```", 1)[0].strip())
+    if "```" in text:
+        candidates.append(text.split("```", 1)[1].split("```", 1)[0].strip())
+    candidates.append(text.strip())
+    # Fallback: first { ... last } block
+    m = re.search(r"\{[\s\S]*\}", text)
+    if m:
+        candidates.append(m.group(0))
+    for c in candidates:
+        try:
+            return json.loads(c)
+        except Exception:
+            continue
+    logger.error("Failed to parse JSON from LLM output. First 500 chars: %s", text[:500])
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -71,11 +74,11 @@ async def simulate_scenario(req: SimulateRequest):
     ticker = req.ticker.upper()
     meta = TICKER_TO_META.get(ticker, {"name": ticker, "sector": "General"})
     
-    if not _model:
+    if not ai_client.is_available():
         raise HTTPException(status_code=500, detail="Gemini API Key missing")
 
     prompt = f"""
-You are a highly analytical quantitative modeler. 
+You are a highly analytical quantitative modeler.
 Analyze the impact of the following hypothetical scenario on this specific company:
 Company: {meta["name"]} ({ticker})
 Sector: {meta["sector"]}
@@ -89,9 +92,9 @@ Respond ONLY with a valid JSON block containing exactly these keys:
 - "margin_impact_bps": integer (e.g., -150, 50).
 """
     try:
-        response = _model.generate_content(prompt)
-        data = _extract_json_from_md(response.text)
-        
+        text = await asyncio.to_thread(ai_client.generate_json, prompt, 1024)
+        data = _extract_json_from_md(text)
+
         impact_score = float(data.get("impact_score_percent", 0.0))
         is_positive = impact_score > 0
         severity = data.get("severity", "Medium")
@@ -138,7 +141,7 @@ async def dd_agent_generator(ticker: str):
         await asyncio.sleep(0.5)
         yield f"data: {json.dumps(step)}\n\n"
         
-    if not _model:
+    if not ai_client.is_available():
         yield f"data: {json.dumps({'type':'step', 'message':'ERROR: No Gemini API Key found.'})}\n\n"
         yield "data: [DONE]\n\n"
         return
@@ -155,12 +158,12 @@ Respond ONLY with a valid JSON block containing exactly these keys:
 """
     try:
         # Offload API call to a thread so we don't block the async generator
-        response = await asyncio.wait_for(
-            asyncio.to_thread(_model.generate_content, prompt),
-            timeout=30
+        text = await asyncio.wait_for(
+            asyncio.to_thread(ai_client.generate_json, prompt, 1024),
+            timeout=45
         )
-        data = _extract_json_from_md(response.text)
-        
+        data = _extract_json_from_md(text)
+
         memo = {
             "type": "result",
             "company": meta["name"],
@@ -199,7 +202,7 @@ async def calculate_narrative_impact(req: NarrativeRequest):
     Takes raw news text / tweets and extracts a structured quantitative model 
     using Gemini.
     """
-    if not _model:
+    if not ai_client.is_available():
         raise HTTPException(status_code=500, detail="Gemini API Key missing")
 
     prompt = f"""
@@ -219,9 +222,9 @@ Respond ONLY with a valid JSON block containing exactly these keys:
 """
     
     try:
-        response = _model.generate_content(prompt)
-        data = _extract_json_from_md(response.text)
-        
+        text = await asyncio.to_thread(ai_client.generate_json, prompt, 1024)
+        data = _extract_json_from_md(text)
+
         return {
             "source_text": req.text,
             "extraction": {
@@ -265,7 +268,7 @@ async def deep_dive_generator(ticker: str):
         await asyncio.sleep(0.4)
         yield f"data: {json.dumps(step)}\n\n"
 
-    if not _model:
+    if not ai_client.is_available():
         yield f"data: {json.dumps({'type': 'step', 'message': 'ERROR: Gemini API key missing.'})}\n\n"
         yield "data: [DONE]\n\n"
         return
@@ -311,8 +314,12 @@ Respond ONLY with a valid JSON object with these exact keys:
 """
 
     try:
-        response = await asyncio.to_thread(_model.generate_content, prompt)
-        data = _extract_json_from_md(response.text)
+        text = await asyncio.to_thread(ai_client.generate_json, prompt, 2048)
+        data = _extract_json_from_md(text)
+        if not data:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'AI returned unparseable response. Check backend logs.'})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
 
         result = {
             "type": "result",
@@ -328,7 +335,8 @@ Respond ONLY with a valid JSON object with these exact keys:
         }
         yield f"data: {json.dumps(result)}\n\n"
     except Exception as e:
-        yield f"data: {json.dumps({'type': 'step', 'message': f'Deep-dive failed: {str(e)}'})}\n\n"
+        logger.error("Deep-dive failed", exc_info=True)
+        yield f"data: {json.dumps({'type': 'error', 'message': f'Deep-dive failed: {str(e)[:300]}'})}\n\n"
 
     yield "data: [DONE]\n\n"
 

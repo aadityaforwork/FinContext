@@ -7,27 +7,23 @@ risk alerts, and stock recommendations — streamed via SSE.
 
 import asyncio
 import json
-import os
-import google.generativeai as genai
-from dotenv import load_dotenv
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel
 
-from app.db import get_db
-from app.db.models import PortfolioPosition, User
-from app.core.deps import get_current_user
 from app.nse_universe import TICKER_TO_META
-
-load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-_model = None
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    _model = genai.GenerativeModel('gemini-2.0-flash')
+from app.services import ai_client
 
 router = APIRouter(prefix="/api/intelligence", tags=["portfolio-intelligence"])
+
+
+class PositionIn(BaseModel):
+    ticker: str
+    quantity: float
+    buy_price: float
+
+class IntelRequest(BaseModel):
+    positions: list[PositionIn]
 
 
 async def _intelligence_generator(holdings: list[dict]):
@@ -50,7 +46,7 @@ async def _intelligence_generator(holdings: list[dict]):
 
     yield f"data: {json.dumps({'type': 'step', 'message': 'Compiling final intelligence report...'})}\n\n"
 
-    if not _model:
+    if not ai_client.is_available():
         yield f"data: {json.dumps({'type': 'step', 'message': 'ERROR: Gemini API key not configured.'})}\n\n"
         yield "data: [DONE]\n\n"
         return
@@ -83,11 +79,10 @@ Respond ONLY with a valid JSON object with these exact keys:
 """
 
     try:
-        response = await asyncio.wait_for(
-            asyncio.to_thread(_model.generate_content, prompt),
-            timeout=30
+        text = await asyncio.wait_for(
+            asyncio.to_thread(ai_client.generate_json, prompt, 2048),
+            timeout=45
         )
-        text = response.text
         # Extract JSON
         if "```json" in text:
             text = text.split("```json")[1].split("```")[0].strip()
@@ -111,24 +106,16 @@ Respond ONLY with a valid JSON object with these exact keys:
 
 
 @router.post("/portfolio")
-async def portfolio_intelligence(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
+async def portfolio_intelligence(req: IntelRequest):
     """Stream AI-powered portfolio intelligence as SSE."""
-    result = await db.execute(
-        select(PortfolioPosition).where(PortfolioPosition.user_id == current_user.id)
-    )
-    rows = result.scalars().all()
-
-    if not rows:
-        return {"error": "No holdings found. Import your portfolio first."}
+    if not req.positions:
+        return {"error": "No holdings provided."}
 
     holdings = []
-    for pos in rows:
-        meta = TICKER_TO_META.get(pos.ticker, {"name": pos.ticker, "sector": "Unknown"})
+    for pos in req.positions:
+        meta = TICKER_TO_META.get(pos.ticker.upper(), {"name": pos.ticker, "sector": "Unknown"})
         holdings.append({
-            "ticker": pos.ticker,
+            "ticker": pos.ticker.upper(),
             "name": meta["name"],
             "sector": meta["sector"],
             "quantity": pos.quantity,

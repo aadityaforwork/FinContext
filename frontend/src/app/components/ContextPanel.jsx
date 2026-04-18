@@ -2,7 +2,8 @@
 
 import { useState, useEffect } from "react";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+import { API_BASE as _SHARED_API_BASE } from "../lib/api";
+const API_BASE = _SHARED_API_BASE;
 
 export default function ContextPanel({ ticker, stockName }) {
   const [analysis, setAnalysis] = useState(null);

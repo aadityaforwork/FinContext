@@ -5,32 +5,18 @@ Endpoints for fetching country-specific financial news
 and analyzing portfolio impact using Gemini AI.
 """
 
-import os
 import re
 import feedparser
 import logging
 from urllib.parse import quote
 from cachetools import TTLCache
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Optional
 
-import google.generativeai as genai
-from dotenv import load_dotenv
-
-from app.db import get_db
-from app.db.models import PortfolioPosition
+from app.services import ai_client
 
 logger = logging.getLogger(__name__)
-
-load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-_model = None
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    _model = genai.GenerativeModel("gemini-2.0-flash")
 
 router = APIRouter(prefix="/api/global-news", tags=["global-news"])
 
@@ -182,28 +168,22 @@ async def get_country_news(country_code: str):
 class PortfolioImpactRequest(BaseModel):
     country_code: str
     headlines: list[str]
+    tickers: Optional[list[str]] = None  # user's watchlist/portfolio tickers
 
 
 @router.post("/portfolio-impact")
-async def analyze_portfolio_impact(
-    req: PortfolioImpactRequest,
-    db: AsyncSession = Depends(get_db),
-):
+async def analyze_portfolio_impact(req: PortfolioImpactRequest):
     """Use Gemini AI to analyze how a country's news might impact the user's portfolio."""
     country_code = req.country_code.upper()
     cfg = COUNTRY_CONFIG.get(country_code)
     if not cfg:
         raise HTTPException(status_code=404, detail="Unsupported country code")
 
-    # Fetch portfolio holdings
-    result = await db.execute(select(PortfolioPosition))
-    positions = result.scalars().all()
-
-    has_portfolio = len(positions) > 0
-    portfolio_str = ", ".join([f"{p.ticker} (qty: {p.quantity})" for p in positions]) if has_portfolio else "No specific stocks"
+    has_portfolio = bool(req.tickers)
+    portfolio_str = ", ".join(req.tickers) if has_portfolio else "No specific stocks"
     headlines_str = "\n".join([f"- {h}" for h in req.headlines[:6]])
 
-    if not _model:
+    if not ai_client.is_available():
         return {
             "impact_summary": f"AI analysis unavailable. News from {cfg['name']} may affect the Indian stock market depending on sector exposure.",
             "affected_stocks": [],
@@ -240,8 +220,7 @@ Respond ONLY in JSON (no markdown fences):
 """
 
     try:
-        response = _model.generate_content(prompt)
-        text = response.text.strip()
+        text = ai_client.generate_json(prompt, max_tokens=1024).strip()
         # Strip any markdown formatting
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)

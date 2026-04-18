@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from "react";
 import AnalysisVideoPresenter from "./AnalysisVideoPresenter";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+import { API_BASE as _SHARED_API_BASE } from "../lib/api";
+const API_BASE = _SHARED_API_BASE;
 
 export default function AnalysisDDAgent({ ticker, stockName }) {
   const [running, setRunning] = useState(false);

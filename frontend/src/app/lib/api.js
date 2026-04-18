@@ -8,9 +8,19 @@
  * and we want credentials on all of them without touching each one.
  */
 
-export const API_BASE =
-  (typeof process !== "undefined" && process.env.NEXT_PUBLIC_API_URL) ||
-  "http://127.0.0.1:8000";
+// Resolve the backend URL. If NEXT_PUBLIC_API_URL is set, use it verbatim.
+// Otherwise, mirror the browser's hostname so cookies stay first-party
+// (localhost and 127.0.0.1 are treated as different sites by SameSite=Lax,
+// which is what was causing reloads to log users out in dev).
+export const API_BASE = (() => {
+  if (typeof process !== "undefined" && process.env.NEXT_PUBLIC_API_URL) {
+    return process.env.NEXT_PUBLIC_API_URL;
+  }
+  if (typeof window !== "undefined" && window.location?.hostname) {
+    return `${window.location.protocol}//${window.location.hostname}:8000`;
+  }
+  return "http://localhost:8000";
+})();
 
 let _patched = false;
 

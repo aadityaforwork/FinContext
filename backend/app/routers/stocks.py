@@ -26,15 +26,18 @@ from app.nse_universe import (
 from app.services.data_ingestion import retrieve_context
 from app.services.llm_engine import generate_analysis
 
+import asyncio
 import yfinance as yf
 from cachetools import TTLCache
+from concurrent.futures import ThreadPoolExecutor
 import logging
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/stocks", tags=["stocks"])
 
-# Cache for browse/search prices (3 min TTL)
-_browse_cache = TTLCache(maxsize=200, ttl=180)
+# Cache for browse/search prices (10 min TTL — list views don't need tick-level freshness)
+_browse_cache = TTLCache(maxsize=2000, ttl=600)
+_quote_executor = ThreadPoolExecutor(max_workers=24)
 
 
 def _get_quote(ticker: str) -> tuple[float, float]:
@@ -98,15 +101,18 @@ async def search_nse_stocks(
 ):
     """Search the NSE stock universe by name/ticker with optional sector filter."""
     results = search_stocks(query=q, sector=sector, limit=limit)
-    enriched = []
-    for s in results:
-        price, change = _get_quote(s["ticker"])
-        enriched.append({
-            **s,
-            "current_price": price,
-            "change_percent": change,
-        })
-    return enriched
+    if not results:
+        return []
+
+    loop = asyncio.get_running_loop()
+    quotes = await asyncio.gather(*[
+        loop.run_in_executor(_quote_executor, _get_quote, s["ticker"])
+        for s in results
+    ])
+    return [
+        {**s, "current_price": p, "change_percent": c}
+        for s, (p, c) in zip(results, quotes)
+    ]
 
 
 @router.get("/sectors")

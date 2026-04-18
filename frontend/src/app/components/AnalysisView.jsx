@@ -3,7 +3,8 @@
 import { useState, useEffect, useRef } from "react";
 import StockChart from "./StockChart";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+import { API_BASE as _SHARED_API_BASE } from "../lib/api";
+const API_BASE = _SHARED_API_BASE;
 
 // --- Radial Score Ring ---
 function ScoreRing({ value, size = 80, color, label }) {
@@ -44,6 +45,7 @@ export default function AnalysisView({ initialTicker }) {
   const [deepDive, setDeepDive] = useState(null);
   const [ddLoading, setDdLoading] = useState(false);
   const [ddSteps, setDdSteps] = useState([]);
+  const [ddError, setDdError] = useState(null);
   const terminalRef = useRef(null);
 
   useEffect(() => {
@@ -81,6 +83,7 @@ export default function AnalysisView({ initialTicker }) {
     setDdLoading(true);
     setDeepDive(null);
     setDdSteps([]);
+    setDdError(null);
 
     try {
       const response = await fetch(`${API_BASE}/api/analysis/deep-dive`, {
@@ -105,6 +108,7 @@ export default function AnalysisView({ initialTicker }) {
                 try {
                   const data = JSON.parse(dataStr);
                   if (data.type === "step") setDdSteps(prev => [...prev, data.message]);
+                  else if (data.type === "error") { setDdError(data.message); setDdLoading(false); }
                   else if (data.type === "result") { setDeepDive(data); setDdLoading(false); }
                 } catch (e) {}
               }
@@ -113,7 +117,7 @@ export default function AnalysisView({ initialTicker }) {
         }
         done = readerDone;
       }
-    } catch (err) { setDdLoading(false); }
+    } catch (err) { setDdError(String(err)); setDdLoading(false); }
   };
 
   return (
@@ -216,6 +220,15 @@ export default function AnalysisView({ initialTicker }) {
                   <span style={{ color: "#34d399", marginRight: "10px" }}>&gt;</span> _
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* Error banner */}
+          {ddError && !ddLoading && (
+            <div className="glass-card" style={{ padding: "20px", border: "1px solid #ef4444", background: "rgba(239,68,68,0.08)" }}>
+              <div style={{ fontSize: "13px", fontWeight: 700, color: "#ef4444", marginBottom: "6px" }}>Analysis failed</div>
+              <div style={{ fontSize: "13px", color: "var(--color-text-secondary)", lineHeight: 1.5 }}>{ddError}</div>
+              <button onClick={() => runDeepDive(ticker)} style={{ marginTop: "12px", padding: "6px 14px", borderRadius: "8px", fontSize: "12px", fontWeight: 600, border: "1px solid #ef4444", background: "transparent", color: "#ef4444", cursor: "pointer" }}>Retry</button>
             </div>
           )}
 

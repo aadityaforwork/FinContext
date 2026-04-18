@@ -1,13 +1,15 @@
 "use client";
 
 import { useState, useEffect } from "react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+import { supabase } from "../lib/supabase";
+import { API_BASE as _SHARED_API_BASE } from "../lib/api";
+const API_BASE = _SHARED_API_BASE;
 
 export default function ScreenerView({ onNavigate }) {
   const [stocks, setStocks] = useState([]);
   const [sectors, setSectors] = useState([]);
   const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [selectedSector, setSelectedSector] = useState("");
   const [loading, setLoading] = useState(true);
   const [sortBy, setSortBy] = useState("ticker");
@@ -22,22 +24,31 @@ export default function ScreenerView({ onNavigate }) {
       .catch(() => {});
   }, []);
 
-  // Fetch stocks
+  // Debounce the search input — avoid firing a request on every keystroke
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(searchQuery), 350);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
+
+  // Fetch stocks (uses debounced query + abort stale requests)
   useEffect(() => {
     setLoading(true);
+    const controller = new AbortController();
     const params = new URLSearchParams();
-    if (searchQuery) params.set("q", searchQuery);
+    if (debouncedQuery) params.set("q", debouncedQuery);
     if (selectedSector) params.set("sector", selectedSector);
     params.set("limit", "100");
 
-    fetch(`${API_BASE}/api/stocks/search?${params}`)
+    fetch(`${API_BASE}/api/stocks/search?${params}`, { signal: controller.signal })
       .then((r) => r.json())
       .then((data) => {
         setStocks(data);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
-  }, [searchQuery, selectedSector]);
+      .catch((err) => { if (err.name !== "AbortError") setLoading(false); });
+
+    return () => controller.abort();
+  }, [debouncedQuery, selectedSector]);
 
   const handleSort = (field) => {
     if (sortBy === field) {
@@ -59,39 +70,9 @@ export default function ScreenerView({ onNavigate }) {
   });
 
   const addToWatchlist = async (ticker) => {
-    try {
-      await fetch(`${API_BASE}/api/watchlist/add`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ticker }),
-      });
-      setActionMsg(`✓ ${ticker} added to watchlist`);
-      setTimeout(() => setActionMsg(""), 2000);
-    } catch (e) {
-      setActionMsg(`Failed to add ${ticker}`);
-    }
-  };
-
-  const addToPortfolio = async (ticker, price) => {
-    const qty = prompt(`Enter quantity for ${ticker}:`, "10");
-    if (!qty) return;
-    const buyPrice = prompt(`Buy price (₹):`, price.toString());
-    if (!buyPrice) return;
-    try {
-      await fetch(`${API_BASE}/api/portfolio/add`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ticker,
-          quantity: parseFloat(qty),
-          buy_price: parseFloat(buyPrice),
-        }),
-      });
-      setActionMsg(`✓ ${ticker} added to portfolio`);
-      setTimeout(() => setActionMsg(""), 2000);
-    } catch (e) {
-      setActionMsg(`Failed to add ${ticker}`);
-    }
+    const { error } = await supabase.from("watchlist").upsert({ ticker }, { onConflict: "ticker,user_id", ignoreDuplicates: true });
+    setActionMsg(error ? `Failed to add ${ticker}` : `✓ ${ticker} added to watchlist`);
+    setTimeout(() => setActionMsg(""), 2000);
   };
 
   const SortIcon = ({ field }) => (
@@ -227,9 +208,6 @@ export default function ScreenerView({ onNavigate }) {
                         <button onClick={() => addToWatchlist(stock.ticker)}
                           style={{ padding: "4px 10px", borderRadius: "6px", fontSize: "11px", fontWeight: 500, border: "1px solid var(--border-subtle)", background: "transparent", color: "var(--color-accent-amber)", cursor: "pointer" }}
                         >⭐ Watch</button>
-                        <button onClick={() => addToPortfolio(stock.ticker, stock.current_price)}
-                          style={{ padding: "4px 10px", borderRadius: "6px", fontSize: "11px", fontWeight: 500, border: "none", background: "rgba(99,102,241,0.2)", color: "var(--color-accent-secondary)", cursor: "pointer" }}
-                        >+ Portfolio</button>
                       </div>
                     </td>
                   </tr>

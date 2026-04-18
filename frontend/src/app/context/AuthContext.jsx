@@ -1,101 +1,74 @@
 "use client";
 
 import { createContext, useContext, useEffect, useState, useCallback } from "react";
-import { API_BASE, apiJson, installFetchCredentials } from "../lib/api";
+import { supabase } from "../lib/supabase";
 
 const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
+  const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [providers, setProviders] = useState({ password: true, google: false });
-
-  // Install the global fetch patch exactly once
-  useEffect(() => {
-    installFetchCredentials();
-  }, []);
-
-  // Fetch current user on mount; try a silent refresh if unauthorized
-  const fetchMe = useCallback(async () => {
-    try {
-      const me = await apiJson("/api/auth/me");
-      setUser(me);
-      return me;
-    } catch (err) {
-      if (err.status === 401) {
-        // Try refresh silently
-        try {
-          await apiJson("/api/auth/refresh", { method: "POST" });
-          const me = await apiJson("/api/auth/me");
-          setUser(me);
-          return me;
-        } catch {
-          setUser(null);
-          return null;
-        }
-      }
-      setUser(null);
-      return null;
-    }
-  }, []);
 
   useEffect(() => {
-    (async () => {
-      setLoading(true);
-      await fetchMe();
-      // Also load which providers are available
-      try {
-        const p = await apiJson("/api/auth/providers");
-        setProviders(p);
-      } catch {
-        /* ignore */
-      }
+    // Hydrate session on mount
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setUser(session?.user ?? null);
       setLoading(false);
-    })();
-  }, [fetchMe]);
+    });
+
+    // Keep in sync with Supabase auth events (login, logout, token refresh)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+      setUser(session?.user ?? null);
+      setLoading(false);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
 
   const login = useCallback(async (email, password) => {
-    const me = await apiJson("/api/auth/login", {
-      method: "POST",
-      body: { email, password },
-    });
-    setUser(me);
-    return me;
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw new Error(error.message);
+    return data.user;
   }, []);
 
   const signup = useCallback(async (email, password, name) => {
-    const me = await apiJson("/api/auth/signup", {
-      method: "POST",
-      body: { email, password, name },
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { data: { name: name || "" } },
     });
-    setUser(me);
-    return me;
+    if (error) throw new Error(error.message);
+    return data.user;
   }, []);
 
   const logout = useCallback(async () => {
-    try {
-      await apiJson("/api/auth/logout", { method: "POST" });
-    } catch {
-      /* ignore — still clear locally */
-    }
-    setUser(null);
+    await supabase.auth.signOut();
   }, []);
 
-  const googleLogin = useCallback(() => {
-    // Top-level navigation so Google's OAuth flow can set/read cookies on the
-    // backend origin. The backend will redirect back to FRONTEND_URL after.
-    window.location.href = `${API_BASE}/api/auth/google/start`;
+  const googleLogin = useCallback(async () => {
+    await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: window.location.origin },
+    });
   }, []);
+
+  // Expose a display name from user metadata
+  const userName = user?.user_metadata?.name || user?.user_metadata?.full_name || user?.email || "";
 
   const value = {
     user,
+    session,
     loading,
-    providers,
+    userName,
     login,
     signup,
     logout,
     googleLogin,
-    refresh: fetchMe,
+    // providers stub kept for compat with login/signup pages
+    providers: { password: true, google: true },
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
