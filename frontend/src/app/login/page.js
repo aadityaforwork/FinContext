@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "../context/AuthContext";
@@ -83,6 +83,14 @@ export default function LoginPage() {
         <Link href="/signup" style={{ color: "var(--color-accent-secondary)", fontWeight: 600 }}>Sign up</Link>
       </p>
     </AuthCard>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense>
+      <LoginForm />
+    </Suspense>
   );
 }
 
