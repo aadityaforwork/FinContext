@@ -11,7 +11,7 @@ import AuthCard, {
   GoogleIcon,
 } from "../components/AuthCard";
 
-export default function LoginPage() {
+function LoginForm() {
   const { user, loading, login, googleLogin } = useAuth();
   const router = useRouter();
   const search = useSearchParams();
