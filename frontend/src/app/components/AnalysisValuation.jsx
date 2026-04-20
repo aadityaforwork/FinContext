@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { API_BASE as _SHARED_API_BASE } from "../lib/api";
+import { claimText, claimSource } from "../lib/claim";
 const API_BASE = _SHARED_API_BASE;
 
 export default function AnalysisValuation({ ticker }) {
@@ -130,8 +131,8 @@ export default function AnalysisValuation({ ticker }) {
               </div>
             </div>
             
-            <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginTop: "16px", fontStyle: "italic" }}>
-               Note: {result.risk_factors[0]}
+            <p title={claimSource(result.risk_factors?.[0]) || ""} style={{ fontSize: "12px", color: "var(--color-text-muted)", marginTop: "16px", fontStyle: "italic" }}>
+               Note: {claimText(result.risk_factors?.[0])}
             </p>
           </div>
         </div>

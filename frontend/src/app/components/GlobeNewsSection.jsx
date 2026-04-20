@@ -10,6 +10,7 @@ import {
 } from "react-simple-maps";
 
 import { API_BASE as _SHARED_API_BASE } from "../lib/api";
+import { claimText, claimSource } from "../lib/claim";
 const API_BASE = _SHARED_API_BASE;
 const GEO_URL = "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json";
 
@@ -651,7 +652,7 @@ export default function GlobeNewsSection() {
                           const bg = s.impact === "positive" ? "rgba(16,185,129,0.1)" : s.impact === "negative" ? "rgba(239,68,68,0.1)" : "rgba(245,158,11,0.1)";
                           const icon = s.impact === "positive" ? "▲" : s.impact === "negative" ? "▼" : "●";
                           return (
-                            <div key={i} title={s.reason} style={{
+                            <div key={i} title={claimText(s.reason)} style={{
                               display: "flex", alignItems: "center", gap: "5px",
                               padding: "6px 10px", borderRadius: "8px",
                               background: bg, border: `1px solid ${clr}22`,
@@ -666,9 +667,9 @@ export default function GlobeNewsSection() {
                       </div>
                       <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                         {impact.affected_stocks.map((s, i) => (
-                          <p key={i} style={{ fontSize: "11px", color: "var(--color-text-muted)", lineHeight: 1.5 }}>
+                          <p key={i} title={claimSource(s.reason) || ""} style={{ fontSize: "11px", color: "var(--color-text-muted)", lineHeight: 1.5 }}>
                             <span style={{ fontWeight: 700, color: "var(--color-text-secondary)" }}>{s.ticker}:</span>{" "}
-                            {s.reason}
+                            {claimText(s.reason)}
                           </p>
                         ))}
                       </div>

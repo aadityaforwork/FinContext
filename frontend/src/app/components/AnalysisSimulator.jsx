@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { API_BASE as _SHARED_API_BASE } from "../lib/api";
+import { claimText, claimSource } from "../lib/claim";
 const API_BASE = _SHARED_API_BASE;
 
 export default function AnalysisSimulator({ ticker, stockName }) {
@@ -121,12 +122,18 @@ export default function AnalysisSimulator({ ticker, stockName }) {
           <div>
              <h4 style={{ fontSize: "12px", textTransform: "uppercase", letterSpacing: "1px", color: "var(--color-text-muted)", marginBottom: "12px", fontWeight: 600 }}>Causal Rationale</h4>
              <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "10px" }}>
-               {result.rationale.map((line, idx) => (
-                 <li key={idx} style={{ fontSize: "14px", color: "var(--color-text-secondary)", display: "flex", gap: "12px", lineHeight: 1.5 }}>
-                   <span style={{ color: "var(--color-accent-primary)" }}>•</span>
-                   {line}
-                 </li>
-               ))}
+               {result.rationale?.map((line, idx) => {
+                 const src = claimSource(line);
+                 return (
+                   <li key={idx} style={{ fontSize: "14px", color: "var(--color-text-secondary)", display: "flex", gap: "12px", lineHeight: 1.5 }}>
+                     <span style={{ color: "var(--color-accent-primary)" }}>•</span>
+                     <span>
+                       {claimText(line)}
+                       {src && <span style={{ fontSize: "11px", color: "var(--color-text-muted)", marginLeft: "6px", fontFamily: "monospace" }}>[{src}]</span>}
+                     </span>
+                   </li>
+                 );
+               })}
              </ul>
           </div>
         </div>

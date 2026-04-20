@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import AnalysisVideoPresenter from "./AnalysisVideoPresenter";
 
 import { API_BASE as _SHARED_API_BASE } from "../lib/api";
+import { claimText, claimSource } from "../lib/claim";
 const API_BASE = _SHARED_API_BASE;
 
 export default function AnalysisDDAgent({ ticker, stockName }) {
@@ -204,8 +205,8 @@ export default function AnalysisDDAgent({ ticker, stockName }) {
               </h5>
               <ul style={{ padding: 0, margin: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: "12px" }}>
                 {result.pros?.map((point, idx) => (
-                  <li key={idx} style={{ fontSize: "14px", color: "var(--color-text-secondary)", lineHeight: 1.5, display: "flex", gap: "10px" }}>
-                    <span style={{ color: "var(--color-accent-green)", fontSize: "18px" }}>✓</span> {point}
+                  <li key={idx} title={claimSource(point) || ""} style={{ fontSize: "14px", color: "var(--color-text-secondary)", lineHeight: 1.5, display: "flex", gap: "10px" }}>
+                    <span style={{ color: "var(--color-accent-green)", fontSize: "18px" }}>✓</span> {claimText(point)}
                   </li>
                 ))}
               </ul>
@@ -218,8 +219,8 @@ export default function AnalysisDDAgent({ ticker, stockName }) {
               </h5>
               <ul style={{ padding: 0, margin: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: "12px" }}>
                 {result.cons?.map((point, idx) => (
-                  <li key={idx} style={{ fontSize: "14px", color: "var(--color-text-secondary)", lineHeight: 1.5, display: "flex", gap: "10px" }}>
-                    <span style={{ color: "var(--color-accent-red)", fontSize: "18px" }}>✕</span> {point}
+                  <li key={idx} title={claimSource(point) || ""} style={{ fontSize: "14px", color: "var(--color-text-secondary)", lineHeight: 1.5, display: "flex", gap: "10px" }}>
+                    <span style={{ color: "var(--color-accent-red)", fontSize: "18px" }}>✕</span> {claimText(point)}
                   </li>
                 ))}
               </ul>

@@ -82,6 +82,9 @@ function LoginForm() {
         Don&apos;t have an account?{" "}
         <Link href="/signup" style={{ color: "var(--color-accent-secondary)", fontWeight: 600 }}>Sign up</Link>
       </p>
+      <p style={{ textAlign: "center", marginTop: "8px", fontSize: "12px", color: "var(--color-text-muted)" }}>
+        <Link href="/forgot-password" style={{ color: "var(--color-text-muted)" }}>Forgot password?</Link>
+      </p>
     </AuthCard>
   );
 }

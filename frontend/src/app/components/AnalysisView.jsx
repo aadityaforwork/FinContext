@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import StockChart from "./StockChart";
 
 import { API_BASE as _SHARED_API_BASE } from "../lib/api";
+import { claimText, claimSource } from "../lib/claim";
 const API_BASE = _SHARED_API_BASE;
 
 // --- Radial Score Ring ---
@@ -249,7 +250,7 @@ export default function AnalysisView({ initialTicker }) {
                       <span style={{ fontSize: "14px", color: "var(--color-text-muted)", marginLeft: "8px" }}>Moat</span>
                     </div>
                   </div>
-                  <p style={{ fontSize: "14px", color: "var(--color-text-secondary)", lineHeight: 1.6 }}>{deepDive.moat_reason}</p>
+                  <p title={claimSource(deepDive.moat_reason) || ""} style={{ fontSize: "14px", color: "var(--color-text-secondary)", lineHeight: 1.6 }}>{claimText(deepDive.moat_reason)}</p>
                 </div>
 
                 {/* Financial Health */}
@@ -289,7 +290,7 @@ export default function AnalysisView({ initialTicker }) {
                             <span style={{ fontSize: "14px", fontWeight: 600, color: "var(--color-text-primary)" }}>{cat.title}</span>
                             <span style={{ fontSize: "11px", padding: "2px 8px", borderRadius: "4px", background: "var(--color-bg-card-hover)", color: "var(--color-text-muted)" }}>{cat.timeline}</span>
                           </div>
-                          <p style={{ fontSize: "13px", color: "var(--color-text-secondary)", marginTop: "4px", lineHeight: 1.5 }}>{cat.description}</p>
+                          <p title={claimSource(cat.description) || ""} style={{ fontSize: "13px", color: "var(--color-text-secondary)", marginTop: "4px", lineHeight: 1.5 }}>{claimText(cat.description)}</p>
                         </div>
                       </div>
                     ))}
@@ -313,7 +314,7 @@ export default function AnalysisView({ initialTicker }) {
                             <div style={{ fontSize: "22px", fontWeight: 800, color: "var(--color-text-primary)" }}>{deepDive.verdict.confidence}%</div>
                           </div>
                         </div>
-                        <p style={{ fontSize: "14px", color: "var(--color-text-secondary)", lineHeight: 1.6, marginBottom: "16px" }}>{deepDive.verdict.thesis}</p>
+                        <p title={claimSource(deepDive.verdict.thesis) || ""} style={{ fontSize: "14px", color: "var(--color-text-secondary)", lineHeight: 1.6, marginBottom: "16px" }}>{claimText(deepDive.verdict.thesis)}</p>
                         <div style={{ padding: "12px 16px", background: "rgba(99,102,241,0.06)", borderRadius: "10px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                           <span style={{ fontSize: "12px", color: "var(--color-text-muted)", fontWeight: 600 }}>Target Range</span>
                           <span style={{ fontSize: "16px", fontWeight: 700, color: "var(--color-text-primary)", fontVariantNumeric: "tabular-nums" }}>
@@ -344,7 +345,7 @@ export default function AnalysisView({ initialTicker }) {
                           <span style={{ fontSize: "11px", padding: "3px 8px", borderRadius: "6px", background: "rgba(6,182,212,0.12)", color: "var(--color-accent-cyan)", fontWeight: 600 }}>Alternative</span>
                         </div>
                         <p style={{ fontSize: "13px", color: "var(--color-text-secondary)", marginBottom: "6px" }}>{alt.name}</p>
-                        <p style={{ fontSize: "13px", color: "var(--color-text-muted)", lineHeight: 1.5 }}>{alt.why}</p>
+                        <p style={{ fontSize: "13px", color: "var(--color-text-muted)", lineHeight: 1.5 }}>{claimText(alt.why)}</p>
                         <div style={{ marginTop: "8px", padding: "6px 10px", background: "rgba(16,185,129,0.08)", borderRadius: "6px", fontSize: "12px", color: "#10b981", fontWeight: 600 }}>
                           Edge: {alt.edge}
                         </div>

@@ -189,50 +189,51 @@ async def analyze_portfolio_impact(req: PortfolioImpactRequest):
             "affected_stocks": [],
         }
 
+    # Build a cite-able CONTEXT block: each headline gets an id like "headlines[0]".
+    indexed_headlines = [
+        {"id": f"headlines[{i}]", "text": h} for i, h in enumerate(req.headlines[:6])
+    ]
+    context = {
+        "country": cfg["name"],
+        "country_code": country_code,
+        "headlines": indexed_headlines,
+        "user_portfolio_tickers": req.tickers or [],
+    }
+
     if has_portfolio:
-        prompt = f"""You are a senior global macro analyst.
-
-The user holds these Indian stocks: {portfolio_str}
-
-Latest news from {cfg['name']}:
-{headlines_str}
-
-Analyze concisely:
-1. Impact summary (2-3 sentences) on the Indian stock market and user's portfolio.
-2. For each affected stock: ticker, impact (positive/negative/neutral), one-line reason.
-
-Respond ONLY in JSON (no markdown fences):
-{{"impact_summary": "...", "affected_stocks": [{{"ticker": "...", "impact": "positive|negative|neutral", "reason": "..."}}]}}
-"""
+        task = (
+            f"Assess how the news in CONTEXT.headlines may impact each of the user's Indian "
+            f"holdings (CONTEXT.user_portfolio_tickers). For every affected stock, the `reason` "
+            f"MUST cite the headline id (e.g. \"headlines[2]\"). If no headline actually implies "
+            f"impact on a holding, exclude it."
+        )
     else:
-        prompt = f"""You are a senior global macro analyst.
-
-Latest news from {cfg['name']}:
-{headlines_str}
-
-Analyze how these events might impact the Indian stock market and key sectors.
-Provide:
-1. Impact summary (2-3 sentences)
-2. List 3-5 Indian market sectors/indices that could be affected.
-
-Respond ONLY in JSON (no markdown fences):
-{{"impact_summary": "...", "affected_stocks": [{{"ticker": "NIFTY50", "impact": "positive|negative|neutral", "reason": "..."}}]}}
-"""
+        task = (
+            "Assess how the news in CONTEXT.headlines may impact Indian market sectors/indices. "
+            "For every affected sector/index, the `reason` MUST cite the headline id that "
+            "supports it."
+        )
+    schema = """{
+  "impact_summary": str,
+  "affected_stocks": [
+    { "ticker": str,
+      "impact": "positive" | "negative" | "neutral",
+      "reason": { "text": str, "source": str } }
+  ],
+  "confidence": "low" | "medium" | "high",
+  "data_gaps": [ str, ... ]
+}"""
 
     try:
-        text = ai_client.generate_json(prompt, max_tokens=1024).strip()
-        # Strip any markdown formatting
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        text = text.strip()
-
-        import json
-        data = json.loads(text)
+        data = ai_client.generate_grounded_json(task, context, schema, max_tokens=1024)
+        if not data:
+            raise ValueError("empty response")
         return data
-
     except Exception as e:
-        logger.error(f"Gemini portfolio impact analysis failed: {e}")
+        logger.error(f"Grounded portfolio-impact call failed: {e}")
         return {
             "impact_summary": f"These events from {cfg['name']} may impact Indian markets through trade, currency, and sentiment channels. Monitor NIFTY and relevant sectoral indices.",
             "affected_stocks": [],
+            "confidence": "low",
+            "data_gaps": ["AI call failed — fallback message shown."],
         }

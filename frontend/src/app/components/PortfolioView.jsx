@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 import { supabase } from "../lib/supabase";
 import { API_BASE as _SHARED_API_BASE } from "../lib/api";
+import { claimText, claimSource } from "../lib/claim";
 const API_BASE = _SHARED_API_BASE;
 
 const COLORS = [
@@ -270,32 +271,35 @@ export default function PortfolioView({ onNavigate }) {
                     {intel.top_risks?.map((risk, i) => (
                       <div key={i} style={{ padding: "10px 12px", background: "rgba(239,68,68,0.06)", borderRadius: "10px", borderLeft: "3px solid var(--color-accent-red)" }}>
                         <p style={{ fontSize: "13px", fontWeight: 600, color: "var(--color-text-primary)" }}>{risk.title}</p>
-                        <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginTop: "3px" }}>{risk.description}</p>
+                        <p title={claimSource(risk.description) || ""} style={{ fontSize: "12px", color: "var(--color-text-muted)", marginTop: "3px" }}>{claimText(risk.description)}</p>
                       </div>
                     ))}
                   </div>
                 </div>
               </div>
 
-              {intel.recommendations?.length > 0 && (
+              {(intel.suggested_directions?.length > 0 || intel.recommendations?.length > 0) && (
                 <div className="glass-card" style={{ padding: "24px" }}>
-                  <h4 style={{ fontSize: "12px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "var(--color-accent-cyan)", marginBottom: "16px" }}>💡 Recommended Stocks</h4>
+                  <h4 style={{ fontSize: "12px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "var(--color-accent-cyan)", marginBottom: "16px" }}>💡 Suggested Directions</h4>
                   <div className="responsive-grid-3">
-                    {intel.recommendations.map((rec, i) => (
-                      <div key={i} style={{ padding: "16px", background: "rgba(6,182,212,0.05)", border: "1px solid rgba(6,182,212,0.15)", borderRadius: "12px", cursor: "pointer", transition: "all 0.2s" }}
-                        onClick={() => onNavigate?.("analysis", rec.ticker)}
-                        onMouseEnter={(e) => { e.currentTarget.style.borderColor = "rgba(6,182,212,0.4)"; }}
-                        onMouseLeave={(e) => { e.currentTarget.style.borderColor = "rgba(6,182,212,0.15)"; }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
-                          <span style={{ fontSize: "16px", fontWeight: 700, color: "var(--color-text-primary)" }}>{rec.ticker}</span>
-                          <span style={{ padding: "3px 8px", borderRadius: "6px", fontSize: "10px", fontWeight: 700, background: rec.conviction === "HIGH" ? "rgba(16,185,129,0.15)" : "rgba(245,158,11,0.15)", color: rec.conviction === "HIGH" ? "#10b981" : "#f59e0b" }}>
-                            {rec.conviction}
-                          </span>
+                    {(intel.suggested_directions || intel.recommendations || []).map((rec, i) => {
+                      const focus = rec.focus || rec.ticker || rec.name || "Direction";
+                      const conviction = rec.conviction || "MEDIUM";
+                      const rationale = rec.rationale;
+                      return (
+                        <div key={i} style={{ padding: "16px", background: "rgba(6,182,212,0.05)", border: "1px solid rgba(6,182,212,0.15)", borderRadius: "12px", transition: "all 0.2s" }}
+                          onMouseEnter={(e) => { e.currentTarget.style.borderColor = "rgba(6,182,212,0.4)"; }}
+                          onMouseLeave={(e) => { e.currentTarget.style.borderColor = "rgba(6,182,212,0.15)"; }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px", gap: "8px" }}>
+                            <span style={{ fontSize: "14px", fontWeight: 700, color: "var(--color-text-primary)" }}>{focus}</span>
+                            <span style={{ padding: "3px 8px", borderRadius: "6px", fontSize: "10px", fontWeight: 700, background: conviction === "HIGH" ? "rgba(16,185,129,0.15)" : "rgba(245,158,11,0.15)", color: conviction === "HIGH" ? "#10b981" : "#f59e0b", flexShrink: 0 }}>
+                              {conviction}
+                            </span>
+                          </div>
+                          <p title={claimSource(rationale) || ""} style={{ fontSize: "13px", color: "var(--color-text-secondary)", lineHeight: 1.5 }}>{claimText(rationale)}</p>
                         </div>
-                        <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "4px" }}>{rec.name} · {rec.sector}</p>
-                        <p style={{ fontSize: "13px", color: "var(--color-text-secondary)", lineHeight: 1.5 }}>{rec.rationale}</p>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -341,7 +345,7 @@ export default function PortfolioView({ onNavigate }) {
                           </td>
                           <td style={{ padding: "14px 12px" }}>
                             {sig ? (
-                              <div title={verdict.reason} style={{ display: "inline-flex", alignItems: "center", gap: "4px", padding: "4px 10px", borderRadius: "6px", fontSize: "11px", fontWeight: 700, background: sig.bg, color: sig.color }}>
+                              <div title={claimText(verdict.reason)} style={{ display: "inline-flex", alignItems: "center", gap: "4px", padding: "4px 10px", borderRadius: "6px", fontSize: "11px", fontWeight: 700, background: sig.bg, color: sig.color }}>
                                 {sig.label}
                               </div>
                             ) : <span style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>—</span>}

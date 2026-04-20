@@ -38,7 +38,10 @@ export function AuthProvider({ children }) {
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
-      options: { data: { name: name || "" } },
+      options: {
+        data: { name: name || "" },
+        emailRedirectTo: typeof window !== "undefined" ? window.location.origin : undefined,
+      },
     });
     if (error) throw new Error(error.message);
     return data.user;
@@ -46,6 +49,18 @@ export function AuthProvider({ children }) {
 
   const logout = useCallback(async () => {
     await supabase.auth.signOut();
+  }, []);
+
+  const resetPassword = useCallback(async (email) => {
+    const redirectTo =
+      typeof window !== "undefined" ? `${window.location.origin}/reset-password` : undefined;
+    const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo });
+    if (error) throw new Error(error.message);
+  }, []);
+
+  const updatePassword = useCallback(async (newPassword) => {
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    if (error) throw new Error(error.message);
   }, []);
 
   const googleLogin = useCallback(async () => {
@@ -67,6 +82,8 @@ export function AuthProvider({ children }) {
     signup,
     logout,
     googleLogin,
+    resetPassword,
+    updatePassword,
     // providers stub kept for compat with login/signup pages
     providers: { password: true, google: true },
   };

@@ -1,19 +1,21 @@
 """
 Portfolio Intelligence Router
 ==============================
-AI-powered portfolio analysis: health score, per-holding signals,
-risk alerts, and stock recommendations — streamed via SSE.
+Grounded AI portfolio analysis. All claims reference real holdings data
+(P&L, sector weights, concentration flags) from grounding.build_portfolio_context.
+High-stakes output goes through a verifier pass.
 """
 
 import asyncio
 import json
+import logging
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.nse_universe import TICKER_TO_META
-from app.services import ai_client
+from app.services import ai_client, grounding
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/intelligence", tags=["portfolio-intelligence"])
 
 
@@ -22,107 +24,103 @@ class PositionIn(BaseModel):
     quantity: float
     buy_price: float
 
+
 class IntelRequest(BaseModel):
     positions: list[PositionIn]
 
 
-async def _intelligence_generator(holdings: list[dict]):
-    """Stream portfolio intelligence as SSE events."""
-
-    yield f"data: {json.dumps({'type': 'step', 'message': 'Scanning portfolio holdings...'})}\n\n"
-    await asyncio.sleep(0.4)
-
-    yield f"data: {json.dumps({'type': 'step', 'message': f'Found {len(holdings)} stocks. Analyzing diversification...'})}\n\n"
-    await asyncio.sleep(0.4)
-
-    yield f"data: {json.dumps({'type': 'step', 'message': 'Evaluating sector concentration risk...'})}\n\n"
-    await asyncio.sleep(0.4)
-
-    yield f"data: {json.dumps({'type': 'step', 'message': 'Generating per-stock verdicts...'})}\n\n"
-    await asyncio.sleep(0.3)
-
-    yield f"data: {json.dumps({'type': 'step', 'message': 'Identifying better alternatives...'})}\n\n"
-    await asyncio.sleep(0.3)
-
-    yield f"data: {json.dumps({'type': 'step', 'message': 'Compiling final intelligence report...'})}\n\n"
+async def _intelligence_generator(raw_holdings: list[dict]):
+    for msg in [
+        "Fetching live prices for each holding...",
+        "Computing P&L and sector allocation...",
+        "Benchmarking each holding against sector peers...",
+        "Running grounded AI strategist...",
+        "Verifying claims against portfolio data...",
+    ]:
+        yield f"data: {json.dumps({'type':'step','message':msg})}\n\n"
+        await asyncio.sleep(0.3)
 
     if not ai_client.is_available():
-        yield f"data: {json.dumps({'type': 'step', 'message': 'ERROR: Gemini API key not configured.'})}\n\n"
+        yield f"data: {json.dumps({'type':'step','message':'ERROR: AI client not configured.'})}\n\n"
         yield "data: [DONE]\n\n"
         return
 
-    holdings_summary = "\n".join([
-        f"- {h['ticker']} ({h['name']}, {h['sector']}): {h['quantity']} shares @ ₹{h['buy_price']} avg"
-        for h in holdings
-    ])
+    try:
+        context = await asyncio.to_thread(grounding.build_portfolio_context, raw_holdings)
+    except Exception as e:
+        yield f"data: {json.dumps({'type':'error','message':f'Context build failed: {e}'})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
 
-    prompt = f"""You are an expert Indian equity portfolio strategist. Analyze this retail investor's portfolio and provide actionable intelligence.
-
-PORTFOLIO:
-{holdings_summary}
-
-Respond ONLY with a valid JSON object with these exact keys:
-- "portfolio_health_score": integer 1-100 (overall portfolio quality)
-- "health_breakdown": object with keys "diversification" (1-100), "quality" (1-100), "risk" (1-100), "momentum" (1-100)
-- "holdings_verdicts": array of objects, one per holding, each with:
-  - "ticker": string
-  - "signal": "BUY" or "HOLD" or "REDUCE"
-  - "reason": string (1 short sentence)
-  - "confidence": integer 1-100
-- "top_risks": array of 3 objects, each with "title" (string) and "description" (string, 1 sentence)
-- "recommendations": array of 3 objects, each with:
-  - "ticker": string (NSE symbol, must be different from portfolio holdings)
-  - "name": string (company name)
-  - "sector": string
-  - "rationale": string (1-2 sentences on why this stock complements the portfolio)
-  - "conviction": "HIGH" or "MEDIUM"
-"""
+    task = (
+        "Analyze this retail investor's portfolio. All signals must reference a specific "
+        "holding's snapshot, weight_pct, or unrealized_pnl_pct from CONTEXT. Risks must "
+        "cite CONTEXT.aggregate (sector_allocation, top_holding_pct, top_sector_pct, "
+        "concentration_flag). Do NOT recommend specific tickers not in CONTEXT — instead "
+        "return sector or factor suggestions."
+    )
+    schema = """{
+  "portfolio_health_score": int (1-100) | null,
+  "health_breakdown": {
+    "diversification": int (1-100) | null,
+    "quality": int (1-100) | null,
+    "risk": int (1-100) | null,
+    "momentum": int (1-100) | null
+  },
+  "holdings_verdicts": [
+    { "ticker": str,
+      "signal": "BUY" | "HOLD" | "REDUCE",
+      "reason": { "text": str, "source": str },
+      "confidence": int (1-100) }
+  ],
+  "top_risks": [ { "title": str, "description": { "text": str, "source": str } } ],
+  "suggested_directions": [
+    { "focus": str,               // e.g. "Defensive large-cap IT"
+      "rationale": { "text": str, "source": str },
+      "conviction": "HIGH" | "MEDIUM" }
+  ],
+  "confidence": "low" | "medium" | "high",
+  "data_gaps": [ str, ... ]
+}"""
 
     try:
-        text = await asyncio.wait_for(
-            asyncio.to_thread(ai_client.generate_json, prompt, 2048),
-            timeout=45
+        data = await asyncio.wait_for(
+            asyncio.to_thread(ai_client.generate_grounded_json, task, context, schema, 2048),
+            timeout=60,
         )
-        # Extract JSON
-        if "```json" in text:
-            text = text.split("```json")[1].split("```")[0].strip()
-        elif "```" in text:
-            text = text.split("```")[1].split("```")[0].strip()
-        data = json.loads(text)
+    except asyncio.TimeoutError:
+        yield f"data: {json.dumps({'type':'error','message':'Timed out.'})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
 
-        result = {
-            "type": "result",
-            "portfolio_health_score": data.get("portfolio_health_score", 50),
-            "health_breakdown": data.get("health_breakdown", {}),
-            "holdings_verdicts": data.get("holdings_verdicts", []),
-            "top_risks": data.get("top_risks", []),
-            "recommendations": data.get("recommendations", []),
-        }
-        yield f"data: {json.dumps(result)}\n\n"
-    except Exception as e:
-        yield f"data: {json.dumps({'type': 'step', 'message': f'Analysis failed: {str(e)}'})}\n\n"
+    if not data:
+        yield f"data: {json.dumps({'type':'error','message':'AI returned unparseable response.'})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
 
+    verified = await asyncio.to_thread(ai_client.verify_claims, data, context, 1024)
+    data = verified.get("verified", data)
+
+    result = {
+        "type": "result",
+        "portfolio_health_score": data.get("portfolio_health_score"),
+        "health_breakdown": data.get("health_breakdown", {}),
+        "holdings_verdicts": data.get("holdings_verdicts", []),
+        "top_risks": data.get("top_risks", []),
+        "suggested_directions": data.get("suggested_directions", []),
+        "confidence": data.get("confidence", "low"),
+        "data_gaps": data.get("data_gaps", []),
+        "removed_by_verifier": verified.get("removed", []),
+        "aggregate": context.get("aggregate", {}),
+        "context_snapshot_at": context.get("generated_at"),
+    }
+    yield f"data: {json.dumps(result)}\n\n"
     yield "data: [DONE]\n\n"
 
 
 @router.post("/portfolio")
 async def portfolio_intelligence(req: IntelRequest):
-    """Stream AI-powered portfolio intelligence as SSE."""
     if not req.positions:
         return {"error": "No holdings provided."}
-
-    holdings = []
-    for pos in req.positions:
-        meta = TICKER_TO_META.get(pos.ticker.upper(), {"name": pos.ticker, "sector": "Unknown"})
-        holdings.append({
-            "ticker": pos.ticker.upper(),
-            "name": meta["name"],
-            "sector": meta["sector"],
-            "quantity": pos.quantity,
-            "buy_price": pos.buy_price,
-        })
-
-    return StreamingResponse(
-        _intelligence_generator(holdings),
-        media_type="text/event-stream"
-    )
+    raw = [{"ticker": p.ticker, "quantity": p.quantity, "buy_price": p.buy_price} for p in req.positions]
+    return StreamingResponse(_intelligence_generator(raw), media_type="text/event-stream")
