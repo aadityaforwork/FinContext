@@ -18,6 +18,7 @@ from app.routers import (
     portfolio_intelligence,
     global_news,
     company_data,
+    risk,
 )
 from app.core.config import settings
 
@@ -46,6 +47,7 @@ app.include_router(zerodha.router)
 app.include_router(portfolio_intelligence.router)
 app.include_router(global_news.router)
 app.include_router(company_data.router)
+app.include_router(risk.router)
 
 
 @app.get("/health", tags=["system"])

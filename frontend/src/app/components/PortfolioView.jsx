@@ -5,6 +5,8 @@ import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 import { supabase } from "../lib/supabase";
 import { API_BASE as _SHARED_API_BASE } from "../lib/api";
 import { claimText, claimSource } from "../lib/claim";
+import PortfolioContextCard from "./PortfolioContextCard";
+import RiskMetricsCard from "./RiskMetricsCard";
 const API_BASE = _SHARED_API_BASE;
 
 const COLORS = [
@@ -213,6 +215,14 @@ export default function PortfolioView({ onNavigate }) {
               </div>
             ))}
           </div>
+
+          <PortfolioContextCard
+            positions={portfolio.positions.map((p) => ({ ticker: p.ticker, quantity: p.quantity, buy_price: p.buy_price }))}
+          />
+
+          <RiskMetricsCard
+            positions={portfolio.positions.map((p) => ({ ticker: p.ticker, quantity: p.quantity, buy_price: p.buy_price }))}
+          />
 
           {!intel && !intelLoading && (
             <div className="glass-card animate-fade-in" style={{ padding: "28px", marginBottom: "24px", textAlign: "center", background: "linear-gradient(135deg, rgba(99,102,241,0.08), rgba(6,182,212,0.06))", border: "1px solid rgba(99,102,241,0.2)" }}>

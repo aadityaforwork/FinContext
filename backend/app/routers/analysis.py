@@ -16,6 +16,9 @@ import json
 import logging
 
 from app.nse_universe import TICKER_TO_META
+from app.agents import base as agents_base
+from app.agents.crews import narrative as narrative_crew
+from app.core.compliance import with_disclaimer
 from app.services import ai_client, grounding
 
 logger = logging.getLogger(__name__)
@@ -78,7 +81,7 @@ async def simulate_scenario(req: SimulateRequest):
     impact = data.get("impact_score_percent")
     direction = "Bullish" if (impact or 0) > 0 else "Bearish" if (impact or 0) < 0 else "Neutral"
 
-    return {
+    return with_disclaimer({
         "ticker": ticker,
         "company": context["meta"]["name"],
         "scenario_analyzed": req.scenario,
@@ -95,7 +98,7 @@ async def simulate_scenario(req: SimulateRequest):
         "confidence": data.get("confidence", "low"),
         "data_gaps": data.get("data_gaps", []),
         "context_snapshot_at": context.get("generated_at"),
-    }
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +157,7 @@ async def dd_agent_generator(ticker: str):
         yield "data: [DONE]\n\n"
         return
 
-    memo = {
+    memo = with_disclaimer({
         "type": "result",
         "company": meta["name"],
         "ticker": ticker,
@@ -166,7 +169,7 @@ async def dd_agent_generator(ticker: str):
         "confidence": data.get("confidence", "low"),
         "data_gaps": data.get("data_gaps", []),
         "context_snapshot_at": context.get("generated_at"),
-    }
+    })
     yield f"data: {json.dumps(memo)}\n\n"
     yield "data: [DONE]\n\n"
 
@@ -180,16 +183,35 @@ async def deploy_dd_agent(req: DDAgentRequest):
 
 
 # ---------------------------------------------------------------------------
-# 3. Narrative-to-Numbers Valuation Engine
+# 3. Narrative-to-Numbers — agent crew (Phase A)
 # ---------------------------------------------------------------------------
-@router.post("/narrative-impact")
-async def calculate_narrative_impact(req: NarrativeRequest):
-    """The narrative itself IS the data source — no external context required."""
+def _shape_narrative_response(text: str, data: dict) -> dict:
+    """Translate the crew/legacy output dict into the public response envelope."""
+    return with_disclaimer({
+        "source_text": text,
+        "extraction": {
+            "sentiment": data.get("sentiment", "Neutral"),
+            "severity_1_to_10": data.get("severity_1_to_10"),
+            "estimated_price_impact_percent": data.get("estimated_price_impact_percent"),
+            "algorithmic_action": data.get("algorithmic_action", "Hold"),
+        },
+        "model_adjustments": {
+            "revenue": data.get("revenue_adjustment"),
+            "ebitda": data.get("ebitda_shock"),
+        },
+        "risk_factors": [data.get("risk_factor", {})],
+        "confidence": data.get("confidence", "low"),
+        "data_gaps": data.get("data_gaps", []),
+    })
+
+
+async def _narrative_legacy_path(text: str) -> dict:
+    """Pre-CrewAI single-call path. Kept as fallback when crewai is not installed
+    or GROQ_API_KEY is missing — never delete; it is the safety net for prod."""
     if not ai_client.is_available():
         raise HTTPException(status_code=500, detail="AI client not configured")
 
-    # Package the narrative as CONTEXT so the same grounding contract applies.
-    context = {"narrative": req.text}
+    context = {"narrative": text}
     task = (
         "Convert the narrative in CONTEXT into a structured financial-shock model. "
         "Every rationale must quote a phrase from CONTEXT.narrative as its source. "
@@ -211,23 +233,24 @@ async def calculate_narrative_impact(req: NarrativeRequest):
     )
     if not data:
         raise HTTPException(status_code=502, detail="AI returned unparseable response")
+    return data
 
-    return {
-        "source_text": req.text,
-        "extraction": {
-            "sentiment": data.get("sentiment", "Neutral"),
-            "severity_1_to_10": data.get("severity_1_to_10"),
-            "estimated_price_impact_percent": data.get("estimated_price_impact_percent"),
-            "algorithmic_action": data.get("algorithmic_action", "Hold"),
-        },
-        "model_adjustments": {
-            "revenue": data.get("revenue_adjustment"),
-            "ebitda": data.get("ebitda_shock"),
-        },
-        "risk_factors": [data.get("risk_factor", {})],
-        "confidence": data.get("confidence", "low"),
-        "data_gaps": data.get("data_gaps", []),
-    }
+
+@router.post("/narrative-impact")
+async def calculate_narrative_impact(req: NarrativeRequest):
+    """Run the 2-agent Narrative-to-Numbers crew. Falls back to the legacy single-call path
+    if crewai is not installed or GROQ_API_KEY is missing."""
+    if agents_base.is_available():
+        try:
+            data = await narrative_crew.run(req.text)
+            if data:
+                return _shape_narrative_response(req.text, data)
+            logger.warning("narrative crew returned empty dict — falling back to legacy path")
+        except Exception as e:
+            logger.exception("narrative crew failed; falling back to legacy path: %s", e)
+
+    data = await _narrative_legacy_path(req.text)
+    return _shape_narrative_response(req.text, data)
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +346,7 @@ async def deep_dive_generator(ticker: str):
             financials[k] = v
     alternatives = grounding.get_sector_alternatives(context, limit=2)
 
-    result = {
+    result = with_disclaimer({
         "type": "result",
         "company": meta["name"],
         "ticker": ticker,
@@ -338,7 +361,7 @@ async def deep_dive_generator(ticker: str):
         "data_gaps": data.get("data_gaps", []),
         "removed_by_verifier": verified.get("removed", []),
         "context_snapshot_at": context.get("generated_at"),
-    }
+    })
     yield f"data: {json.dumps(result)}\n\n"
     yield "data: [DONE]\n\n"
 

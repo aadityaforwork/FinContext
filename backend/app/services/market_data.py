@@ -15,6 +15,8 @@ from cachetools import TTLCache
 from datetime import datetime
 import logging
 
+from app.nse_universe import TICKER_TO_YF
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -46,6 +48,18 @@ INDEX_MAP = {
 }
 
 # ---------------------------------------------------------------------------
+# Symbol resolution — TICKER_MAP holds custom overrides (e.g. for split tickers
+# like TATAMOTORS-TMCV); TICKER_TO_YF holds the full NSE universe (~150 names).
+# Always check the override first so custom mappings win.
+# ---------------------------------------------------------------------------
+def resolve_yf_symbol(ticker: str) -> str | None:
+    """Resolve an internal ticker to its yfinance symbol, or None if unknown."""
+    if not ticker:
+        return None
+    return TICKER_MAP.get(ticker) or TICKER_TO_YF.get(ticker.upper())
+
+
+# ---------------------------------------------------------------------------
 # Caching: avoid hammering Yahoo Finance
 # ---------------------------------------------------------------------------
 # price cache: 5 min TTL, max 50 entries
@@ -66,7 +80,7 @@ def get_live_quote(ticker: str) -> dict | None:
     if cache_key in _price_cache:
         return _price_cache[cache_key]
 
-    yf_symbol = TICKER_MAP.get(ticker)
+    yf_symbol = resolve_yf_symbol(ticker)
     if not yf_symbol:
         return None
 
@@ -106,7 +120,7 @@ def get_price_history(ticker: str, period: str = "1mo") -> list[dict]:
     if cache_key in _history_cache:
         return _history_cache[cache_key]
 
-    yf_symbol = TICKER_MAP.get(ticker)
+    yf_symbol = resolve_yf_symbol(ticker)
     if not yf_symbol:
         return []
 

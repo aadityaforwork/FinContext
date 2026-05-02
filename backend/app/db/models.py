@@ -4,7 +4,7 @@ Database Models
 SQLAlchemy ORM models for persistent storage.
 """
 
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, UniqueConstraint, Boolean
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, UniqueConstraint, Boolean, Index, JSON
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 from app.db import Base
@@ -66,3 +66,28 @@ class PortfolioPosition(Base):
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     user = relationship("User", back_populates="portfolio_positions")
+
+
+class LLMCache(Base):
+    """
+    Persistent cache for LLM / agent crew outputs.
+
+    Saves tokens (and Supabase storage) by reusing analytical results across
+    requests. Keyed by a deterministic string the caller chooses (e.g.
+    "deep_dive:RELIANCE:2025-05-01"). Payload is the entire response dict.
+
+    Eviction: opportunistic — services/llm_cache.set() periodically deletes
+    rows where expires_at < now(). No pg_cron / triggers needed (works on
+    both SQLite dev and Postgres prod).
+    """
+    __tablename__ = "llm_cache"
+
+    cache_key = Column(String(255), primary_key=True)
+    payload = Column(JSON, nullable=False)
+    scope = Column(String(64), nullable=False, default="global")  # 'global' or 'user:<id>'
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
+
+    __table_args__ = (
+        Index("ix_llm_cache_scope_expires", "scope", "expires_at"),
+    )

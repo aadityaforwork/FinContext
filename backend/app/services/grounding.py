@@ -11,14 +11,19 @@ the LLM synthesize the narrative on top of verified facts.
 Public:
     build_stock_context(ticker) -> dict
     build_portfolio_context(holdings) -> dict
+    build_market_context() -> dict
+    build_movers_context(holdings) -> dict
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import statistics
+from urllib.parse import quote
 from typing import Any
 
+import feedparser
 import yfinance as yf
 from cachetools import TTLCache
 
@@ -29,6 +34,43 @@ logger = logging.getLogger(__name__)
 
 _context_cache: TTLCache = TTLCache(maxsize=200, ttl=600)   # 10 min
 _snapshot_cache: TTLCache = TTLCache(maxsize=300, ttl=600)  # 10 min per-ticker snapshot
+_index_cache: TTLCache = TTLCache(maxsize=50, ttl=300)      # 5 min per-index snapshot
+_market_ctx_cache: TTLCache = TTLCache(maxsize=4, ttl=600)  # 10 min full market ctx
+_news_query_cache: TTLCache = TTLCache(maxsize=40, ttl=900) # 15 min per news query
+
+
+# ---------------------------------------------------------------------------
+# Sector → NIFTY sector-index symbol. Lets us compute excess return
+# (stock_return − sector_return) so the LLM can distinguish idiosyncratic
+# moves from sector-wide moves.
+# ---------------------------------------------------------------------------
+SECTOR_INDEX_MAP: dict[str, str] = {
+    "Banking": "^NSEBANK",
+    "Finance": "^NSEBANK",
+    "Insurance": "^NSEBANK",
+    "IT": "^CNXIT",
+    "Automobiles": "^CNXAUTO",
+    "Pharmaceuticals": "^CNXPHARMA",
+    "FMCG": "^CNXFMCG",
+    "Metals & Mining": "^CNXMETAL",
+    "Oil & Gas": "^CNXENERGY",
+    "Power": "^CNXENERGY",
+    "Real Estate": "^CNXREALTY",
+    "Infrastructure": "^CNXINFRA",
+    "Cement": "^CNXINFRA",
+    "Capital Goods": "^CNXINFRA",
+    "Telecom": "^CNXMEDIA",
+    "Consumer Durables": "^CNXFMCG",
+}
+
+# Global-news locales that drive overnight IN market direction.
+_GLOBAL_SOURCES = [
+    {"code": "US", "label": "United States", "query": "US economy stock market Federal Reserve Wall Street when:1d"},
+    {"code": "CN", "label": "China",         "query": "China economy trade market finance when:1d"},
+    {"code": "EU", "label": "Europe",        "query": "Europe economy ECB stock market finance when:1d"},
+    {"code": "JP", "label": "Japan",         "query": "Japan economy Nikkei Bank of Japan finance when:1d"},
+    {"code": "SA", "label": "Middle East",   "query": "Middle East oil OPEC crude when:1d"},
+]
 
 
 # ---------------------------------------------------------------------------
@@ -427,4 +469,218 @@ def build_portfolio_context(holdings: list[dict]) -> dict:
                                   or (top_sector.get("weight_pct", 0) or 0) > 50,
         },
         "generated_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Context Engine — market & movers
+# ---------------------------------------------------------------------------
+def _fetch_index_change(symbol: str) -> dict | None:
+    """Today's % change for a yfinance index symbol. Cached 5 min."""
+    if symbol in _index_cache:
+        return _index_cache[symbol]
+    try:
+        tk = yf.Ticker(symbol)
+        price = prev = 0.0
+        try:
+            fi = tk.fast_info
+            price = float(getattr(fi, "last_price", 0) or 0)
+            prev = float(getattr(fi, "previous_close", 0) or 0)
+        except Exception:
+            pass
+        if not price:
+            hist = tk.history(period="5d")
+            if not hist.empty:
+                price = float(hist["Close"].iloc[-1])
+                prev = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else price
+        if not price:
+            _index_cache[symbol] = None
+            return None
+        change_pct = round(((price - prev) / prev * 100) if prev else 0.0, 2)
+        out = {"symbol": symbol, "value": round(price, 2), "change_percent": change_pct}
+        _index_cache[symbol] = out
+        return out
+    except Exception as e:
+        logger.warning("index fetch failed for %s: %s", symbol, e)
+        _index_cache[symbol] = None
+        return None
+
+
+def _fetch_rss_headlines(query: str, hl: str = "en-IN", gl: str = "IN",
+                        ceid: str = "IN:en", n: int = 6) -> list[dict]:
+    """Lightweight Google News RSS fetcher with locale params. 15-min cache."""
+    key = f"{query}|{hl}|{gl}|{ceid}"
+    if key in _news_query_cache:
+        return _news_query_cache[key][:n]
+    try:
+        url = (f"https://news.google.com/rss/search?q={quote(query)}"
+               f"&hl={hl}&gl={gl}&ceid={ceid}")
+        feed = feedparser.parse(url)
+        out = []
+        for entry in feed.entries[:n]:
+            parts = entry.title.rsplit(" - ", 1)
+            headline = parts[0].strip()
+            source = parts[1].strip() if len(parts) > 1 else "Google News"
+            snippet = ""
+            if hasattr(entry, "summary"):
+                snippet = re.sub(r"<[^>]+>", "", entry.summary).strip()[:240]
+            out.append({
+                "source": source,
+                "headline": headline,
+                "snippet": snippet or headline,
+            })
+        _news_query_cache[key] = out
+        return out
+    except Exception as e:
+        logger.warning("rss fetch failed for '%s': %s", query, e)
+        return []
+
+
+def build_market_context() -> dict:
+    """
+    Today's market snapshot shared by today-attribution and tomorrow-outlook.
+    Cached 10 min so repeated calls in one render are cheap.
+
+    Returns:
+      indices         — NIFTY 50 + NIFTY Midcap 100 today
+      sectors         — per-sector index returns today
+      india_headlines — today's top IN macro headlines, indexed as india_news[i]
+      global_headlines— today's top headlines from US/CN/EU/JP/SA, indexed as global_news[i]
+    """
+    if "market_ctx" in _market_ctx_cache:
+        return _market_ctx_cache["market_ctx"]
+
+    indices: dict[str, dict | None] = {
+        "nifty_50": _fetch_index_change("^NSEI"),
+        "nifty_midcap_100": _fetch_index_change("NIFTY_MIDCAP_100.NS"),
+        "sensex": _fetch_index_change("^BSESN"),
+    }
+
+    sectors: list[dict] = []
+    seen: set[str] = set()
+    for sector_name, sym in SECTOR_INDEX_MAP.items():
+        if sym in seen:
+            continue
+        seen.add(sym)
+        data = _fetch_index_change(sym)
+        if data:
+            sectors.append({"sector": sector_name, "index": sym, **data})
+
+    india_query = "India economy stock market finance when:1d"
+    india_news_raw = _fetch_rss_headlines(india_query, hl="en-IN", gl="IN", ceid="IN:en", n=6)
+    india_news = [
+        {"id": f"india_news[{i}]", **n} for i, n in enumerate(india_news_raw)
+    ]
+
+    global_news: list[dict] = []
+    idx = 0
+    for src in _GLOBAL_SOURCES:
+        items = _fetch_rss_headlines(
+            src["query"], hl="en-US", gl="US", ceid="US:en", n=3
+        )
+        for n in items:
+            global_news.append({
+                "id": f"global_news[{idx}]",
+                "country": src["code"],
+                "country_label": src["label"],
+                **n,
+            })
+            idx += 1
+
+    from datetime import datetime
+    ctx = {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "indices": indices,
+        "sectors": sectors,
+        "india_headlines": india_news,
+        "global_headlines": global_news,
+    }
+    _market_ctx_cache["market_ctx"] = ctx
+    return ctx
+
+
+def build_movers_context(holdings: list[dict], market_ctx: dict | None = None) -> dict:
+    """
+    Per-holding "move today" context: change_percent + sector index return +
+    excess return + ticker-level news. Plus portfolio aggregate returns.
+
+    holdings: [{ticker, quantity, buy_price}]
+    """
+    if market_ctx is None:
+        market_ctx = build_market_context()
+
+    sector_returns = {s["sector"]: s["change_percent"] for s in market_ctx.get("sectors", [])}
+    holdings_ctx: list[dict] = []
+    total_value = 0.0
+    weighted_change = 0.0
+
+    for h in holdings or []:
+        t = (h.get("ticker") or "").upper()
+        if not t:
+            continue
+        meta = TICKER_TO_META.get(t, {"name": t, "sector": "Unknown"})
+        snap = _fetch_snapshot(t)
+        price = snap.get("current_price") or h.get("buy_price") or 0.0
+        qty = float(h.get("quantity") or 0)
+        value = price * qty
+        total_value += value
+        change = snap.get("change_percent")
+        sector = meta.get("sector", "Unknown")
+        sector_return = sector_returns.get(sector)
+        excess = None
+        if change is not None and sector_return is not None:
+            excess = round(change - sector_return, 2)
+        if change is not None:
+            weighted_change += (change or 0) * value
+
+        news_items: list[dict] = []
+        try:
+            raw = data_ingestion.retrieve_context(t, top_k=3)
+            for i, n in enumerate(raw):
+                news_items.append({
+                    "id": f"{t}_news[{i}]",
+                    "source": n.get("source"),
+                    "headline": n.get("headline"),
+                    "snippet": (n.get("snippet") or "")[:200],
+                })
+        except Exception as e:
+            logger.warning("news fetch failed in movers for %s: %s", t, e)
+
+        holdings_ctx.append({
+            "ticker": t,
+            "name": meta.get("name"),
+            "sector": sector,
+            "position_value": round(value, 2),
+            "change_percent_today": change,
+            "sector_index_return_today": sector_return,
+            "excess_return_today": excess,
+            "news": news_items,
+        })
+
+    # Portfolio-level return today (value-weighted)
+    portfolio_return = round(weighted_change / total_value, 2) if total_value else None
+
+    # Classify movers so the LLM has an easy hook
+    def _mover_bucket(h):
+        c = h.get("change_percent_today")
+        if c is None:
+            return "flat"
+        if c >= 1.5:
+            return "strong_gainer"
+        if c <= -1.5:
+            return "strong_loser"
+        return "flat"
+
+    for h in holdings_ctx:
+        h["mover_bucket"] = _mover_bucket(h)
+
+    from datetime import datetime
+    return {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "portfolio_return_today_pct": portfolio_return,
+        "holdings": holdings_ctx,
+        "market": {
+            "indices": market_ctx.get("indices", {}),
+            "sectors": market_ctx.get("sectors", []),
+        },
     }
