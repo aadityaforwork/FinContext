@@ -4,9 +4,11 @@ import { useState, useEffect } from "react";
 import { supabase } from "../lib/supabase";
 import { API_BASE as _SHARED_API_BASE } from "../lib/api";
 import { LoaderHeader } from "./Loaders";
+import { useAuth } from "../context/AuthContext";
 const API_BASE = _SHARED_API_BASE;
 
 export default function ScreenerView({ onNavigate }) {
+  const { user } = useAuth();
   const [stocks, setStocks] = useState([]);
   const [sectors, setSectors] = useState([]);
   const [searchQuery, setSearchQuery] = useState("");
@@ -71,7 +73,14 @@ export default function ScreenerView({ onNavigate }) {
   });
 
   const addToWatchlist = async (ticker) => {
-    const { error } = await supabase.from("watchlist").upsert({ ticker }, { onConflict: "ticker,user_id", ignoreDuplicates: true });
+    if (!user?.id) {
+      setActionMsg("Please sign in to add to watchlist");
+      setTimeout(() => setActionMsg(""), 2000);
+      return;
+    }
+    const { error } = await supabase
+      .from("watchlist")
+      .upsert({ ticker, user_id: user.id }, { onConflict: "ticker,user_id", ignoreDuplicates: true });
     setActionMsg(error ? `Failed to add ${ticker}` : `✓ ${ticker} added to watchlist`);
     setTimeout(() => setActionMsg(""), 2000);
   };

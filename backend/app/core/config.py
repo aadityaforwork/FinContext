@@ -33,7 +33,8 @@ class Settings:
 
     # --- Frontend / CORS ---
     FRONTEND_URL: str = os.environ.get("FRONTEND_URL", "http://localhost:3000")
-    # Comma-separated list of allowed origins
+    # Comma-separated list of exact allowed origins.
+    # Note: with allow_credentials=True the browser rejects "*", so origins must be enumerated.
     CORS_ORIGINS: list[str] = [
         o.strip()
         for o in os.environ.get(
@@ -42,6 +43,9 @@ class Settings:
         ).split(",")
         if o.strip()
     ]
+    # Optional regex for matching ephemeral preview URLs (e.g. Vercel/Netlify previews).
+    # Example value: r"https://.*\.vercel\.app"
+    CORS_ORIGIN_REGEX: str | None = os.environ.get("CORS_ORIGIN_REGEX") or None
 
     # --- Google OAuth ---
     GOOGLE_CLIENT_ID: str | None = os.environ.get("GOOGLE_CLIENT_ID")

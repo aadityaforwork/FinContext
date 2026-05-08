@@ -9,6 +9,7 @@ import PortfolioContextCard from "./PortfolioContextCard";
 import RiskMetricsCard from "./RiskMetricsCard";
 import { useToast } from "./Toast";
 import { LoaderHeader, Skeleton } from "./Loaders";
+import { useAuth } from "../context/AuthContext";
 const API_BASE = _SHARED_API_BASE;
 
 const COLORS = [
@@ -54,6 +55,7 @@ function MiniBar({ value, color }) {
 
 export default function PortfolioView({ onNavigate }) {
   const toast = useToast();
+  const { user } = useAuth();
   const [portfolio, setPortfolio] = useState(null);
   const [loading, setLoading] = useState(true);
   const [uploadingCsv, setUploadingCsv] = useState(false);
@@ -67,12 +69,14 @@ export default function PortfolioView({ onNavigate }) {
   }, [intelSteps]);
 
   const fetchPortfolio = useCallback(async () => {
+    if (!user?.id) return;
     setLoading(true);
     try {
-      // 1. Get positions from Supabase
+      // 1. Get positions from Supabase — scoped to current user.
       const { data: rows, error } = await supabase
         .from("portfolio")
         .select("ticker, quantity, buy_price, added_at")
+        .eq("user_id", user.id)
         .order("added_at", { ascending: true });
 
       if (error) throw error;
@@ -101,7 +105,7 @@ export default function PortfolioView({ onNavigate }) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [user?.id]);
 
   useEffect(() => { fetchPortfolio(); }, [fetchPortfolio]);
 
@@ -116,6 +120,11 @@ export default function PortfolioView({ onNavigate }) {
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
+    if (!user?.id) {
+      toast.error("Please sign in to upload your portfolio.");
+      e.target.value = null;
+      return;
+    }
     setUploadingCsv(true);
     const formData = new FormData();
     formData.append("file", file);
@@ -123,10 +132,14 @@ export default function PortfolioView({ onNavigate }) {
       const res = await fetch(`${API_BASE}/api/zerodha/upload-csv`, { method: "POST", body: formData });
       const data = await res.json();
       if (res.ok && data.positions) {
-        // Replace existing holdings with the CSV snapshot (Kite is source of truth)
-        await supabase.from("portfolio").delete().neq("ticker", "__never__");
+        // Replace the current user's holdings with the CSV snapshot (Kite is source of truth).
+        // Scope delete to user_id — never run a global delete.
+        await supabase.from("portfolio").delete().eq("user_id", user.id);
         for (const pos of data.positions) {
-          await supabase.from("portfolio").upsert({ ticker: pos.ticker, quantity: pos.quantity, buy_price: pos.buy_price }, { onConflict: "ticker" });
+          await supabase.from("portfolio").upsert(
+            { ticker: pos.ticker, quantity: pos.quantity, buy_price: pos.buy_price, user_id: user.id },
+            { onConflict: "ticker,user_id" }
+          );
         }
         toast.success(`Imported ${data.positions.length} positions from Kite`);
         fetchPortfolio();

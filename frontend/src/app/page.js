@@ -44,16 +44,17 @@ export default function App() {
     if (error) setTimeout(() => toast.error(decodeURIComponent(error.replace(/_/g, " "))), 500);
 
     // Handle Zerodha import: positions arrive as base64 JSON in query param.
-    // Kite is source of truth — replace the user's snapshot entirely so sells in Kite are reflected.
+    // Kite is source of truth — replace the current user's snapshot entirely so sells in Kite are reflected.
     const zerodhaImport = params.get("zerodha_import");
-    if (zerodhaImport) {
+    if (zerodhaImport && user?.id) {
       (async () => {
         try {
           const positions = JSON.parse(atob(zerodhaImport));
-          await supabase.from("portfolio").delete().neq("ticker", "__never__");
+          // Scope delete to current user — never run a global delete.
+          await supabase.from("portfolio").delete().eq("user_id", user.id);
           for (const pos of positions) {
             await supabase.from("portfolio").upsert(
-              { ticker: pos.ticker, quantity: pos.quantity, buy_price: pos.buy_price },
+              { ticker: pos.ticker, quantity: pos.quantity, buy_price: pos.buy_price, user_id: user.id },
               { onConflict: "ticker,user_id", ignoreDuplicates: false }
             );
           }
@@ -70,7 +71,7 @@ export default function App() {
       })();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [user?.id]);
 
   // Navigation handler used by child components
   const handleNavigate = (page, ticker) => {
@@ -120,6 +121,7 @@ export default function App() {
 // Dashboard View (the original home page content)
 // -----------------------------------------------------------------------
 function DashboardView({ onNavigate }) {
+  const { user } = useAuth();
   const [stocks, setStocks] = useState([]);
   const [selectedTicker, setSelectedTicker] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -131,9 +133,14 @@ function DashboardView({ onNavigate }) {
   ]);
 
   useEffect(() => {
+    if (!user?.id) return;
     (async () => {
       try {
-        const { data: rows } = await supabase.from("watchlist").select("ticker").order("added_at", { ascending: false });
+        const { data: rows } = await supabase
+          .from("watchlist")
+          .select("ticker")
+          .eq("user_id", user.id)
+          .order("added_at", { ascending: false });
         if (!rows || rows.length === 0) { setLoading(false); return; }
 
         let priceMap = {};
@@ -159,7 +166,7 @@ function DashboardView({ onNavigate }) {
         setLoading(false);
       }
     })();
-  }, []);
+  }, [user?.id]);
 
   useEffect(() => {
     fetch(`${API_BASE}/api/market/indices`)

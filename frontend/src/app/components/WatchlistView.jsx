@@ -4,19 +4,23 @@ import { useState, useEffect, useCallback } from "react";
 import { supabase } from "../lib/supabase";
 import { API_BASE as _SHARED_API_BASE } from "../lib/api";
 import { LoaderHeader, Skeleton } from "./Loaders";
+import { useAuth } from "../context/AuthContext";
 const API_BASE = _SHARED_API_BASE;
 
 export default function WatchlistView({ onNavigate }) {
+  const { user } = useAuth();
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
 
   const fetchWatchlist = useCallback(async () => {
+    if (!user?.id) return;
     setLoading(true);
     try {
-      // 1. Get tickers from Supabase
+      // 1. Get tickers from Supabase — scoped to current user.
       const { data: rows, error } = await supabase
         .from("watchlist")
         .select("ticker, added_at")
+        .eq("user_id", user.id)
         .order("added_at", { ascending: false });
 
       if (error) throw error;
@@ -46,12 +50,17 @@ export default function WatchlistView({ onNavigate }) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [user?.id]);
 
   useEffect(() => { fetchWatchlist(); }, [fetchWatchlist]);
 
   const removeItem = async (ticker) => {
-    await supabase.from("watchlist").delete().eq("ticker", ticker);
+    if (!user?.id) return;
+    await supabase
+      .from("watchlist")
+      .delete()
+      .eq("ticker", ticker)
+      .eq("user_id", user.id);
     setItems((prev) => prev.filter((i) => i.ticker !== ticker));
   };
 
