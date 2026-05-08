@@ -189,8 +189,10 @@ export default function GlobeNewsSection() {
       setNews(data.news || []);
       setNewsCount(prev => ({ ...prev, [code]: data.news?.length || 0 }));
       if (data.news?.length > 0) fetchImpact(code, data.news.map(n => n.headline));
-    } catch (e) { console.error("News fetch error:", e); }
-    finally { setLoadingNews(false); }
+    } catch (e) {
+      // Backend unreachable — degrade silently. console.warn (not error) so Next dev overlay stays quiet.
+      console.warn("News fetch failed:", e?.message || e);
+    } finally { setLoadingNews(false); }
   }, []);
 
   const fetchImpact = async (code, headlines) => {
@@ -200,9 +202,10 @@ export default function GlobeNewsSection() {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ country_code: code, headlines }),
       });
-      setImpact(await res.json());
-    } catch (e) { console.error("Impact error:", e); }
-    finally { setLoadingImpact(false); }
+      if (res.ok) setImpact(await res.json());
+    } catch (e) {
+      console.warn("Impact fetch failed:", e?.message || e);
+    } finally { setLoadingImpact(false); }
   };
 
   const handleSelect = useCallback((code) => {

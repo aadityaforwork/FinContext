@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { supabase } from "../lib/supabase";
 import { API_BASE as _SHARED_API_BASE } from "../lib/api";
+import { LoaderHeader } from "./Loaders";
 const API_BASE = _SHARED_API_BASE;
 
 export default function ScreenerView({ onNavigate }) {
@@ -135,6 +136,7 @@ export default function ScreenerView({ onNavigate }) {
       </div>
 
       {/* Table */}
+      {loading && <LoaderHeader label="Loading screener universe…" />}
       <div className="glass-card" style={{ overflow: "hidden" }}>
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>

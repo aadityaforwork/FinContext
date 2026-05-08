@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { supabase } from "../lib/supabase";
 import { API_BASE as _SHARED_API_BASE } from "../lib/api";
+import { LoaderHeader, Skeleton } from "./Loaders";
 const API_BASE = _SHARED_API_BASE;
 
 export default function WatchlistView({ onNavigate }) {
@@ -21,13 +22,18 @@ export default function WatchlistView({ onNavigate }) {
       if (error) throw error;
       if (!rows || rows.length === 0) { setItems([]); return; }
 
-      // 2. Enrich with live prices from backend
-      const res = await fetch(`${API_BASE}/api/watchlist/prices`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tickers: rows.map((r) => r.ticker) }),
-      });
-      const priceMap = res.ok ? await res.json() : {};
+      // 2. Enrich with live prices from backend (degrade gracefully if unreachable)
+      let priceMap = {};
+      try {
+        const res = await fetch(`${API_BASE}/api/watchlist/prices`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tickers: rows.map((r) => r.ticker) }),
+        });
+        if (res.ok) priceMap = await res.json();
+      } catch {
+        // Backend unreachable — fall through with empty priceMap.
+      }
 
       setItems(rows.map((r) => ({
         ticker: r.ticker,
@@ -66,8 +72,13 @@ export default function WatchlistView({ onNavigate }) {
       </div>
 
       {loading ? (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "16px" }}>
-          {[1, 2, 3, 4].map((i) => <div key={i} className="shimmer" style={{ height: "140px", borderRadius: "16px" }} />)}
+        <div>
+          <LoaderHeader label="Loading your watchlist…" />
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "16px" }}>
+            {[1, 2, 3, 4].map((i) => (
+              <Skeleton key={i} h={140} r={16} />
+            ))}
+          </div>
         </div>
       ) : items.length === 0 ? (
         <div className="glass-card" style={{ padding: "60px 24px", textAlign: "center" }}>

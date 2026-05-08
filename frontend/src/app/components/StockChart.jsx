@@ -12,6 +12,7 @@ import {
 } from "recharts";
 
 import { API_BASE as _SHARED_API_BASE } from "../lib/api";
+import { LoaderHeader, Skeleton } from "./Loaders";
 const API_BASE = _SHARED_API_BASE;
 
 function CustomTooltip({ active, payload, label }) {
@@ -152,7 +153,10 @@ export default function StockChart({ ticker, stockName }) {
 
       {/* Chart */}
       {loading ? (
-        <div className="shimmer" style={{ height: "300px", borderRadius: "12px" }} />
+        <div>
+          <LoaderHeader label="Loading price history…" />
+          <Skeleton h={300} r={12} />
+        </div>
       ) : (
         <ResponsiveContainer width="100%" height={300}>
           <AreaChart data={priceData} margin={{ top: 5, right: 5, left: 0, bottom: 5 }}>

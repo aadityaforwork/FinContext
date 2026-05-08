@@ -63,11 +63,13 @@ export function AuthProvider({ children }) {
     if (error) throw new Error(error.message);
   }, []);
 
+  // Google login temporarily disabled — kept here for easy re-enable.
   const googleLogin = useCallback(async () => {
-    await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: { redirectTo: window.location.origin },
-    });
+    // await supabase.auth.signInWithOAuth({
+    //   provider: "google",
+    //   options: { redirectTo: window.location.origin },
+    // });
+    throw new Error("Google sign-in is currently disabled.");
   }, []);
 
   // Expose a display name from user metadata
@@ -85,7 +87,7 @@ export function AuthProvider({ children }) {
     resetPassword,
     updatePassword,
     // providers stub kept for compat with login/signup pages
-    providers: { password: true, google: true },
+    providers: { password: true, google: false },
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

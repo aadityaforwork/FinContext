@@ -16,10 +16,15 @@ import GlobeNewsSection from "./components/GlobeNewsSection";
 import { useAuth } from "./context/AuthContext";
 import { supabase } from "./lib/supabase";
 import { API_BASE } from "./lib/api";
+import { useToast } from "./components/Toast";
+import BrandedSplash from "./components/BrandedSplash";
+import ComplianceFooter from "./components/ComplianceFooter";
+import { LoaderHeader, Skeleton } from "./components/Loaders";
 
 export default function App() {
   const { user, loading, logout } = useAuth();
   const router = useRouter();
+  const toast = useToast();
   const [activeNav, setActiveNav] = useState("dashboard");
   const [analysisTicker, setAnalysisTicker] = useState(null);
   const [companyTicker, setCompanyTicker] = useState(null);
@@ -36,7 +41,7 @@ export default function App() {
     if (nav) setActiveNav(nav);
 
     const error = params.get("error");
-    if (error) setTimeout(() => alert("Error: " + error), 500);
+    if (error) setTimeout(() => toast.error(decodeURIComponent(error.replace(/_/g, " "))), 500);
 
     // Handle Zerodha import: positions arrive as base64 JSON in query param.
     // Kite is source of truth — replace the user's snapshot entirely so sells in Kite are reflected.
@@ -52,14 +57,19 @@ export default function App() {
               { onConflict: "ticker,user_id", ignoreDuplicates: false }
             );
           }
-          setTimeout(() => alert(`Synced ${positions.length} positions from Zerodha`), 300);
+          setTimeout(
+            () => toast.success(`Synced ${positions.length} positions from Zerodha`),
+            300
+          );
         } catch (e) {
-          console.error("Zerodha import error:", e);
+          console.warn("Zerodha import failed:", e?.message || e);
+          toast.error("Could not sync positions from Zerodha.");
         }
         // Clean up URL
         window.history.replaceState({}, "", "/");
       })();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Navigation handler used by child components
@@ -70,20 +80,7 @@ export default function App() {
   };
 
   if (loading || !user) {
-    return (
-      <div
-        style={{
-          minHeight: "100vh",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          color: "var(--color-text-secondary)",
-          fontSize: "14px",
-        }}
-      >
-        Loading…
-      </div>
-    );
+    return <BrandedSplash />;
   }
 
   return (
@@ -112,6 +109,8 @@ export default function App() {
           {activeNav === "analysis" && <AnalysisView initialTicker={analysisTicker} />}
           {activeNav === "company" && <CompanyView ticker={companyTicker} onNavigate={handleNavigate} />}
         </div>
+
+        <ComplianceFooter />
       </main>
     </div>
   );
@@ -133,15 +132,22 @@ function DashboardView({ onNavigate }) {
 
   useEffect(() => {
     (async () => {
-      const { data: rows } = await supabase.from("watchlist").select("ticker").order("added_at", { ascending: false });
-      if (!rows || rows.length === 0) { setLoading(false); return; }
       try {
-        const res = await fetch(`${API_BASE}/api/watchlist/prices`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ tickers: rows.map((r) => r.ticker) }),
-        });
-        const priceMap = res.ok ? await res.json() : {};
+        const { data: rows } = await supabase.from("watchlist").select("ticker").order("added_at", { ascending: false });
+        if (!rows || rows.length === 0) { setLoading(false); return; }
+
+        let priceMap = {};
+        try {
+          const res = await fetch(`${API_BASE}/api/watchlist/prices`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tickers: rows.map((r) => r.ticker) }),
+          });
+          if (res.ok) priceMap = await res.json();
+        } catch {
+          // Backend unreachable — render watchlist with placeholders rather than crashing.
+        }
+
         setStocks(rows.map((r) => ({
           ticker: r.ticker,
           name: priceMap[r.ticker]?.name ?? r.ticker,
@@ -157,7 +163,7 @@ function DashboardView({ onNavigate }) {
 
   useEffect(() => {
     fetch(`${API_BASE}/api/market/indices`)
-      .then((r) => r.json())
+      .then((r) => (r.ok ? r.json() : null))
       .then((data) => { if (data && data.length) setIndices(data); })
       .catch(() => {});
   }, []);
@@ -190,8 +196,13 @@ function DashboardView({ onNavigate }) {
           </div>
 
           {loading ? (
-            <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-              {[1, 2, 3, 4, 5].map((i) => <div key={i} className="shimmer" style={{ height: "80px", borderRadius: "16px" }} />)}
+            <div>
+              <LoaderHeader label="Fetching live prices…" />
+              <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                {[1, 2, 3, 4, 5].map((i) => (
+                  <Skeleton key={i} h={80} r={16} />
+                ))}
+              </div>
             </div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>

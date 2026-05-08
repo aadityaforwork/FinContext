@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import StockChart from "./StockChart";
+import { LoaderHeader, Skeleton } from "./Loaders";
 
 import { API_BASE as _SHARED_API_BASE } from "../lib/api";
 const API_BASE = _SHARED_API_BASE;
@@ -226,8 +227,13 @@ export default function CompanyView({ ticker: initialTicker, onNavigate }) {
 
       {/* Loading */}
       {loading && ticker && (
-        <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-          {[1, 2, 3].map((i) => <div key={i} className="shimmer" style={{ height: "120px", borderRadius: "16px" }} />)}
+        <div>
+          <LoaderHeader label={`Loading ${ticker} fundamentals…`} />
+          <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+            {[1, 2, 3].map((i) => (
+              <Skeleton key={i} h={120} r={16} />
+            ))}
+          </div>
         </div>
       )}
 

@@ -7,6 +7,8 @@ import { API_BASE as _SHARED_API_BASE } from "../lib/api";
 import { claimText, claimSource } from "../lib/claim";
 import PortfolioContextCard from "./PortfolioContextCard";
 import RiskMetricsCard from "./RiskMetricsCard";
+import { useToast } from "./Toast";
+import { LoaderHeader, Skeleton } from "./Loaders";
 const API_BASE = _SHARED_API_BASE;
 
 const COLORS = [
@@ -51,6 +53,7 @@ function MiniBar({ value, color }) {
 }
 
 export default function PortfolioView({ onNavigate }) {
+  const toast = useToast();
   const [portfolio, setPortfolio] = useState(null);
   const [loading, setLoading] = useState(true);
   const [uploadingCsv, setUploadingCsv] = useState(false);
@@ -76,22 +79,24 @@ export default function PortfolioView({ onNavigate }) {
       if (!rows || rows.length === 0) { setPortfolio({ holdings_count: 0, positions: [], allocation: [], total_invested: 0, current_value: 0, total_pnl: 0, total_pnl_percent: 0, day_change: 0, day_change_percent: 0 }); return; }
 
       // 2. Enrich with live P&L from backend
-      const res = await fetch(`${API_BASE}/api/portfolio/enrich`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ positions: rows.map((r) => ({ ticker: r.ticker, quantity: r.quantity, buy_price: r.buy_price })) }),
+      const fallback = () => ({
+        holdings_count: rows.length,
+        positions: rows.map((r) => ({ ticker: r.ticker, name: r.ticker, sector: "—", quantity: r.quantity, buy_price: r.buy_price, current_price: 0, invested_value: r.quantity * r.buy_price, current_value: 0, pnl: 0, pnl_percent: 0, added_at: r.added_at })),
+        allocation: [], total_invested: rows.reduce((s, r) => s + r.quantity * r.buy_price, 0),
+        current_value: 0, total_pnl: 0, total_pnl_percent: 0, day_change: 0, day_change_percent: 0,
       });
 
-      if (res.ok) {
-        setPortfolio(await res.json());
-      } else {
-        // Backend unavailable — show raw data without enrichment
-        setPortfolio({
-          holdings_count: rows.length,
-          positions: rows.map((r) => ({ ticker: r.ticker, name: r.ticker, sector: "—", quantity: r.quantity, buy_price: r.buy_price, current_price: 0, invested_value: r.quantity * r.buy_price, current_value: 0, pnl: 0, pnl_percent: 0, added_at: r.added_at })),
-          allocation: [], total_invested: rows.reduce((s, r) => s + r.quantity * r.buy_price, 0),
-          current_value: 0, total_pnl: 0, total_pnl_percent: 0, day_change: 0, day_change_percent: 0,
+      try {
+        const res = await fetch(`${API_BASE}/api/portfolio/enrich`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ positions: rows.map((r) => ({ ticker: r.ticker, quantity: r.quantity, buy_price: r.buy_price })) }),
         });
+        if (res.ok) setPortfolio(await res.json());
+        else setPortfolio(fallback());
+      } catch {
+        // Backend unreachable — render raw holdings without enrichment.
+        setPortfolio(fallback());
       }
     } finally {
       setLoading(false);
@@ -105,7 +110,7 @@ export default function PortfolioView({ onNavigate }) {
       const res = await fetch(`${API_BASE}/api/zerodha/login`);
       const data = await res.json();
       if (data.url) window.location.href = data.url;
-    } catch { alert("Failed to connect to Zerodha"); }
+    } catch { toast.error("Failed to connect to Zerodha"); }
   };
 
   const handleFileUpload = async (e) => {
@@ -123,10 +128,10 @@ export default function PortfolioView({ onNavigate }) {
         for (const pos of data.positions) {
           await supabase.from("portfolio").upsert({ ticker: pos.ticker, quantity: pos.quantity, buy_price: pos.buy_price }, { onConflict: "ticker" });
         }
-        alert(`Imported ${data.positions.length} positions from Kite`);
+        toast.success(`Imported ${data.positions.length} positions from Kite`);
         fetchPortfolio();
-      } else { alert(data.detail || "Upload failed"); }
-    } catch { alert("Network error during upload"); }
+      } else { toast.error(data.detail || "Upload failed"); }
+    } catch { toast.error("Network error during upload"); }
     finally { setUploadingCsv(false); e.target.value = null; }
   };
 
@@ -189,8 +194,18 @@ export default function PortfolioView({ onNavigate }) {
       </div>
 
       {loading ? (
-        <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-          {[1, 2, 3].map((i) => <div key={i} className="shimmer" style={{ height: "100px", borderRadius: "16px" }} />)}
+        <div>
+          <LoaderHeader label="Computing live P&L…" />
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "16px", marginBottom: "16px" }}>
+            {[1, 2, 3, 4].map((i) => (
+              <Skeleton key={i} h={70} r={16} />
+            ))}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+            {[1, 2, 3].map((i) => (
+              <Skeleton key={i} h={100} r={16} />
+            ))}
+          </div>
         </div>
       ) : !portfolio || portfolio.holdings_count === 0 ? (
         <div className="glass-card" style={{ padding: "60px 24px", textAlign: "center" }}>

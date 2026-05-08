@@ -7,12 +7,13 @@ import { useAuth } from "../context/AuthContext";
 import AuthCard, {
   authInputStyle,
   authButtonStyle,
-  authGoogleButtonStyle,
-  GoogleIcon,
+  // authGoogleButtonStyle,
+  // GoogleIcon,
 } from "../components/AuthCard";
 
 export default function SignupPage() {
-  const { user, loading, signup, googleLogin } = useAuth();
+  // Google login temporarily disabled — re-add `googleLogin` from useAuth() to restore.
+  const { user, loading, signup } = useAuth();
   const router = useRouter();
 
   const [name, setName] = useState("");
@@ -84,6 +85,7 @@ export default function SignupPage() {
         </button>
       </form>
 
+      {/* Google login temporarily disabled
       <div style={{ display: "flex", alignItems: "center", gap: "12px", margin: "18px 0" }}>
         <div style={{ flex: 1, height: "1px", background: "var(--border-subtle)" }} />
         <span style={{ fontSize: "11px", color: "var(--color-text-muted)", textTransform: "uppercase" }}>or</span>
@@ -93,6 +95,7 @@ export default function SignupPage() {
         <GoogleIcon />
         <span>Continue with Google</span>
       </button>
+      */}
 
       <p style={{ textAlign: "center", marginTop: "20px", fontSize: "13px", color: "var(--color-text-secondary)" }}>
         Already have an account?{" "}
