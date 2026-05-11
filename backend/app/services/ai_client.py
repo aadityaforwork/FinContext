@@ -1,6 +1,15 @@
 """
-Shared Groq client.
-Provider-agnostic interface used across routers (generate_text, generate_json, generate_grounded_json).
+Shared AI client.
+
+Provider-agnostic interface used across routers (generate_text, generate_json,
+generate_grounded_json, verify_claims).
+
+Provider precedence:
+  1. OpenAI  — when OPENAI_API_KEY is set (recommended for production quality)
+  2. Groq    — when GROQ_API_KEY is set (fallback / cheap inference)
+
+Set OPENAI_MODEL or GROQ_MODEL in env to control which model is used. Both SDKs
+expose the same chat.completions.create() shape, so the call sites are identical.
 """
 
 import json
@@ -11,20 +20,40 @@ from dotenv import load_dotenv
 logger = logging.getLogger(__name__)
 load_dotenv()
 
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 _client = None
-if GROQ_API_KEY:
+_provider: str | None = None
+MODEL: str = ""
+
+# Prefer OpenAI when the key is set.
+if OPENAI_API_KEY:
+    try:
+        from openai import OpenAI
+        _client = OpenAI(api_key=OPENAI_API_KEY)
+        _provider = "openai"
+        MODEL = OPENAI_MODEL
+        logger.info(f"OpenAI client enabled (model={MODEL}).")
+    except Exception as e:
+        logger.error(f"Failed to initialize OpenAI client: {e}")
+        _client = None
+
+if _client is None and GROQ_API_KEY:
     try:
         from groq import Groq
         _client = Groq(api_key=GROQ_API_KEY)
+        _provider = "groq"
+        MODEL = GROQ_MODEL
         logger.info(f"Groq client enabled (model={MODEL}).")
     except Exception as e:
         logger.error(f"Failed to initialize Groq client: {e}")
         _client = None
-else:
-    logger.warning("GROQ_API_KEY not set — AI features will be disabled.")
+
+if _client is None:
+    logger.warning("No AI key set (OPENAI_API_KEY / GROQ_API_KEY) — AI features disabled.")
 
 
 # Standing instruction injected into every grounded call. Keeps the model from
@@ -44,6 +73,15 @@ def is_available() -> bool:
     return _client is not None
 
 
+def provider() -> str | None:
+    """Returns 'openai' | 'groq' | None — useful for logs and the /_debug endpoint."""
+    return _provider
+
+
+def _missing_key_error() -> RuntimeError:
+    return RuntimeError("No AI provider configured (set OPENAI_API_KEY or GROQ_API_KEY).")
+
+
 def generate_text(
     prompt: str,
     max_tokens: int = 2048,
@@ -52,7 +90,7 @@ def generate_text(
 ) -> str:
     """Synchronous text generation."""
     if not _client:
-        raise RuntimeError("GROQ_API_KEY not configured")
+        raise _missing_key_error()
 
     messages = []
     if system:
@@ -74,9 +112,9 @@ def generate_json(
     system: str | None = None,
     temperature: float = 0.2,
 ) -> str:
-    """Uses Groq's native JSON mode — guaranteed valid JSON string."""
+    """Native JSON mode — guaranteed valid JSON string. Works on OpenAI + Groq."""
     if not _client:
-        raise RuntimeError("GROQ_API_KEY not configured")
+        raise _missing_key_error()
 
     sys_msg = (system + "\n\n" if system else "") + "Respond with a single valid JSON object. No markdown, no commentary."
     messages = [
@@ -104,16 +142,10 @@ def generate_grounded_json(
     """
     Run an analytical JSON task that MUST cite fields from the provided context.
 
-    Args:
-        task: what to produce, in natural language
-        context: a dict of real data (ratios, news, peers, etc.) that becomes the
-                 sole source of truth for the model
-        schema_description: a human-readable description of required JSON keys
-
     Returns the parsed JSON dict. On parse failure returns {} (caller handles fallback).
     """
     if not _client:
-        raise RuntimeError("GROQ_API_KEY not configured")
+        raise _missing_key_error()
 
     context_json = json.dumps(context, indent=2, default=str)
     user_prompt = (
@@ -144,9 +176,7 @@ def generate_grounded_json(
 def verify_claims(output: dict, context: dict, max_tokens: int = 1024) -> dict:
     """
     Second-pass verifier. Hands the output + context back to the model and asks
-    it to flag/remove unsupported claims. Returns a dict:
-      {"verified": <output with unsupported rationale items removed>,
-       "removed": [ {text, reason}, ... ]}
+    it to flag/remove unsupported claims.
     """
     if not _client:
         return {"verified": output, "removed": []}

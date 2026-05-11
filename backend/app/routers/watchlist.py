@@ -23,22 +23,28 @@ class PriceRequest(BaseModel):
     tickers: list[str]
 
 
-def _get_price(ticker: str) -> tuple[float, float]:
+def _get_price(ticker: str) -> tuple[float | None, float | None]:
+    """Returns (price, change_percent). None means we couldn't get live data
+    (unknown ticker or fetch failure) — UI renders "—" instead of misleading "+0.0%".
+    """
     if ticker in _price_cache:
         return _price_cache[ticker]
     yf_symbol = TICKER_TO_YF.get(ticker)
     if not yf_symbol:
-        return (0.0, 0.0)
+        _price_cache[ticker] = (None, None)
+        return (None, None)
     try:
         info = yf.Ticker(yf_symbol).fast_info
-        price = float(info.last_price) if hasattr(info, "last_price") else 0.0
-        prev = float(info.previous_close) if hasattr(info, "previous_close") else price
-        change = ((price - prev) / prev * 100) if prev else 0.0
+        price = float(info.last_price) if hasattr(info, "last_price") else None
+        prev = float(info.previous_close) if hasattr(info, "previous_close") else None
+        if price is None or prev is None or prev == 0:
+            return (None, None)
+        change = (price - prev) / prev * 100
         result = (round(price, 2), round(change, 2))
         _price_cache[ticker] = result
         return result
     except Exception:
-        return (0.0, 0.0)
+        return (None, None)
 
 
 @router.post("/prices")

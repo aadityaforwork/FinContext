@@ -6,6 +6,8 @@ AI-powered contextual analysis for Indian equities.
 Run with: uvicorn app.main:app --reload --port 8000
 """
 
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import (
@@ -21,6 +23,12 @@ from app.routers import (
     risk,
 )
 from app.core.config import settings
+
+logger = logging.getLogger("uvicorn.error")
+# Print loaded CORS config at boot — visible in Render logs. Helps diagnose
+# "Access-Control-Allow-Origin missing" errors caused by env var typos.
+logger.info("CORS_ORIGINS loaded: %r", settings.CORS_ORIGINS)
+logger.info("CORS_ORIGIN_REGEX loaded: %r", settings.CORS_ORIGIN_REGEX)
 
 app = FastAPI(
     title="FinContext API",
@@ -38,6 +46,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/_debug/cors", tags=["system"])
+async def debug_cors():
+    """Returns the loaded CORS config so you can verify env-var values from Render
+    without redeploying. Safe to keep enabled — exposes only allowed origins, no secrets."""
+    return {
+        "allow_origins": settings.CORS_ORIGINS,
+        "allow_origin_regex": settings.CORS_ORIGIN_REGEX,
+    }
 
 app.include_router(stocks.router)
 app.include_router(market.router)

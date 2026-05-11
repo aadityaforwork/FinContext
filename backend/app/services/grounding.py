@@ -33,10 +33,15 @@ from app.services import data_ingestion
 logger = logging.getLogger(__name__)
 
 _context_cache: TTLCache = TTLCache(maxsize=200, ttl=600)   # 10 min
-_snapshot_cache: TTLCache = TTLCache(maxsize=300, ttl=600)  # 10 min per-ticker snapshot
-_index_cache: TTLCache = TTLCache(maxsize=50, ttl=300)      # 5 min per-index snapshot
-_market_ctx_cache: TTLCache = TTLCache(maxsize=4, ttl=600)  # 10 min full market ctx
-_news_query_cache: TTLCache = TTLCache(maxsize=40, ttl=900) # 15 min per news query
+# Split snapshot cache: successful pulls hold 30 min so we don't hammer Yahoo;
+# negative cache (failed pulls) holds only 60 s so a transient 429 doesn't lock
+# the ticker out for half an hour after Yahoo recovers.
+_snapshot_cache: TTLCache = TTLCache(maxsize=300, ttl=1800)  # 30 min positive
+_snapshot_neg_cache: TTLCache = TTLCache(maxsize=300, ttl=60)  # 60 s negative
+_index_cache: TTLCache = TTLCache(maxsize=50, ttl=900)        # 15 min positive
+_index_neg_cache: TTLCache = TTLCache(maxsize=50, ttl=60)     # 60 s negative
+_market_ctx_cache: TTLCache = TTLCache(maxsize=4, ttl=900)    # 15 min full market ctx
+_news_query_cache: TTLCache = TTLCache(maxsize=40, ttl=1800)  # 30 min per news query
 
 
 # ---------------------------------------------------------------------------
@@ -111,53 +116,73 @@ def _percentile_rank(value: float | None, distribution: list[float]) -> int | No
 # ---------------------------------------------------------------------------
 # Per-ticker yfinance snapshot (without hitting HTTP routes)
 # ---------------------------------------------------------------------------
+import time as _time
+
+
 def _fetch_snapshot(ticker: str) -> dict:
-    """Raw yfinance pull for one ticker. Returns {} on failure."""
+    """Raw yfinance pull for one ticker. Returns {} on failure.
+
+    Two-cache strategy: successful pulls hold 30 min (long enough that Yahoo's
+    rate limit on Render's shared IPs doesn't keep biting). Failures cache for
+    only 60 s so we retry promptly when Yahoo recovers, instead of returning
+    empty data for half an hour.
+
+    Single retry with 0.4 s backoff handles transient 429s.
+    """
     if ticker in _snapshot_cache:
         return _snapshot_cache[ticker]
+    if ticker in _snapshot_neg_cache:
+        return {}
     yf_symbol = TICKER_TO_YF.get(ticker)
     if not yf_symbol:
-        _snapshot_cache[ticker] = {}
+        _snapshot_neg_cache[ticker] = True
         return {}
-    try:
-        t = yf.Ticker(yf_symbol)
-        info = t.info or {}
-        try:
-            fast = t.fast_info
-            price = float(fast.last_price) if hasattr(fast, "last_price") else 0.0
-            prev = float(fast.previous_close) if hasattr(fast, "previous_close") else 0.0
-            mcap = float(fast.market_cap) if hasattr(fast, "market_cap") and fast.market_cap else None
-        except Exception:
-            price, prev, mcap = 0.0, 0.0, None
 
-        snap = {
-            "current_price": _safe(price),
-            "previous_close": _safe(prev),
-            "change_percent": _safe(((price - prev) / prev * 100) if prev else 0),
-            "market_cap": mcap,
-            "pe_ratio": _safe(info.get("trailingPE")),
-            "forward_pe": _safe(info.get("forwardPE")),
-            "pb_ratio": _safe(info.get("priceToBook")),
-            "ev_ebitda": _safe(info.get("enterpriseToEbitda")),
-            "roe_pct": _pct(info.get("returnOnEquity")),
-            "roa_pct": _pct(info.get("returnOnAssets")),
-            "profit_margin_pct": _pct(info.get("profitMargins")),
-            "operating_margin_pct": _pct(info.get("operatingMargins")),
-            "revenue_growth_pct": _pct(info.get("revenueGrowth")),
-            "earnings_growth_pct": _pct(info.get("earningsGrowth")),
-            "debt_to_equity": _safe(info.get("debtToEquity")),
-            "current_ratio": _safe(info.get("currentRatio")),
-            "dividend_yield_pct": _pct(info.get("dividendYield")),
-            "52w_high": _safe(info.get("fiftyTwoWeekHigh")),
-            "52w_low": _safe(info.get("fiftyTwoWeekLow")),
-            "business_summary": (info.get("longBusinessSummary") or "")[:400],
-        }
-        _snapshot_cache[ticker] = snap
-        return snap
-    except Exception as e:
-        logger.warning("snapshot failed for %s: %s", ticker, e)
-        _snapshot_cache[ticker] = {}
-        return {}
+    last_err: Exception | None = None
+    for attempt in (0, 1):
+        try:
+            t = yf.Ticker(yf_symbol)
+            info = t.info or {}
+            try:
+                fast = t.fast_info
+                price = float(fast.last_price) if hasattr(fast, "last_price") else 0.0
+                prev = float(fast.previous_close) if hasattr(fast, "previous_close") else 0.0
+                mcap = float(fast.market_cap) if hasattr(fast, "market_cap") and fast.market_cap else None
+            except Exception:
+                price, prev, mcap = 0.0, 0.0, None
+
+            snap = {
+                "current_price": _safe(price),
+                "previous_close": _safe(prev),
+                "change_percent": _safe(((price - prev) / prev * 100) if prev else 0),
+                "market_cap": mcap,
+                "pe_ratio": _safe(info.get("trailingPE")),
+                "forward_pe": _safe(info.get("forwardPE")),
+                "pb_ratio": _safe(info.get("priceToBook")),
+                "ev_ebitda": _safe(info.get("enterpriseToEbitda")),
+                "roe_pct": _pct(info.get("returnOnEquity")),
+                "roa_pct": _pct(info.get("returnOnAssets")),
+                "profit_margin_pct": _pct(info.get("profitMargins")),
+                "operating_margin_pct": _pct(info.get("operatingMargins")),
+                "revenue_growth_pct": _pct(info.get("revenueGrowth")),
+                "earnings_growth_pct": _pct(info.get("earningsGrowth")),
+                "debt_to_equity": _safe(info.get("debtToEquity")),
+                "current_ratio": _safe(info.get("currentRatio")),
+                "dividend_yield_pct": _pct(info.get("dividendYield")),
+                "52w_high": _safe(info.get("fiftyTwoWeekHigh")),
+                "52w_low": _safe(info.get("fiftyTwoWeekLow")),
+                "business_summary": (info.get("longBusinessSummary") or "")[:400],
+            }
+            _snapshot_cache[ticker] = snap
+            return snap
+        except Exception as e:
+            last_err = e
+            if attempt == 0:
+                _time.sleep(0.4)
+
+    logger.warning("snapshot failed for %s after retry: %s", ticker, last_err)
+    _snapshot_neg_cache[ticker] = True
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -476,34 +501,52 @@ def build_portfolio_context(holdings: list[dict]) -> dict:
 # Context Engine — market & movers
 # ---------------------------------------------------------------------------
 def _fetch_index_change(symbol: str) -> dict | None:
-    """Today's % change for a yfinance index symbol. Cached 5 min."""
+    """Today's % change for a yfinance index symbol.
+
+    Successful pulls cache 15 min; failures cache only 60 s so a transient 429
+    doesn't lock the index out for the rest of the trading day. One retry with
+    short backoff handles intermittent rate limiting.
+    """
     if symbol in _index_cache:
         return _index_cache[symbol]
-    try:
-        tk = yf.Ticker(symbol)
-        price = prev = 0.0
-        try:
-            fi = tk.fast_info
-            price = float(getattr(fi, "last_price", 0) or 0)
-            prev = float(getattr(fi, "previous_close", 0) or 0)
-        except Exception:
-            pass
-        if not price:
-            hist = tk.history(period="5d")
-            if not hist.empty:
-                price = float(hist["Close"].iloc[-1])
-                prev = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else price
-        if not price:
-            _index_cache[symbol] = None
-            return None
-        change_pct = round(((price - prev) / prev * 100) if prev else 0.0, 2)
-        out = {"symbol": symbol, "value": round(price, 2), "change_percent": change_pct}
-        _index_cache[symbol] = out
-        return out
-    except Exception as e:
-        logger.warning("index fetch failed for %s: %s", symbol, e)
-        _index_cache[symbol] = None
+    if symbol in _index_neg_cache:
         return None
+
+    last_err: Exception | None = None
+    for attempt in (0, 1):
+        try:
+            tk = yf.Ticker(symbol)
+            price = prev = 0.0
+            try:
+                fi = tk.fast_info
+                price = float(getattr(fi, "last_price", 0) or 0)
+                prev = float(getattr(fi, "previous_close", 0) or 0)
+            except Exception:
+                pass
+            if not price:
+                hist = tk.history(period="5d")
+                if not hist.empty:
+                    price = float(hist["Close"].iloc[-1])
+                    prev = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else price
+            if not price:
+                # Cache as miss but only briefly; treat as failure for retry purposes.
+                last_err = RuntimeError("no price data returned")
+                if attempt == 0:
+                    _time.sleep(0.4)
+                    continue
+                break
+            change_pct = round(((price - prev) / prev * 100) if prev else 0.0, 2)
+            out = {"symbol": symbol, "value": round(price, 2), "change_percent": change_pct}
+            _index_cache[symbol] = out
+            return out
+        except Exception as e:
+            last_err = e
+            if attempt == 0:
+                _time.sleep(0.4)
+
+    logger.warning("index fetch failed for %s after retry: %s", symbol, last_err)
+    _index_neg_cache[symbol] = True
+    return None
 
 
 def _fetch_rss_headlines(query: str, hl: str = "en-IN", gl: str = "IN",
@@ -683,4 +726,119 @@ def build_movers_context(holdings: list[dict], market_ctx: dict | None = None) -
             "indices": market_ctx.get("indices", {}),
             "sectors": market_ctx.get("sectors", []),
         },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Morning Brief — personalized "what matters for YOUR portfolio today"
+# ---------------------------------------------------------------------------
+def build_morning_brief_context(
+    holdings: list[dict] | None,
+    watchlist_tickers: list[str] | None,
+) -> dict:
+    """
+    Build a slim CONTEXT for the morning brief LLM call.
+    Combines:
+      - market snapshot (indices, sectors, India + global headlines)
+      - per-ticker headlines for current portfolio holdings (max 2 each)
+      - per-ticker headlines for watchlist tickers not already in holdings (max 1 each)
+      - sector exposure summary so the LLM can flag sector-level catalysts
+
+    Holdings format: [{ticker, quantity, buy_price}].
+    Watchlist tickers: bare list of symbols.
+
+    Token-conscious: snippets dropped for ticker news, only headline + source kept.
+    Total context typically <4K tokens — fits Groq free tier comfortably.
+    """
+    market_ctx = build_market_context()
+
+    holdings = holdings or []
+    watchlist_tickers = watchlist_tickers or []
+
+    held_tickers = [(h.get("ticker") or "").upper() for h in holdings if h.get("ticker")]
+    held_set = set(held_tickers)
+    watch_only = [t.upper() for t in watchlist_tickers if t and t.upper() not in held_set]
+
+    # Sector exposure (rough — based on buy_price * quantity since we don't fetch live prices here)
+    sector_exposure: dict[str, float] = {}
+    total_invested = 0.0
+    for h in holdings:
+        t = (h.get("ticker") or "").upper()
+        if not t:
+            continue
+        meta = TICKER_TO_META.get(t, {"sector": "Unknown"})
+        invested = float(h.get("quantity") or 0) * float(h.get("buy_price") or 0)
+        sector_exposure[meta.get("sector", "Unknown")] = (
+            sector_exposure.get(meta.get("sector", "Unknown"), 0.0) + invested
+        )
+        total_invested += invested
+
+    sector_exposure_pct = (
+        [
+            {"sector": s, "weight_pct": round(v / total_invested * 100, 1)}
+            for s, v in sorted(sector_exposure.items(), key=lambda x: -x[1])
+        ]
+        if total_invested
+        else []
+    )
+
+    holdings_summary: list[dict] = []
+    for h in holdings:
+        t = (h.get("ticker") or "").upper()
+        if not t:
+            continue
+        meta = TICKER_TO_META.get(t, {"name": t, "sector": "Unknown"})
+        news_items: list[dict] = []
+        try:
+            raw = data_ingestion.retrieve_context(t, top_k=2)
+            for i, n in enumerate(raw):
+                news_items.append({
+                    "id": f"{t}_news[{i}]",
+                    "source": n.get("source"),
+                    "headline": n.get("headline"),
+                })
+        except Exception as e:
+            logger.warning("morning brief: news fetch failed for %s: %s", t, e)
+        holdings_summary.append({
+            "ticker": t,
+            "name": meta.get("name"),
+            "sector": meta.get("sector"),
+            "news": news_items,
+        })
+
+    watchlist_summary: list[dict] = []
+    for t in watch_only[:8]:  # cap so context stays small
+        meta = TICKER_TO_META.get(t, {"name": t, "sector": "Unknown"})
+        news_items: list[dict] = []
+        try:
+            raw = data_ingestion.retrieve_context(t, top_k=1)
+            for i, n in enumerate(raw):
+                news_items.append({
+                    "id": f"{t}_news[{i}]",
+                    "source": n.get("source"),
+                    "headline": n.get("headline"),
+                })
+        except Exception as e:
+            logger.warning("morning brief: news fetch failed for watch %s: %s", t, e)
+        watchlist_summary.append({
+            "ticker": t,
+            "name": meta.get("name"),
+            "sector": meta.get("sector"),
+            "news": news_items,
+        })
+
+    from datetime import datetime
+    return {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "user_universe": {
+            "holdings_count": len(holdings_summary),
+            "watchlist_count": len(watchlist_summary),
+            "sector_exposure_pct": sector_exposure_pct,
+        },
+        "indices": market_ctx.get("indices", {}),
+        "sectors": market_ctx.get("sectors", []),
+        "india_headlines": market_ctx.get("india_headlines", []),
+        "global_headlines": market_ctx.get("global_headlines", []),
+        "holdings": holdings_summary,
+        "watchlist": watchlist_summary,
     }

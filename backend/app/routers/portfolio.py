@@ -30,22 +30,29 @@ class EnrichRequest(BaseModel):
     positions: list[PositionIn]
 
 
-def _get_live_price(ticker: str) -> tuple[float, float]:
+def _get_live_price(ticker: str) -> tuple[float | None, float | None]:
+    """Returns (price, change_percent). None values mean we couldn't get live data —
+    UI distinguishes "no data" (renders as "—") from a real zero.
+    """
     if ticker in _price_cache:
         return _price_cache[ticker]
     yf_symbol = TICKER_TO_YF.get(ticker)
     if not yf_symbol:
-        return (0.0, 0.0)
+        # Unknown ticker — cache the miss so we don't keep looking it up.
+        _price_cache[ticker] = (None, None)
+        return (None, None)
     try:
         info = yf.Ticker(yf_symbol).fast_info
-        price = float(info.last_price) if hasattr(info, "last_price") else 0.0
-        prev = float(info.previous_close) if hasattr(info, "previous_close") else price
-        change_pct = ((price - prev) / prev * 100) if prev else 0.0
+        price = float(info.last_price) if hasattr(info, "last_price") else None
+        prev = float(info.previous_close) if hasattr(info, "previous_close") else None
+        if price is None or prev is None or prev == 0:
+            return (None, None)
+        change_pct = (price - prev) / prev * 100
         result = (round(price, 2), round(change_pct, 2))
         _price_cache[ticker] = result
         return result
     except Exception:
-        return (0.0, 0.0)
+        return (None, None)
 
 
 @router.post("/enrich")
@@ -66,18 +73,20 @@ async def enrich_portfolio(req: EnrichRequest):
     for pos in req.positions:
         ticker = pos.ticker.upper()
         meta = TICKER_TO_META.get(ticker, {"name": ticker, "sector": "Unknown"})
-        price, change_pct = quote_map.get(ticker, (0.0, 0.0))
-        if price == 0:
-            price = pos.buy_price
+        price, change_pct = quote_map.get(ticker, (None, None))
+        # Fall back to buy_price for invested-value math when live price is missing,
+        # but keep change_percent as None so UI shows "—" not "+0.0%".
+        effective_price = price if price is not None else pos.buy_price
 
         invested = pos.quantity * pos.buy_price
-        current = pos.quantity * price
+        current = pos.quantity * effective_price
         pnl = current - invested
         pnl_pct = (pnl / invested * 100) if invested else 0.0
 
         total_invested += invested
         current_value += current
-        day_change += current * (change_pct / 100)
+        if change_pct is not None:
+            day_change += current * (change_pct / 100)
 
         positions.append({
             "ticker": ticker,
@@ -85,7 +94,8 @@ async def enrich_portfolio(req: EnrichRequest):
             "sector": meta["sector"],
             "quantity": pos.quantity,
             "buy_price": pos.buy_price,
-            "current_price": price,
+            "current_price": effective_price,
+            "change_percent": change_pct,            # ← was missing entirely
             "invested_value": round(invested, 2),
             "current_value": round(current, 2),
             "pnl": round(pnl, 2),

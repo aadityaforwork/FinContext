@@ -288,7 +288,10 @@ async def deep_dive_generator(ticker: str):
         f"must use CONTEXT.peer_benchmark.medians and CONTEXT.peer_benchmark.this_stock_percentile. "
         f"Upcoming catalysts must cite specific CONTEXT.news[i] items or be omitted. "
         f"Do not invent target prices — if CONTEXT does not provide analyst targets, "
-        f"return null for target_low/target_high and add an entry to data_gaps."
+        f"return null for target_low/target_high and add an entry to data_gaps. "
+        f"IMPORTANT: Use ONLY assessment language for verdict.action — "
+        f"BULLISH/NEUTRAL/CAUTIOUS — never action language like buy/sell/hold. We are "
+        f"unregistered (not a SEBI RA) so all output must be educational stance, not advice."
     )
     schema = """{
   "moat_rating": "WIDE" | "NARROW" | "NONE",
@@ -309,7 +312,7 @@ async def deep_dive_generator(ticker: str):
       "description": { "text": str, "source": str } }
   ],
   "verdict": {
-    "action": "BUY" | "HOLD" | "SELL",
+    "action": "BULLISH" | "NEUTRAL" | "CAUTIOUS",
     "confidence": int (1-100),
     "target_low": float | null,
     "target_high": float | null,

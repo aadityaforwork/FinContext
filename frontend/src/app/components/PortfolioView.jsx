@@ -17,10 +17,18 @@ const COLORS = [
   "#8b5cf6", "#ec4899", "#14b8a6", "#f97316", "#3b82f6",
 ];
 
+// Compliance: we are unregistered (not SEBI RA), so we surface stance/assessment
+// language only — never action verbs like buy/sell/hold. Backend now emits
+// BULLISH/NEUTRAL/CAUTIOUS; legacy keys kept for cached/old responses.
 const SIGNAL_STYLES = {
-  BUY:    { bg: "rgba(16,185,129,0.15)", color: "#10b981", label: "BUY" },
-  HOLD:   { bg: "rgba(245,158,11,0.15)", color: "#f59e0b", label: "HOLD" },
-  REDUCE: { bg: "rgba(239,68,68,0.15)", color: "#ef4444", label: "REDUCE" },
+  BULLISH:  { bg: "rgba(16,185,129,0.15)", color: "#10b981", label: "BULLISH" },
+  NEUTRAL:  { bg: "rgba(245,158,11,0.15)", color: "#f59e0b", label: "NEUTRAL" },
+  CAUTIOUS: { bg: "rgba(239,68,68,0.15)", color: "#ef4444", label: "CAUTIOUS" },
+  // Legacy aliases — render with soft labels even if backend cache returns old keys.
+  BUY:    { bg: "rgba(16,185,129,0.15)", color: "#10b981", label: "BULLISH" },
+  HOLD:   { bg: "rgba(245,158,11,0.15)", color: "#f59e0b", label: "NEUTRAL" },
+  REDUCE: { bg: "rgba(239,68,68,0.15)", color: "#ef4444", label: "CAUTIOUS" },
+  SELL:   { bg: "rgba(239,68,68,0.15)", color: "#ef4444", label: "CAUTIOUS" },
 };
 
 function ScoreGauge({ score, size = 120, label }) {
@@ -57,6 +65,9 @@ export default function PortfolioView({ onNavigate }) {
   const toast = useToast();
   const { user } = useAuth();
   const [portfolio, setPortfolio] = useState(null);
+  // Active AI tool tab. Components stay mounted (state preserved) — we toggle
+  // visibility via CSS so switching tabs doesn't wipe in-flight results.
+  const [aiTab, setAiTab] = useState("context");
   const [loading, setLoading] = useState(true);
   const [uploadingCsv, setUploadingCsv] = useState(false);
   const [intel, setIntel] = useState(null);
@@ -230,27 +241,80 @@ export default function PortfolioView({ onNavigate }) {
         </div>
       ) : (
         <>
-          <div className="responsive-grid-4" style={{ marginBottom: "24px" }}>
+          <div className="responsive-grid-4" style={{ marginBottom: "20px" }}>
             {[
               { label: "Total Invested", value: `₹${portfolio.total_invested.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`, color: "var(--color-text-primary)" },
               { label: "Current Value", value: `₹${portfolio.current_value.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`, color: "var(--color-accent-secondary)" },
               { label: "Total P&L", value: `${portfolio.total_pnl >= 0 ? "+" : ""}₹${portfolio.total_pnl.toLocaleString("en-IN", { minimumFractionDigits: 2 })} (${portfolio.total_pnl_percent >= 0 ? "+" : ""}${portfolio.total_pnl_percent}%)`, color: portfolio.total_pnl >= 0 ? "var(--color-accent-green)" : "var(--color-accent-red)" },
               { label: "Day Change", value: `${portfolio.day_change >= 0 ? "+" : ""}₹${portfolio.day_change.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`, color: portfolio.day_change >= 0 ? "var(--color-accent-green)" : "var(--color-accent-red)" },
             ].map((card) => (
-              <div key={card.label} className="glass-card" style={{ padding: "18px" }}>
+              <div key={card.label} className="glass-card" style={{ padding: "16px" }}>
                 <p style={{ fontSize: "10px", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--color-text-muted)" }}>{card.label}</p>
                 <p style={{ fontSize: "18px", fontWeight: 700, marginTop: "6px", fontVariantNumeric: "tabular-nums", color: card.color }}>{card.value}</p>
               </div>
             ))}
           </div>
 
-          <PortfolioContextCard
-            positions={portfolio.positions.map((p) => ({ ticker: p.ticker, quantity: p.quantity, buy_price: p.buy_price }))}
-          />
+          {/* AI TOOLS PANEL — tabbed, replaces three stacked cards.
+              Sections stay mounted; only the active one is visible. */}
+          <div style={{ marginBottom: "20px" }}>
+            <div
+              style={{
+                display: "flex",
+                gap: "6px",
+                padding: "4px",
+                background: "var(--color-bg-secondary)",
+                borderRadius: "10px",
+                border: "1px solid var(--border-subtle)",
+                marginBottom: "14px",
+              }}
+            >
+              {[
+                { id: "context", label: "🧭 Context Engine", desc: "Why did your portfolio move today?" },
+                { id: "risk",    label: "📐 Risk Metrics",    desc: "Vol, beta, Sharpe, correlation" },
+                { id: "intel",   label: "🧠 AI Analysis",      desc: "Portfolio health + signals" },
+              ].map((t) => {
+                const active = aiTab === t.id;
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() => setAiTab(t.id)}
+                    title={t.desc}
+                    style={{
+                      flex: 1,
+                      padding: "10px 12px",
+                      borderRadius: "8px",
+                      border: "none",
+                      background: active ? "var(--color-bg-card)" : "transparent",
+                      color: active ? "var(--color-text-primary)" : "var(--color-text-muted)",
+                      fontSize: "12px",
+                      fontWeight: 700,
+                      letterSpacing: "0.01em",
+                      cursor: "pointer",
+                      transition: "background 0.15s, color 0.15s",
+                      boxShadow: active ? "0 1px 0 rgba(255,255,255,0.04) inset" : "none",
+                    }}
+                  >
+                    {t.label}
+                  </button>
+                );
+              })}
+            </div>
 
-          <RiskMetricsCard
-            positions={portfolio.positions.map((p) => ({ ticker: p.ticker, quantity: p.quantity, buy_price: p.buy_price }))}
-          />
+            <div style={{ display: aiTab === "context" ? "block" : "none" }}>
+              <PortfolioContextCard
+                positions={portfolio.positions.map((p) => ({ ticker: p.ticker, quantity: p.quantity, buy_price: p.buy_price }))}
+              />
+            </div>
+
+            <div style={{ display: aiTab === "risk" ? "block" : "none" }}>
+              <RiskMetricsCard
+                positions={portfolio.positions.map((p) => ({ ticker: p.ticker, quantity: p.quantity, buy_price: p.buy_price }))}
+              />
+            </div>
+
+            <div style={{ display: aiTab === "intel" ? "block" : "none" }}>
 
           {!intel && !intelLoading && (
             <div className="glass-card animate-fade-in" style={{ padding: "28px", marginBottom: "24px", textAlign: "center", background: "linear-gradient(135deg, rgba(99,102,241,0.08), rgba(6,182,212,0.06))", border: "1px solid rgba(99,102,241,0.2)" }}>
@@ -348,6 +412,9 @@ export default function PortfolioView({ onNavigate }) {
               </button>
             </div>
           )}
+
+            </div>{/* /intel tab */}
+          </div>{/* /AI tools panel */}
 
           <div className="responsive-grid-holdings">
             <div className="glass-card" style={{ overflow: "hidden" }}>

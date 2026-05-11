@@ -16,13 +16,12 @@ export default function Sidebar({ activeNav, onNavChange }) {
     return () => window.removeEventListener("resize", check);
   }, []);
 
+  // Hub-and-drawer model: dashboard is the only main view. All other
+  // features (Portfolio detail, Analysis, Watchlist, Screener, Company) are
+  // reached via dashboard CTAs or by clicking a ticker. Sidebar stays minimal.
   const navItems = [
     { id: "dashboard", label: "Dashboard", icon: "📊" },
-    { id: "portfolio", label: "Portfolio", icon: "💼" },
-    { id: "analysis", label: "Analysis", icon: "🧠" },
-    { id: "company", label: "Company", icon: "🏢" },
-    { id: "watchlist", label: "Watchlist", icon: "⭐" },
-    { id: "screener", label: "Screener", icon: "🔍" },
+    { id: "settings",  label: "Settings",  icon: "⚙️" },
   ];
 
   // ---- MOBILE: Bottom Navigation Bar ----

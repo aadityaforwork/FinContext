@@ -4,22 +4,23 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Sidebar from "./components/Sidebar";
 import DashboardHeader from "./components/DashboardHeader";
-import WatchlistCard from "./components/WatchlistCard";
-import StockChart from "./components/StockChart";
-import ContextPanel from "./components/ContextPanel";
 import ScreenerView from "./components/ScreenerView";
 import WatchlistView from "./components/WatchlistView";
 import PortfolioView from "./components/PortfolioView";
 import AnalysisView from "./components/AnalysisView";
 import CompanyView from "./components/CompanyView";
-import GlobeNewsSection from "./components/GlobeNewsSection";
+import PortfolioTodayStrip from "./components/PortfolioTodayStrip";
+import MarketBriefStrip from "./components/MarketBriefStrip";
+import NewsImpactFeed from "./components/NewsImpactFeed";
+import UniverseRail from "./components/UniverseRail";
+import WatchlistDrawer from "./components/WatchlistDrawer";
+import ScreenerDrawer from "./components/ScreenerDrawer";
+import SettingsView from "./components/SettingsView";
 import { useAuth } from "./context/AuthContext";
 import { supabase } from "./lib/supabase";
-import { API_BASE } from "./lib/api";
 import { useToast } from "./components/Toast";
 import BrandedSplash from "./components/BrandedSplash";
 import ComplianceFooter from "./components/ComplianceFooter";
-import { LoaderHeader, Skeleton } from "./components/Loaders";
 
 export default function App() {
   const { user, loading, logout } = useAuth();
@@ -28,6 +29,8 @@ export default function App() {
   const [activeNav, setActiveNav] = useState("dashboard");
   const [analysisTicker, setAnalysisTicker] = useState(null);
   const [companyTicker, setCompanyTicker] = useState(null);
+  // Drawer state for the hub-and-drawer model. Only one drawer open at a time.
+  const [drawer, setDrawer] = useState(null); // "watchlist" | "screener" | null
 
   // Redirect unauthenticated users to /login
   useEffect(() => {
@@ -103,140 +106,82 @@ export default function App() {
         />
 
         <div className="content-area">
-          {activeNav === "dashboard" && <DashboardView onNavigate={handleNavigate} />}
-          {activeNav === "screener" && <ScreenerView onNavigate={handleNavigate} />}
+          {activeNav === "dashboard" && (
+            <DashboardView
+              onNavigate={handleNavigate}
+              onOpenWatchlist={() => setDrawer("watchlist")}
+              onOpenScreener={() => setDrawer("screener")}
+            />
+          )}
+          {activeNav === "settings"  && <SettingsView />}
+          {/* Full-page views reached via dashboard CTAs or ticker clicks */}
+          {activeNav === "screener"  && <ScreenerView onNavigate={handleNavigate} />}
           {activeNav === "watchlist" && <WatchlistView onNavigate={handleNavigate} />}
           {activeNav === "portfolio" && <PortfolioView onNavigate={handleNavigate} />}
-          {activeNav === "analysis" && <AnalysisView initialTicker={analysisTicker} />}
-          {activeNav === "company" && <CompanyView ticker={companyTicker} onNavigate={handleNavigate} />}
+          {activeNav === "analysis"  && <AnalysisView initialTicker={analysisTicker} />}
+          {activeNav === "company"   && <CompanyView ticker={companyTicker} onNavigate={handleNavigate} />}
         </div>
 
-        <ComplianceFooter />
+        {/* Dashboard handles its own disclaimer per-pane; other views show the footer. */}
+        {activeNav !== "dashboard" && <ComplianceFooter />}
       </main>
+
+      {/* Drawers — rendered at app root so they overlay everything */}
+      <WatchlistDrawer
+        open={drawer === "watchlist"}
+        onClose={() => setDrawer(null)}
+        onNavigate={handleNavigate}
+        onOpenScreener={() => setDrawer("screener")}
+      />
+      <ScreenerDrawer
+        open={drawer === "screener"}
+        onClose={() => setDrawer(null)}
+        onNavigate={handleNavigate}
+      />
     </div>
   );
 }
 
 // -----------------------------------------------------------------------
-// Dashboard View (the original home page content)
+// Dashboard View — News → Portfolio Impact (the USP)
 // -----------------------------------------------------------------------
-function DashboardView({ onNavigate }) {
-  const { user } = useAuth();
-  const [stocks, setStocks] = useState([]);
-  const [selectedTicker, setSelectedTicker] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [indices, setIndices] = useState([
-    { label: "NIFTY 50", value: "—", change: "—", positive: true },
-    { label: "SENSEX", value: "—", change: "—", positive: true },
-    { label: "NIFTY MIDCAP", value: "—", change: "—", positive: false },
-    { label: "INR/USD", value: "—", change: "—", positive: false },
-  ]);
-
-  useEffect(() => {
-    if (!user?.id) return;
-    (async () => {
-      try {
-        const { data: rows } = await supabase
-          .from("watchlist")
-          .select("ticker")
-          .eq("user_id", user.id)
-          .order("added_at", { ascending: false });
-        if (!rows || rows.length === 0) { setLoading(false); return; }
-
-        let priceMap = {};
-        try {
-          const res = await fetch(`${API_BASE}/api/watchlist/prices`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tickers: rows.map((r) => r.ticker) }),
-          });
-          if (res.ok) priceMap = await res.json();
-        } catch {
-          // Backend unreachable — render watchlist with placeholders rather than crashing.
-        }
-
-        setStocks(rows.map((r) => ({
-          ticker: r.ticker,
-          name: priceMap[r.ticker]?.name ?? r.ticker,
-          sector: priceMap[r.ticker]?.sector ?? "—",
-          current_price: priceMap[r.ticker]?.current_price ?? 0,
-          change_percent: priceMap[r.ticker]?.change_percent ?? 0,
-        })));
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [user?.id]);
-
-  useEffect(() => {
-    fetch(`${API_BASE}/api/market/indices`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => { if (data && data.length) setIndices(data); })
-      .catch(() => {});
-  }, []);
-
-  const selectedStock = stocks.find((s) => s.ticker === selectedTicker);
-
+// Two zones:
+//   1. PortfolioTodayStrip   — your P&L at-a-glance, the proof of personalization
+//   2. NewsImpactFeed (left) + UniverseRail (right) — the news stream where every
+//      headline is annotated with which of YOUR stocks it touches and why
+//
+// Everything else (Globe, Screener, Deep Dive Agent, valuation simulator) is
+// accessible via sidebar nav — they don't crowd the dashboard anymore.
+// -----------------------------------------------------------------------
+function DashboardView({ onNavigate, onOpenWatchlist, onOpenScreener }) {
   return (
-    <>
-      {/* Market Overview Cards */}
-      <div className="responsive-grid-4" style={{ marginBottom: "24px" }}>
-        {indices.map((idx) => (
-          <div key={idx.label} className="glass-card" style={{ padding: "16px" }}>
-            <p style={{ fontSize: "10px", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--color-text-muted)" }}>{idx.label}</p>
-            <p style={{ fontSize: "20px", fontWeight: 700, marginTop: "4px", fontVariantNumeric: "tabular-nums", color: "var(--color-text-primary)" }}>{idx.value}</p>
-            <p style={{ fontSize: "12px", fontWeight: 600, marginTop: "2px", fontVariantNumeric: "tabular-nums", color: idx.positive ? "var(--color-accent-green)" : "var(--color-accent-red)" }}>{idx.change}</p>
-          </div>
-        ))}
-      </div>
-
-      {/* Global Intelligence Globe */}
-      <GlobeNewsSection />
-
-      {/* Main Grid */}
-      <div className="responsive-grid-sidebar">
-        {/* Watchlist */}
-        <div>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "16px" }}>
-            <h3 style={{ fontSize: "13px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--color-text-muted)" }}>Your Watchlist</h3>
-            <span style={{ fontSize: "12px", padding: "2px 8px", borderRadius: "9999px", background: "rgba(99,102,241,0.1)", color: "var(--color-accent-secondary)" }}>{stocks.length} stocks</span>
-          </div>
-
-          {loading ? (
-            <div>
-              <LoaderHeader label="Fetching live prices…" />
-              <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                {[1, 2, 3, 4, 5].map((i) => (
-                  <Skeleton key={i} h={80} r={16} />
-                ))}
-              </div>
-            </div>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-              {stocks.length === 0 ? (
-                <div style={{ padding: "16px", borderRadius: "12px", border: "1px dashed var(--border-subtle)", color: "var(--color-text-muted)", fontSize: "13px" }}>
-                  Your watchlist is empty. Use the Screener to add stocks.
-                </div>
-              ) : (
-                stocks.map((stock) => (
-                  <WatchlistCard
-                    key={stock.ticker}
-                    stock={stock}
-                    isSelected={selectedTicker === stock.ticker}
-                    onClick={() => setSelectedTicker(stock.ticker)}
-                  />
-                ))
-              )}
-            </div>
-          )}
+    <div className="dashboard-shell">
+      <PortfolioTodayStrip onNavigate={onNavigate} />
+      <MarketBriefStrip onNavigate={onNavigate} />
+      <div className="dashboard-main">
+        <div className="dashboard-pane">
+          <NewsImpactFeed onNavigate={onNavigate} />
         </div>
-
-        {/* Right: Chart + Context */}
-        <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
-          <StockChart ticker={selectedTicker} stockName={selectedStock?.name} />
-          <ContextPanel ticker={selectedTicker} stockName={selectedStock?.name} />
+        <div className="dashboard-pane">
+          <UniverseRail
+            onNavigate={onNavigate}
+            onOpenWatchlist={onOpenWatchlist}
+            onOpenScreener={onOpenScreener}
+            onOpenPortfolio={() => onNavigate("portfolio")}
+          />
         </div>
       </div>
-    </>
+      <p
+        style={{
+          fontSize: "10px",
+          color: "var(--color-text-muted)",
+          textAlign: "center",
+          fontStyle: "italic",
+          margin: "2px 0 0",
+        }}
+      >
+        Educational only — not investment advice. Not a SEBI-registered RA.
+      </p>
+    </div>
   );
 }

@@ -32,7 +32,16 @@ function ScoreRing({ value, size = 80, color, label }) {
 
 const MOAT_ICONS = { WIDE: "🏰", NARROW: "🛡️", NONE: "⚠️" };
 const MOAT_COLORS = { WIDE: "#10b981", NARROW: "#f59e0b", NONE: "#ef4444" };
-const ACTION_COLORS = { BUY: "#10b981", HOLD: "#f59e0b", SELL: "#ef4444" };
+// Compliance: assessment language only (BULLISH/NEUTRAL/CAUTIOUS) — never buy/sell/hold.
+// Legacy keys aliased so cached old responses still render with soft labels.
+const ACTION_COLORS = {
+  BULLISH: "#10b981", NEUTRAL: "#f59e0b", CAUTIOUS: "#ef4444",
+  BUY: "#10b981", HOLD: "#f59e0b", SELL: "#ef4444",
+};
+const ACTION_LABELS = {
+  BULLISH: "BULLISH", NEUTRAL: "NEUTRAL", CAUTIOUS: "CAUTIOUS",
+  BUY: "BULLISH", HOLD: "NEUTRAL", SELL: "CAUTIOUS",
+};
 const IMPACT_COLORS = { POSITIVE: "#10b981", NEGATIVE: "#ef4444", NEUTRAL: "#64748b" };
 
 export default function AnalysisView({ initialTicker }) {
@@ -306,8 +315,8 @@ export default function AnalysisView({ initialTicker }) {
                     {deepDive.verdict && (
                       <>
                         <div style={{ display: "flex", alignItems: "center", gap: "16px", marginBottom: "16px" }}>
-                          <div style={{ padding: "10px 24px", borderRadius: "12px", fontSize: "20px", fontWeight: 800, background: `${ACTION_COLORS[deepDive.verdict.action]}20`, color: ACTION_COLORS[deepDive.verdict.action], border: `2px solid ${ACTION_COLORS[deepDive.verdict.action]}40` }}>
-                            {deepDive.verdict.action}
+                          <div style={{ padding: "10px 24px", borderRadius: "12px", fontSize: "20px", fontWeight: 800, background: `${ACTION_COLORS[deepDive.verdict.action] || "#64748b"}20`, color: ACTION_COLORS[deepDive.verdict.action] || "#64748b", border: `2px solid ${ACTION_COLORS[deepDive.verdict.action] || "#64748b"}40` }}>
+                            {ACTION_LABELS[deepDive.verdict.action] || deepDive.verdict.action}
                           </div>
                           <div>
                             <div style={{ fontSize: "13px", color: "var(--color-text-muted)" }}>Confidence</div>
