@@ -9,12 +9,14 @@ High-stakes output goes through a verifier pass.
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.core.compliance import with_disclaimer
-from app.services import ai_client, grounding, vector_store
+from app.services import ai_client, grounding, outcome_ledger, vector_store
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/intelligence", tags=["portfolio-intelligence"])
@@ -106,13 +108,40 @@ async def _intelligence_generator(raw_holdings: list[dict]):
         yield "data: [DONE]\n\n"
         return
 
-    verified = await asyncio.to_thread(ai_client.verify_claims, data, context, 1024)
+    verified = await asyncio.to_thread(ai_client.verify_claims, data, context, 2500)
     data = verified.get("verified", data)
+
+    # Deterministic fallback for health breakdown — computed straight from the
+    # grounding context (aggregate + holdings + technicals). The LLM's values
+    # win when present; this fills any null sub-score so the AI Analysis bars
+    # are never empty. Then the overall `portfolio_health_score` is the
+    # weighted average — Diversification + Quality double-weighted (structural)
+    # vs Risk + Momentum (conditions of the day).
+    breakdown = dict(data.get("health_breakdown") or {})
+    try:
+        computed = grounding.compute_portfolio_health(context)
+        for k, v in computed.items():
+            if not isinstance(breakdown.get(k), (int, float)) and v is not None:
+                breakdown[k] = v
+    except Exception as e:
+        logger.warning("compute_portfolio_health failed: %s", e)
+
+    health_score = data.get("portfolio_health_score")
+    if not isinstance(health_score, (int, float)) or health_score is None:
+        weights = {"diversification": 2, "quality": 2, "risk": 1, "momentum": 1}
+        num = den = 0
+        for k, w in weights.items():
+            v = breakdown.get(k)
+            if isinstance(v, (int, float)):
+                num += float(v) * w
+                den += w
+        if den > 0:
+            health_score = round(num / den)
 
     result = with_disclaimer({
         "type": "result",
-        "portfolio_health_score": data.get("portfolio_health_score"),
-        "health_breakdown": data.get("health_breakdown", {}),
+        "portfolio_health_score": health_score,
+        "health_breakdown": breakdown,
         "holdings_verdicts": data.get("holdings_verdicts", []),
         "top_risks": data.get("top_risks", []),
         "suggested_directions": data.get("suggested_directions", []),
@@ -132,6 +161,97 @@ async def portfolio_intelligence(req: IntelRequest):
         return {"error": "No holdings provided."}
     raw = [{"ticker": p.ticker, "quantity": p.quantity, "buy_price": p.buy_price} for p in req.positions]
     return StreamingResponse(_intelligence_generator(raw), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# Outcome-ledger helpers — log forward-looking AI calls so /accuracy can grade
+# them later. Both helpers are best-effort: any failure is swallowed by the
+# fire-and-forget task that calls them.
+# ---------------------------------------------------------------------------
+def _log_tomorrow_predictions(tomorrow_data: dict, movers_ctx: dict) -> None:
+    """Persist Tomorrow per_holding watch items as forward-looking predictions.
+
+    Each row is dedup-keyed `tomorrow:{ticker}:{date}` so re-running the Context
+    Engine the same day replaces the latest call instead of accumulating dupes.
+    """
+    items = (tomorrow_data or {}).get("per_holding") or []
+    if not items:
+        return
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+    holdings_by_ticker = {h.get("ticker"): h for h in (movers_ctx.get("holdings") or [])}
+
+    rows: list[dict] = []
+    for w in items:
+        t = (w.get("ticker") or "").upper()
+        if not t:
+            continue
+        h = holdings_by_ticker.get(t, {})
+        tech = h.get("technicals") or {}
+        slim_tech = {
+            k: tech.get(k) for k in (
+                "rsi14", "rsi_zone", "vol_vs_avg20", "vol_zone",
+                "momentum_5d_pct", "momentum_20d_pct", "momentum_state",
+                "sma_state",
+            ) if tech.get(k) is not None
+        } or None
+        rows.append({
+            "ticker": t,
+            "prediction_date": today_iso,
+            "source": "tomorrow_per_holding",
+            "direction": w.get("direction") or "neutral",
+            "impact_level": w.get("importance"),
+            "catalyst_type": w.get("catalyst_type"),
+            "reason": w.get("what_to_watch"),
+            "cited_sources": w.get("sources") or [],
+            "technical_state": slim_tech,
+            "price_at_call": h.get("current_price"),
+            "dedup_key": f"tomorrow:{t}:{today_iso}",
+            "metadata": {"sector": w.get("sector")},
+        })
+    if rows:
+        outcome_ledger.log_predictions(rows)
+
+
+def _log_news_feed_predictions(cleaned_items: list[dict], tech_by_ticker: dict) -> None:
+    """Persist annotated News Impact items as predictions — one row per
+    (item × affected_ticker). Skip 'mixed' direction (not scoreable). Dedup key
+    `news_feed:{ticker}:{news_id}:{date}` so concurrent users hitting the
+    same endpoint replace instead of duplicate.
+    """
+    if not cleaned_items:
+        return
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+    rows: list[dict] = []
+    for it in cleaned_items:
+        direction = it.get("direction")
+        if not direction or direction == "mixed":
+            continue
+        news_id = it.get("news_id") or ""
+        for t in (it.get("affected_tickers") or []):
+            tkr = t.upper()
+            rows.append({
+                "ticker": tkr,
+                "prediction_date": today_iso,
+                "source": "news_feed",
+                "direction": direction,
+                "impact_level": it.get("impact_level"),
+                "catalyst_type": it.get("category"),
+                "reason": it.get("reason"),
+                "cited_sources": [news_id] if news_id else [],
+                "technical_state": tech_by_ticker.get(tkr),
+                # price_at_call left None — compute_pending_outcomes falls back
+                # to the price history's anchor close. Cheaper than fetching
+                # snapshots inline for every news item.
+                "price_at_call": None,
+                "dedup_key": f"news_feed:{tkr}:{news_id}:{today_iso}",
+                "metadata": {
+                    "headline": (it.get("headline") or "")[:240] or None,
+                    "semantic_match_ticker": it.get("semantic_match_ticker"),
+                    "semantic_similarity": it.get("semantic_similarity"),
+                },
+            })
+    if rows:
+        outcome_ledger.log_predictions(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -166,13 +286,28 @@ async def _movers_generator(raw_holdings: list[dict]):
     # -------- Today attribution --------
     today_task = (
         "For each holding in CONTEXT.holdings whose mover_bucket is 'strong_gainer' or "
-        "'strong_loser', attribute today's price move to its most likely driver. "
-        "Primary driver MUST be one of: 'stock_specific' (cite a {TICKER}_news[i]), "
-        "'sector' (cite CONTEXT.market.sectors[i].sector + excess_return_today sign), "
-        "'macro' (cite CONTEXT.india_headlines[i] or CONTEXT.market.indices), or "
-        "'unexplained' (no supporting evidence in CONTEXT — add a data_gaps entry). "
-        "Do NOT attribute flat movers. Keep attribution list to 1-2 items per holding, each "
-        "with a weight_pct 1-100."
+        "'strong_loser', explain today's price move using EVERY available signal:\n"
+        "  1. PRIMARY DRIVER — one of:\n"
+        "     • 'stock_specific'  — cite a {TICKER}_news[i] OR a {TICKER}_sem[i] (semantic match: "
+        "       the headline may not name the ticker but pgvector matched it on theme — perfectly "
+        "       valid; cite the semantic id and similarity).\n"
+        "     • 'sector'          — cite CONTEXT.market.sectors[i] + the sign of excess_return_today.\n"
+        "     • 'macro'           — cite CONTEXT.india_headlines[i] or CONTEXT.market.indices.\n"
+        "     • 'flow'            — cite CONTEXT.market.flows (FII/DII) when the move aligns with the day's flow direction.\n"
+        "     • 'technical'       — when there is NO news but technicals explain the move "
+        "       (e.g. RSI oversold bounce, breakout above SMA50 with volume surge, breakdown "
+        "       through 20d low on heavy volume). Cite the holding's technicals fields.\n"
+        "     • 'unexplained'     — ONLY if news, semantic_news, sector, macro, flow, and technicals "
+        "       all fail. Add a specific data_gaps entry naming what was missing.\n"
+        "  2. TECHNICAL CONFIRMATION — for every mover, fill technical_state with:\n"
+        "       rsi_zone, vol_zone, momentum_state, sma_state — copied/derived from "
+        "       CONTEXT.holdings[].technicals. Add a one-line confirms_or_contradicts note "
+        "       (e.g. 'volume surge + extending_up confirms the move' or 'rally on weak volume — "
+        "       move may not stick').\n"
+        "  3. ATTRIBUTION — 1-3 items per holding, each with text + source + weight_pct (1-100).\n"
+        "Be specific. 'Positive price movement enhances sentiment' is BANNED — it says nothing.\n"
+        "Use concrete language: 'crude +3% (sem similarity 0.71) → ONGC realisations boost', "
+        "'sector index +2.1% on PSB earnings beat → BANKBARODA rides the wave on 1.4x avg vol'."
     )
     today_schema = """{
   "portfolio_return_today_pct": float | null,
@@ -182,8 +317,15 @@ async def _movers_generator(raw_holdings: list[dict]):
     {
       "ticker": str,
       "move_percent": float,
-      "primary_driver": "stock_specific" | "sector" | "macro" | "unexplained",
-      "attribution": [ { "text": str, "source": str, "weight_pct": int } ]
+      "primary_driver": "stock_specific" | "sector" | "macro" | "flow" | "technical" | "unexplained",
+      "attribution": [ { "text": str, "source": str, "weight_pct": int } ],
+      "technical_state": {
+        "rsi_zone": "oversold" | "weak" | "neutral" | "strong" | "overbought" | null,
+        "vol_zone": "low" | "normal" | "high" | "surge" | null,
+        "momentum_state": str | null,
+        "sma_state": "above_sma50" | "below_sma50" | null,
+        "confirms_or_contradicts": str
+      }
     }
   ],
   "confidence": "low" | "medium" | "high",
@@ -198,6 +340,28 @@ async def _movers_generator(raw_holdings: list[dict]):
             for n in (items or [])[:limit]
         ]
 
+    def _slim_sem(items, limit=3):
+        return [
+            {
+                "id": n.get("id"),
+                "source": n.get("source"),
+                "headline": n.get("headline"),
+                "similarity": n.get("similarity"),
+            }
+            for n in (items or [])[:limit]
+        ]
+
+    def _slim_tech(tech):
+        # Drop nulls so the LLM sees a tight payload.
+        if not tech:
+            return None
+        keep = (
+            "rsi14", "rsi_zone", "vol_vs_avg20", "vol_zone",
+            "momentum_5d_pct", "momentum_20d_pct", "momentum_state",
+            "sma_state", "pct_from_20d_high",
+        )
+        return {k: tech.get(k) for k in keep if tech.get(k) is not None}
+
     mover_holdings = [
         {
             "ticker": h["ticker"],
@@ -207,6 +371,8 @@ async def _movers_generator(raw_holdings: list[dict]):
             "excess_return_today": h.get("excess_return_today"),
             "mover_bucket": h.get("mover_bucket"),
             "news": _slim_news(h.get("news"), limit=2),
+            "semantic_news": _slim_sem(h.get("semantic_news"), limit=3),
+            "technicals": _slim_tech(h.get("technicals")),
         }
         for h in movers_ctx.get("holdings", [])
         if h.get("mover_bucket") in ("strong_gainer", "strong_loser")
@@ -220,28 +386,62 @@ async def _movers_generator(raw_holdings: list[dict]):
                 {"sector": s.get("sector"), "change_percent": s.get("change_percent")}
                 for s in movers_ctx.get("market", {}).get("sectors", [])
             ],
+            "flows": movers_ctx.get("market", {}).get("flows"),
         },
         "india_headlines": _slim_news(market_ctx.get("india_headlines"), limit=5),
     }
 
     # -------- Tomorrow outlook --------
     tomorrow_task = (
-        "Using ONLY CONTEXT.global_headlines (overnight world news) and CONTEXT.india_headlines "
-        "(today's Indian macro news), identify 3-5 themes that may move the user's portfolio "
-        "tomorrow. For each theme: cite the specific *_news[i] id, name which holdings or "
-        "sectors in CONTEXT.holdings are likely affected and the direction (positive/negative), "
-        "and briefly explain the transmission mechanism (e.g. crude up → OMCs negative, Fed dovish "
-        "→ IT services positive). Only include themes where a holding or sector in CONTEXT is "
-        "genuinely exposed. Do NOT speculate on themes not in CONTEXT."
+        "Produce a SPECIFIC, HOLDING-CENTRIC outlook for tomorrow — not generic macro headlines. "
+        "Use every signal in CONTEXT.holdings (semantic_news, technicals, upcoming_earnings) plus "
+        "global_headlines + india_headlines + market.flows (FII/DII).\n\n"
+        "OUTPUT TWO LAYERS:\n"
+        "  A) per_holding[] — for EACH holding in CONTEXT.holdings that has at least ONE of: "
+        "     an upcoming_earnings entry, a semantic_news match with similarity ≥ 0.6, OR a "
+        "     stretched technical state (rsi_zone overbought/oversold, vol_zone surge, "
+        "     momentum_state extending_*, or pct_from_20d_high within ±2%). "
+        "     Build a 'watch_item' object with:\n"
+        "       - ticker, sector\n"
+        "       - catalyst_type: 'earnings' | 'news' | 'technical' | 'sector_flow' | 'mixed'\n"
+        "       - what_to_watch: ONE concrete sentence — e.g. 'Earnings on 2026-05-15 (3 days); "
+        "         consensus expects margin expansion; technicals show momentum_state extending_up with "
+        "         vol 1.4x avg — beat could push to 20d high.'\n"
+        "       - direction: 'positive' | 'negative' | 'mixed' | 'neutral'\n"
+        "       - importance: 'high' | 'medium' | 'low'\n"
+        "       - sources: list of ids from {TICKER}_news[i] / {TICKER}_sem[i] / 'technicals' / 'upcoming_earnings'\n"
+        "  B) macro_themes[] — 1-3 cross-cutting macro themes from global/india headlines that may "
+        "     touch MULTIPLE holdings (e.g. crude spike, Fed decision, FII outflow). Each theme must "
+        "     list the affected_holdings explicitly — no theme allowed without naming holdings.\n\n"
+        "RULES:\n"
+        "  • At least 60% of output items must be per_holding[], NOT macro_themes[]. The user wants "
+        "    'what about MY stocks tomorrow', not 'general market commentary'.\n"
+        "  • If FII/DII flows in CONTEXT.market.flows are large (|net_inr_cr| > 1000), surface that "
+        "    in a macro_theme with the specific number cited.\n"
+        "  • If a holding has NO catalyst, do NOT include it. Empty watchlist is fine.\n"
+        "  • NEVER use phrases like 'may impact', 'could affect', 'foreign investors exiting' without a number. "
+        "    Be specific: 'crude headline +X% on global_news[i] → ONGC realisations positive' beats "
+        "    'rising crude prices'."
     )
     tomorrow_schema = """{
-  "themes": [
+  "per_holding": [
     {
-      "theme": str,                                  // e.g. "Crude oil spike"
+      "ticker": str,
+      "sector": str,
+      "catalyst_type": "earnings" | "news" | "technical" | "sector_flow" | "mixed",
+      "what_to_watch": str,
+      "direction": "positive" | "negative" | "mixed" | "neutral",
+      "importance": "high" | "medium" | "low",
+      "sources": [ str ]
+    }
+  ],
+  "macro_themes": [
+    {
+      "theme": str,
       "direction": "positive" | "negative" | "mixed",
-      "affected_holdings": [ str ],                  // tickers from CONTEXT.holdings
+      "affected_holdings": [ str ],
       "affected_sectors": [ str ],
-      "mechanism": { "text": str, "source": str },   // source cites a *_news[i] id
+      "mechanism": { "text": str, "source": str },
       "importance": "high" | "medium" | "low"
     }
   ],
@@ -265,17 +465,50 @@ async def _movers_generator(raw_holdings: list[dict]):
             "headline": n.get("headline"),
         })
 
+    # For tomorrow we want per-holding catalysts so the LLM can produce
+    # specific watch items instead of generic macro themes. Filter to holdings
+    # that actually have a catalyst to keep token spend reasonable.
+    def _has_catalyst(h: dict) -> bool:
+        if h.get("upcoming_earnings"):
+            return True
+        sem = h.get("semantic_news") or []
+        if any((s.get("similarity") or 0) >= 0.6 for s in sem):
+            return True
+        tech = h.get("technicals") or {}
+        if tech.get("rsi_zone") in ("overbought", "oversold"):
+            return True
+        if tech.get("vol_zone") == "surge":
+            return True
+        if tech.get("momentum_state") in ("extending_up", "extending_down"):
+            return True
+        p20h = tech.get("pct_from_20d_high")
+        if p20h is not None and abs(p20h) <= 2.0:
+            return True
+        return False
+
+    tomorrow_holdings: list[dict] = []
+    for h in movers_ctx.get("holdings", []):
+        if not _has_catalyst(h):
+            continue
+        tomorrow_holdings.append({
+            "ticker": h["ticker"],
+            "sector": h.get("sector"),
+            "upcoming_earnings": h.get("upcoming_earnings"),
+            "semantic_news": _slim_sem(h.get("semantic_news"), limit=2),
+            "technicals": _slim_tech(h.get("technicals")),
+            "change_percent_today": h.get("change_percent_today"),
+        })
+
     tomorrow_input = {
-        "holdings": [
-            {"ticker": h["ticker"], "sector": h["sector"]}
-            for h in movers_ctx.get("holdings", [])
-        ],
+        "holdings": tomorrow_holdings,
+        "all_holding_tickers": [h["ticker"] for h in movers_ctx.get("holdings", [])],
         "sector_allocation_today": [
             {"sector": s.get("sector"), "change_percent": s.get("change_percent")}
             for s in movers_ctx.get("market", {}).get("sectors", [])
         ],
         "india_headlines": _slim_news(market_ctx.get("india_headlines"), limit=5),
         "global_headlines": slim_global,
+        "market_flows": movers_ctx.get("market", {}).get("flows"),
     }
 
     # Short-circuit today call if nothing moved enough to attribute.
@@ -284,16 +517,16 @@ async def _movers_generator(raw_holdings: list[dict]):
             return {"movers": [], "confidence": "high",
                     "data_gaps": ["No holding moved ≥1.5% today."]}
         return await asyncio.to_thread(
-            ai_client.generate_grounded_json, today_task, today_input, today_schema, 2048
+            ai_client.generate_grounded_json, today_task, today_input, today_schema, 3000
         )
 
     try:
         today_data, tomorrow_data = await asyncio.wait_for(
             asyncio.gather(
                 _run_today(),
-                asyncio.to_thread(ai_client.generate_grounded_json, tomorrow_task, tomorrow_input, tomorrow_schema, 2048),
+                asyncio.to_thread(ai_client.generate_grounded_json, tomorrow_task, tomorrow_input, tomorrow_schema, 3000),
             ),
-            timeout=75,
+            timeout=90,
         )
     except asyncio.TimeoutError:
         yield f"data: {json.dumps({'type':'error','message':'Context Engine timed out.'})}\n\n"
@@ -303,18 +536,57 @@ async def _movers_generator(raw_holdings: list[dict]):
     today_data = today_data or {}
     tomorrow_data = tomorrow_data or {}
 
+    # Outcome ledger — log Tomorrow's per_holding watch items as forward-looking
+    # predictions. Fire-and-forget; the streaming response keeps going. Today's
+    # attribution is intentionally NOT logged because it explains a move that
+    # already happened (not a forecast).
+    if outcome_ledger.is_available():
+        try:
+            asyncio.create_task(asyncio.to_thread(
+                _log_tomorrow_predictions, tomorrow_data, movers_ctx
+            ))
+        except Exception as e:
+            logger.debug("outcome_ledger fire-and-forget failed: %s", e)
+
     if mover_holdings:
         try:
-            today_verified = await asyncio.to_thread(ai_client.verify_claims, today_data, today_input, 1024)
+            # 2500 tokens — today_data now carries technical_state + multi-source
+            # attributions per mover, so 1024 truncates the verifier's JSON
+            # ("Unterminated string..." in the parser). Bumped to fit.
+            today_verified = await asyncio.to_thread(ai_client.verify_claims, today_data, today_input, 2500)
             today_data = today_verified.get("verified", today_data)
         except Exception as e:
             logger.warning("today verifier failed: %s", e)
+
+    # Per-ticker raw evidence for click-through detail modals. Keyed by ticker
+    # so the frontend can show the full reasoning chain (cited sources, raw
+    # RSI/vol numbers, every semantic match w/ similarity) without a second
+    # round-trip. We forward ALL holdings — Today's modals use the movers and
+    # Tomorrow's modals reference any holding flagged as a watch item.
+    holdings_detail: dict[str, dict] = {}
+    for h in movers_ctx.get("holdings", []):
+        t = h.get("ticker")
+        if not t:
+            continue
+        holdings_detail[t] = {
+            "name": h.get("name"),
+            "sector": h.get("sector"),
+            "change_percent_today": h.get("change_percent_today"),
+            "sector_index_return_today": h.get("sector_index_return_today"),
+            "excess_return_today": h.get("excess_return_today"),
+            "news": h.get("news") or [],
+            "semantic_news": h.get("semantic_news") or [],
+            "technicals": h.get("technicals"),
+            "upcoming_earnings": h.get("upcoming_earnings"),
+        }
 
     result = with_disclaimer({
         "type": "result",
         "portfolio_return_today_pct": movers_ctx.get("portfolio_return_today_pct"),
         "market_indices": movers_ctx.get("market", {}).get("indices", {}),
         "sector_returns": movers_ctx.get("market", {}).get("sectors", []),
+        "market_flows": movers_ctx.get("market", {}).get("flows"),
+        "holdings_detail": holdings_detail,
         "today": {
             "top_positive_driver": today_data.get("top_positive_driver"),
             "top_negative_driver": today_data.get("top_negative_driver"),
@@ -323,7 +595,11 @@ async def _movers_generator(raw_holdings: list[dict]):
             "data_gaps": today_data.get("data_gaps", []),
         },
         "tomorrow": {
-            "themes": tomorrow_data.get("themes", []),
+            # New holding-specific shape. Keep `themes` populated for backwards
+            # compatibility with the existing frontend until Phase E ships.
+            "per_holding": tomorrow_data.get("per_holding", []),
+            "macro_themes": tomorrow_data.get("macro_themes", []),
+            "themes": tomorrow_data.get("macro_themes", []) or tomorrow_data.get("themes", []),
             "overall_bias": tomorrow_data.get("overall_bias", "neutral"),
             "confidence": tomorrow_data.get("confidence", "low"),
             "data_gaps": tomorrow_data.get("data_gaps", []),
@@ -765,6 +1041,22 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
             "user_universe": context.get("user_universe", {}),
         })
 
+    # Compute technical state for every ticker the user could be exposed to.
+    # This lets the LLM write reasons like "rally on weak volume — move may fade"
+    # instead of "positive movement enhances sentiment" (which says nothing).
+    from app.services import technicals as _tech
+    universe_set = list({*user_holdings, *user_watchlist})
+    tech_by_ticker: dict[str, dict] = {}
+    try:
+        raw_tech = await asyncio.to_thread(_tech.compute_signals_batch, universe_set)
+        for tk, sig in (raw_tech or {}).items():
+            keep = ("rsi_zone", "vol_zone", "momentum_state", "sma_state", "pct_from_20d_high")
+            tight = {k: sig.get(k) for k in keep if sig.get(k) is not None}
+            if tight:
+                tech_by_ticker[tk] = tight
+    except Exception as e:
+        logger.warning("technicals batch failed for news feed: %s", e)
+
     # Build a slim CONTEXT for batch annotation.
     annotation_ctx = {
         "user_holdings": user_holdings,
@@ -773,6 +1065,7 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
             {"sector": s.get("sector"), "change_percent": s.get("change_percent")}
             for s in context.get("sectors", [])
         ],
+        "user_universe_technicals": tech_by_ticker,
         "candidate_news": candidates,
     }
 
@@ -787,14 +1080,21 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
         "weight, 'medium' if mild sector/macro effect, 'low' if tangential. Skip if no impact.\n"
         "3. direction: 'positive' (tailwind for affected tickers), 'negative' (headwind), 'mixed' "
         "(some up some down).\n"
-        "4. reason: ONE short sentence (<140 chars) explaining the transmission mechanism. "
-        "Plain English. No jargon. Educational stance — never say buy/sell.\n"
-        "5. category: 'stock_specific' (single ticker news), 'sector' (sector-wide), 'macro' "
+        "4. reason: ONE concrete sentence (<200 chars). MUST cite both (a) the news mechanism AND "
+        "(b) a relevant technical fact from CONTEXT.user_universe_technicals for at least one "
+        "affected ticker. Example: 'PSB profits beat — HDFCBANK is below SMA50 with momentum "
+        "extending_down, so this could trigger a sector-led mean-reversion bounce.' BANNED phrases: "
+        "'may enhance sentiment', 'could affect', 'positive movement enhances'. Be specific.\n"
+        "5. technical_context: short string (<120 chars) summarizing the technical state of the "
+        "PRIMARY affected ticker (rsi_zone + vol_zone + momentum_state + sma_state). If no "
+        "technicals available for that ticker, set to null. Example: 'RSI overbought; vol 1.8x avg; "
+        "extending_up; above SMA50.'\n"
+        "6. category: 'stock_specific' (single ticker news), 'sector' (sector-wide), 'macro' "
         "(India macro), 'global' (overseas event with India impact).\n"
-        "6. Order output by impact_level (high → medium → low). Cap at 30 items.\n"
-        "7. For users with 20+ holdings, lean toward keeping items even at 'low' impact — "
+        "7. Order output by impact_level (high → medium → low). Cap at 30 items.\n"
+        "8. For users with 20+ holdings, lean toward keeping items even at 'low' impact — "
         "the user wants breadth of coverage across their portfolio, not just headline events.\n"
-        "8. Some candidates carry `semantic_match_ticker` + `semantic_similarity` (0-1). "
+        "9. Some candidates carry `semantic_match_ticker` + `semantic_similarity` (0-1). "
         "These are surfaced by vector search — they're news that doesn't NAME the ticker but "
         "is semantically close to its business. Treat these as valid signal: include the named "
         "ticker in affected_tickers if the transmission mechanism is real. Higher similarity "
@@ -803,14 +1103,15 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
     schema = """{
   "items": [
     {
-      "news_id": str,                   // matches candidate_news[i].id
-      "headline": str,                  // copy verbatim from candidate
-      "source": str,                    // copy verbatim
+      "news_id": str,
+      "headline": str,
+      "source": str,
       "category": "stock_specific" | "sector" | "macro" | "global",
       "impact_level": "high" | "medium" | "low",
       "direction": "positive" | "negative" | "mixed",
       "affected_tickers": [ str ],
-      "reason": str
+      "reason": str,
+      "technical_context": str | null
     }
   ],
   "data_gaps": [ str, ... ]
@@ -839,32 +1140,54 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
             "generated_at": datetime.now(timezone.utc).isoformat(),
         })
 
+    # Index the original candidates by id so we can re-attach similarity scores
+    # and URLs that the LLM strips out of its output.
+    candidate_by_id = {c.get("id"): c for c in candidates if c.get("id")}
+
     universe = set(user_holdings) | set(user_watchlist)
     cleaned: list[dict] = []
     for it in (data.get("items") or [])[:30]:
         affected = [t for t in (it.get("affected_tickers") or []) if t in universe]
         if not affected:
             continue  # if no real impact on user, drop it
+        tc = it.get("technical_context")
+        nid = it.get("news_id")
+        orig = candidate_by_id.get(nid) or {}
         cleaned.append({
-            "news_id": it.get("news_id"),
+            "news_id": nid,
             "headline": (it.get("headline") or "").strip()[:200],
-            "source": it.get("source"),
+            "source": it.get("source") or orig.get("source"),
+            "url": orig.get("url"),
             "category": it.get("category", "macro"),
             "impact_level": it.get("impact_level", "low"),
             "direction": it.get("direction", "mixed"),
             "affected_tickers": affected,
-            "reason": (it.get("reason") or "").strip()[:200],
+            "reason": (it.get("reason") or "").strip()[:240],
+            "technical_context": (tc or None) and tc.strip()[:140],
+            "semantic_match_ticker": orig.get("semantic_match_ticker"),
+            "semantic_similarity": orig.get("semantic_similarity"),
+            "snippet": (orig.get("snippet") or "")[:280] or None,
         })
 
     # Sort: high → medium → low (already requested in prompt but enforce server-side).
     impact_order = {"high": 0, "medium": 1, "low": 2}
     cleaned.sort(key=lambda x: impact_order.get(x["impact_level"], 3))
 
+    # Outcome ledger — fire-and-forget log of every scoreable news item as a
+    # forward-looking prediction (one row per item × affected ticker). Mixed
+    # direction items are skipped inside the helper. UPSERT keyed by
+    # news_feed:{ticker}:{news_id}:{date} so concurrent users don't duplicate.
+    if outcome_ledger.is_available():
+        background.add_task(_log_news_feed_predictions, cleaned, tech_by_ticker)
+
     payload = with_disclaimer({
         "demo_mode": demo_mode,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "items": cleaned,
         "user_universe": context.get("user_universe", {}),
+        # Forward per-ticker technical state so the click-through detail modal
+        # can render each affected holding's current chart situation.
+        "universe_technicals": tech_by_ticker,
         "data_gaps": data.get("data_gaps", []),
     })
     _news_feed_cache[cache_key] = payload

@@ -5,6 +5,8 @@ import { supabase } from "../lib/supabase";
 import { API_BASE } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { Spinner, Skeleton } from "./Loaders";
+import Modal from "./Modal";
+import { Hint, TECH_TOOLTIPS } from "./Tooltips";
 
 /**
  * NewsImpactFeed — premium edition
@@ -32,13 +34,39 @@ const CATEGORY_ICON = {
   global: "🌍",
 };
 
-function NewsRow({ item, onTickerClick }) {
+const CATEGORY_LABEL = {
+  stock_specific: "Company news",
+  sector: "Sector",
+  macro: "India macro",
+  global: "Global",
+};
+
+const RSI_COLORS = {
+  oversold:   "#10b981",
+  weak:       "#84cc16",
+  neutral:    "#64748b",
+  strong:     "#f59e0b",
+  overbought: "#ef4444",
+};
+
+const VOL_COLORS = {
+  low:    "#64748b",
+  normal: "#64748b",
+  high:   "#f59e0b",
+  surge:  "#ef4444",
+};
+
+function NewsRow({ item, onTickerClick, onOpen }) {
   const dot = IMPACT[item.impact_level] || IMPACT.low;
   const dir = DIRECTION[item.direction] || DIRECTION.mixed;
   const catIcon = CATEGORY_ICON[item.category] || CATEGORY_ICON.macro;
 
   return (
     <div
+      role={onOpen ? "button" : undefined}
+      tabIndex={onOpen ? 0 : undefined}
+      onClick={onOpen}
+      onKeyDown={(e) => { if (onOpen && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onOpen(); } }}
       style={{
         display: "grid",
         gridTemplateColumns: "auto 1fr",
@@ -47,6 +75,7 @@ function NewsRow({ item, onTickerClick }) {
         background: "transparent",
         borderRadius: "10px",
         border: "1px solid var(--border-subtle)",
+        cursor: onOpen ? "pointer" : "default",
         transition: "border-color 0.15s, background 0.15s",
       }}
       onMouseEnter={(e) => {
@@ -163,6 +192,22 @@ function NewsRow({ item, onTickerClick }) {
             </p>
           )}
         </div>
+
+        {item.technical_context && (
+          <p
+            style={{
+              fontSize: "10.5px",
+              color: "var(--color-text-muted)",
+              lineHeight: 1.35,
+              margin: "6px 0 0 0",
+              fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+              letterSpacing: "0.01em",
+            }}
+          >
+            <span style={{ color: "#a855f7", fontWeight: 700, marginRight: "4px" }}>TA</span>
+            {item.technical_context}
+          </p>
+        )}
       </div>
     </div>
   );
@@ -175,6 +220,7 @@ export default function NewsImpactFeed({ onNavigate }) {
   const [feed, setFeed] = useState(null);
   const [error, setError] = useState(null);
   const [filter, setFilter] = useState("all");
+  const [activeItem, setActiveItem] = useState(null); // click-through detail modal
 
   const fetchFeed = useCallback(async (force = false) => {
     if (!user?.id) return;
@@ -365,11 +411,307 @@ export default function NewsImpactFeed({ onNavigate }) {
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
             {items.map((item, i) => (
-              <NewsRow key={item.news_id || i} item={item} onTickerClick={handleTickerClick} />
+              <NewsRow
+                key={item.news_id || i}
+                item={item}
+                onTickerClick={handleTickerClick}
+                onOpen={() => setActiveItem(item)}
+              />
             ))}
           </div>
         )}
       </div>
+
+      {activeItem && (
+        <NewsDetailModal
+          item={activeItem}
+          allItems={feed?.items || []}
+          universeTechnicals={feed?.universe_technicals || {}}
+          onClose={() => setActiveItem(null)}
+          onOpen={(it) => setActiveItem(it)}
+          onTickerClick={handleTickerClick}
+        />
+      )}
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// NewsDetailModal — full reasoning view for one news item. Surfaces the data
+// the LLM used: each affected ticker's current technical state, the semantic
+// similarity score (if it was a pgvector hit, not a literal-name match), the
+// full snippet, and a direct link to the source.
+// ---------------------------------------------------------------------------
+function NewsDetailModal({ item, allItems = [], universeTechnicals, onClose, onOpen, onTickerClick }) {
+  const dot = IMPACT[item.impact_level] || IMPACT.low;
+  const dir = DIRECTION[item.direction] || DIRECTION.mixed;
+  const catIcon = CATEGORY_ICON[item.category] || CATEGORY_ICON.macro;
+  const catLabel = CATEGORY_LABEL[item.category] || item.category;
+  const affected = item.affected_tickers || [];
+  const isSemantic = item.semantic_similarity != null;
+
+  // Find other items in the same feed that touch any of the same tickers.
+  // Sorted by impact (high first) so the most relevant coverage shows up top.
+  // Capped at 4 to keep the modal scannable.
+  const affectedSet = new Set(affected);
+  const impactRank = { high: 0, medium: 1, low: 2 };
+  const related = (allItems || [])
+    .filter((it) => it.news_id !== item.news_id
+                 && (it.affected_tickers || []).some((t) => affectedSet.has(t)))
+    .sort((a, b) => (impactRank[a.impact_level] ?? 3) - (impactRank[b.impact_level] ?? 3))
+    .slice(0, 4);
+
+  const header = (
+    <div style={{ minWidth: 0 }}>
+      <div style={{
+        display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap",
+        fontSize: "10px", fontWeight: 700, color: "var(--color-text-muted)",
+        textTransform: "uppercase", letterSpacing: "0.04em",
+      }}>
+        <span style={{ fontSize: "13px" }}>{catIcon}</span>
+        <span>{catLabel}</span>
+        <span style={{ color: dot.color }}>· {dot.label}</span>
+        <span style={{ color: dir.color }}>· {dir.arrow} {item.direction}</span>
+        {item.source && <span style={{ textTransform: "none", fontStyle: "italic" }}>· {item.source}</span>}
+      </div>
+      <h3 style={{ fontSize: "16px", fontWeight: 700, color: "var(--color-text-primary)", margin: "8px 0 0 0", lineHeight: 1.4 }}>
+        {item.headline}
+      </h3>
+      {item.url && (
+        <a href={item.url} target="_blank" rel="noopener noreferrer" style={{
+          display: "inline-block", marginTop: "8px",
+          fontSize: "11px", color: "var(--color-accent-secondary)",
+          textDecoration: "none", fontWeight: 600,
+        }}>
+          Open source ↗
+        </a>
+      )}
+    </div>
+  );
+
+  return (
+    <Modal onClose={onClose} header={header}>
+        {/* Why — the LLM's transmission-mechanism reason */}
+        {item.reason && (
+          <NewsModalSection title="Why this matters">
+            <p style={{ fontSize: "13px", color: "var(--color-text-secondary)", lineHeight: 1.55, margin: 0 }}>
+              {item.reason}
+            </p>
+          </NewsModalSection>
+        )}
+
+        {/* Snippet from the source */}
+        {item.snippet && (
+          <NewsModalSection title="From the source">
+            <p style={{ fontSize: "12px", color: "var(--color-text-secondary)", lineHeight: 1.55, margin: 0, fontStyle: "italic" }}>
+              "{item.snippet}"
+            </p>
+          </NewsModalSection>
+        )}
+
+        {/* Semantic match details */}
+        {isSemantic && (
+          <NewsModalSection
+            title="How we linked this"
+            hint="pgvector embedded the headline and matched it against your holdings — the score below shows how close the meaning is, not the keyword overlap."
+          >
+            <div style={{
+              display: "flex", alignItems: "center", gap: "10px",
+              padding: "10px 12px", background: "rgba(168,85,247,0.08)",
+              border: "1px solid rgba(168,85,247,0.25)", borderRadius: "8px",
+            }}>
+              <span style={{
+                padding: "3px 8px", borderRadius: "6px",
+                fontSize: "10px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.5px",
+                background: "rgba(168,85,247,0.18)", color: "#a855f7",
+              }}>
+                Semantic match
+              </span>
+              {item.semantic_match_ticker && (
+                <span style={{ fontSize: "12px", color: "var(--color-text-secondary)" }}>
+                  → <span style={{ fontWeight: 700, color: "var(--color-text-primary)" }}>{item.semantic_match_ticker}</span>
+                </span>
+              )}
+              <span style={{ fontSize: "12px", color: "var(--color-text-muted)", marginLeft: "auto", fontVariantNumeric: "tabular-nums" }}>
+                cosine similarity <span style={{ color: "#a855f7", fontWeight: 700 }}>{item.semantic_similarity}</span>
+              </span>
+            </div>
+          </NewsModalSection>
+        )}
+
+        {/* Per-ticker technical state — one card per affected holding */}
+        {affected.length > 0 && (
+          <NewsModalSection
+            title={`Affected holdings (${affected.length})`}
+            hint="Click a ticker to open its company page."
+          >
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+              {affected.map((t) => (
+                <TickerTechCard
+                  key={t}
+                  ticker={t}
+                  tech={universeTechnicals?.[t]}
+                  onClick={() => onTickerClick?.(t)}
+                />
+              ))}
+            </div>
+          </NewsModalSection>
+        )}
+
+        {related.length > 0 && (
+          <NewsModalSection
+            title={`Related coverage (${related.length})`}
+            hint="Other news in your feed that touches the same holdings — click to open."
+          >
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+              {related.map((r) => (
+                <RelatedNewsRow
+                  key={r.news_id}
+                  item={r}
+                  onClick={() => onOpen?.(r)}
+                />
+              ))}
+            </div>
+          </NewsModalSection>
+        )}
+    </Modal>
+  );
+}
+
+function RelatedNewsRow({ item, onClick }) {
+  const dot = IMPACT[item.impact_level] || IMPACT.low;
+  const dir = DIRECTION[item.direction] || DIRECTION.mixed;
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick?.(); } }}
+      style={{
+        padding: "10px 12px", borderRadius: "8px",
+        background: "rgba(255,255,255,0.02)",
+        border: "1px solid var(--border-subtle)",
+        cursor: "pointer",
+        transition: "background 0.15s, border-color 0.15s",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = "rgba(99,102,241,0.05)";
+        e.currentTarget.style.borderColor = "rgba(99,102,241,0.25)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = "rgba(255,255,255,0.02)";
+        e.currentTarget.style.borderColor = "var(--border-subtle)";
+      }}
+    >
+      <div style={{
+        display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap",
+        fontSize: "10px", fontWeight: 700, color: "var(--color-text-muted)",
+        textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "4px",
+      }}>
+        <span style={{ color: dot.color }}>{dot.label}</span>
+        <span style={{ color: dir.color }}>· {dir.arrow} {item.direction}</span>
+        {item.source && <span style={{ textTransform: "none", fontStyle: "italic" }}>· {item.source}</span>}
+      </div>
+      <div style={{ fontSize: "12px", color: "var(--color-text-primary)", fontWeight: 600, lineHeight: 1.4 }}>
+        {item.headline}
+      </div>
+      <div style={{ marginTop: "6px", display: "flex", flexWrap: "wrap", gap: "4px" }}>
+        {(item.affected_tickers || []).slice(0, 4).map((t) => (
+          <span key={t} style={{
+            padding: "1px 6px", borderRadius: "4px",
+            background: "rgba(99,102,241,0.10)", color: "var(--color-accent-secondary)",
+            fontSize: "10px", fontWeight: 700,
+            fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+          }}>{t}</span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function NewsModalSection({ title, hint, children }) {
+  return (
+    <div style={{ marginTop: "18px" }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: "10px", marginBottom: "8px" }}>
+        <span style={{
+          fontSize: "10px", fontWeight: 700, color: "var(--color-text-muted)",
+          textTransform: "uppercase", letterSpacing: "1.2px",
+        }}>{title}</span>
+      </div>
+      {hint && (
+        <p style={{ fontSize: "11px", color: "var(--color-text-muted)", fontStyle: "italic", margin: "-4px 0 8px 0", lineHeight: 1.5 }}>
+          {hint}
+        </p>
+      )}
+      {children}
+    </div>
+  );
+}
+
+function TickerTechCard({ ticker, tech, onClick }) {
+  const has = tech && (tech.rsi_zone || tech.vol_zone || tech.momentum_state || tech.sma_state);
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick?.(); } }}
+      style={{
+        padding: "10px 12px", borderRadius: "8px",
+        background: "rgba(255,255,255,0.02)",
+        border: "1px solid var(--border-subtle)",
+        cursor: "pointer",
+        transition: "background 0.15s, border-color 0.15s",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = "rgba(99,102,241,0.05)";
+        e.currentTarget.style.borderColor = "rgba(99,102,241,0.25)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = "rgba(255,255,255,0.02)";
+        e.currentTarget.style.borderColor = "var(--border-subtle)";
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+        <span style={{
+          fontSize: "13px", fontWeight: 800, color: "var(--color-text-primary)",
+          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+        }}>
+          {ticker}
+        </span>
+        {has ? (
+          <>
+            {tech.rsi_zone && <TechPill color={RSI_COLORS[tech.rsi_zone] || "#64748b"} label={`RSI ${tech.rsi_zone}`} tooltip={TECH_TOOLTIPS.rsi} />}
+            {tech.vol_zone && <TechPill color={VOL_COLORS[tech.vol_zone] || "#64748b"} label={`Vol ${tech.vol_zone}`} tooltip={TECH_TOOLTIPS.vol_vs_avg} />}
+            {tech.momentum_state && <TechPill color="#a855f7" label={tech.momentum_state.replace(/_/g, " ")} tooltip={TECH_TOOLTIPS.momentum_state} />}
+            {tech.sma_state && <TechPill color="#06b6d4" label={tech.sma_state.replace(/_/g, " ")} tooltip={TECH_TOOLTIPS.sma_state} />}
+            {tech.pct_from_20d_high != null && (
+              <span style={{ fontSize: "10px", color: "var(--color-text-muted)", marginLeft: "auto", fontVariantNumeric: "tabular-nums" }}>
+                {tech.pct_from_20d_high}% from 20d high
+              </span>
+            )}
+          </>
+        ) : (
+          <span style={{ fontSize: "11px", color: "var(--color-text-muted)", fontStyle: "italic" }}>
+            No technical data
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TechPill({ color, label, tooltip }) {
+  const pill = (
+    <span style={{
+      padding: "2px 7px", borderRadius: "5px",
+      fontSize: "9.5px", fontWeight: 700,
+      background: `${color}20`, color,
+      textTransform: "uppercase", letterSpacing: "0.4px",
+      cursor: tooltip ? "help" : "default",
+    }}>
+      {label}
+    </span>
+  );
+  return tooltip ? <Hint text={tooltip}>{pill}</Hint> : pill;
 }

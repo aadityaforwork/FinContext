@@ -81,6 +81,37 @@ def stock_embedding_count() -> int:
         return 0
 
 
+def news_embedding_count() -> int:
+    """How many news rows are currently embedded."""
+    if not _client:
+        return 0
+    try:
+        result = _client.table("news_embeddings").select("id", count="exact").execute()
+        return result.count or 0
+    except Exception as e:
+        logger.warning(f"news_embedding_count failed: {e}")
+        return 0
+
+
+def recent_news_samples(limit: int = 5) -> list[dict]:
+    """Most recently embedded news items. Used by the health endpoint to
+    eyeball whether the pipeline is alive."""
+    if not _client:
+        return []
+    try:
+        result = (
+            _client.table("news_embeddings")
+            .select("headline,scope,scope_ticker,source,created_at")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return result.data or []
+    except Exception as e:
+        logger.warning(f"recent_news_samples failed: {e}")
+        return []
+
+
 # ---------------------------------------------------------------------------
 # News embeddings (rolling cache)
 # ---------------------------------------------------------------------------

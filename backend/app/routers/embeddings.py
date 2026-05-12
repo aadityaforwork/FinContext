@@ -115,14 +115,72 @@ def _check_admin(token: str | None) -> None:
 
 @router.get("/health")
 async def embeddings_health(x_admin_token: str | None = Header(default=None)):
-    """Quick status — provider availability + embedding counts."""
+    """Quick status — provider availability + embedding counts + recent samples.
+
+    Use this to verify the news pipeline is actually populating:
+      - `news_embeddings_count` should grow as users load the dashboard.
+      - `recent_news_samples` lets you eyeball that real headlines are landing.
+    """
     _check_admin(x_admin_token)
     return {
         "embedding_provider": "openai" if embeddings.is_available() else None,
         "embedding_model": embeddings.EMBED_MODEL if embeddings.is_available() else None,
         "vector_store_available": vector_store.is_available(),
         "stock_embeddings_count": vector_store.stock_embedding_count(),
+        "news_embeddings_count": vector_store.news_embedding_count(),
+        "recent_news_samples": vector_store.recent_news_samples(limit=8),
         "nse_universe_size": len(NSE_STOCKS),
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.post("/test-match")
+async def test_match(
+    tickers: list[str],
+    match_count: int = 10,
+    recency_hours: int = 72,
+    match_threshold: float = 0.4,
+    x_admin_token: str | None = Header(default=None),
+):
+    """Live semantic-match inspector. Body: a list of tickers. Returns the
+    top news matches with similarity scores. Use this to verify the wedge
+    works end-to-end (e.g. POST `["TATAPOWER"]` and check if news about
+    'renewable subsidies' surfaces even though it doesn't name TATAPOWER).
+
+    Defaults are intentionally loose (0.4 threshold, 72h window) so you see
+    everything; the production endpoint uses 0.55 / 48h.
+    """
+    _check_admin(x_admin_token)
+    if not vector_store.is_available():
+        raise HTTPException(status_code=503, detail="Vector store not configured.")
+    if not tickers:
+        return {"matches": [], "note": "Provide at least one ticker in the request body."}
+
+    matches = vector_store.match_news_for_tickers(
+        tickers=[t.upper() for t in tickers],
+        match_count=match_count,
+        recency_hours=recency_hours,
+        match_threshold=match_threshold,
+    )
+
+    # Score buckets — easier to read at a glance.
+    buckets = {"very_strong": 0, "strong": 0, "moderate": 0, "weak": 0}
+    for m in matches:
+        s = m.get("similarity") or 0
+        if s >= 0.75:
+            buckets["very_strong"] += 1
+        elif s >= 0.65:
+            buckets["strong"] += 1
+        elif s >= 0.55:
+            buckets["moderate"] += 1
+        else:
+            buckets["weak"] += 1
+
+    return {
+        "tickers_queried": [t.upper() for t in tickers],
+        "match_count": len(matches),
+        "score_buckets": buckets,
+        "matches": matches,
         "checked_at": datetime.now(timezone.utc).isoformat(),
     }
 

@@ -28,7 +28,7 @@ import yfinance as yf
 from cachetools import TTLCache
 
 from app.nse_universe import TICKER_TO_META, TICKER_TO_YF, NSE_STOCKS
-from app.services import data_ingestion
+from app.services import data_ingestion, market_flows, technicals, vector_store
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,8 @@ _index_cache: TTLCache = TTLCache(maxsize=50, ttl=900)        # 15 min positive
 _index_neg_cache: TTLCache = TTLCache(maxsize=50, ttl=60)     # 60 s negative
 _market_ctx_cache: TTLCache = TTLCache(maxsize=4, ttl=900)    # 15 min full market ctx
 _news_query_cache: TTLCache = TTLCache(maxsize=40, ttl=1800)  # 30 min per news query
+_earnings_cache: TTLCache = TTLCache(maxsize=300, ttl=43200)   # 12 h positive
+_earnings_neg_cache: TTLCache = TTLCache(maxsize=300, ttl=300) # 5 min negative
 
 
 # ---------------------------------------------------------------------------
@@ -630,16 +632,206 @@ def build_market_context() -> dict:
             })
             idx += 1
 
+    # FII/DII daily flows (moneycontrol). Best-effort — None if scrape fails.
+    flows = None
+    try:
+        flows = market_flows.fetch_latest_flows()
+    except Exception as e:
+        logger.warning("market_flows fetch failed: %s", e)
+
     from datetime import datetime
     ctx = {
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "indices": indices,
         "sectors": sectors,
+        "flows": flows,
         "india_headlines": india_news,
         "global_headlines": global_news,
     }
     _market_ctx_cache["market_ctx"] = ctx
     return ctx
+
+
+def _upcoming_earnings(ticker: str, max_days: int = 14) -> dict | None:
+    """Return {date: ISO, days_ahead: int} for the next earnings inside `max_days`,
+    or None if none / unknown / yfinance is flaky. Cached 12 h positive / 5 min negative.
+
+    yfinance ships earnings via `Ticker.calendar` (a dict in 0.2.x) and a fallback
+    DataFrame from `get_earnings_dates`. We try both because the shape varies by
+    yfinance version and by ticker — Indian tickers in particular often return only
+    one of the two.
+    """
+    if ticker in _earnings_cache:
+        return _earnings_cache[ticker]
+    if ticker in _earnings_neg_cache:
+        return None
+    yf_symbol = TICKER_TO_YF.get(ticker)
+    if not yf_symbol:
+        _earnings_neg_cache[ticker] = True
+        return None
+
+    from datetime import datetime, timezone, date
+
+    today = datetime.now(timezone.utc).date()
+    ed: date | None = None
+    try:
+        tk = yf.Ticker(yf_symbol)
+        cal = getattr(tk, "calendar", None)
+        if isinstance(cal, dict):
+            v = cal.get("Earnings Date") or cal.get("earnings_date")
+            if v:
+                cand = v[0] if isinstance(v, list) and v else v
+                if hasattr(cand, "date"):
+                    cand = cand.date()
+                if isinstance(cand, date):
+                    ed = cand
+        if ed is None:
+            try:
+                df = tk.get_earnings_dates(limit=4)
+                if df is not None and not df.empty:
+                    # index is a DatetimeIndex of upcoming + recent earnings
+                    for ts in df.index:
+                        d = ts.date() if hasattr(ts, "date") else None
+                        if d and d >= today:
+                            ed = d
+                            break
+            except Exception:
+                pass
+    except Exception as e:
+        logger.debug("earnings lookup failed for %s: %s", ticker, e)
+        _earnings_neg_cache[ticker] = True
+        return None
+
+    if ed is None:
+        _earnings_neg_cache[ticker] = True
+        return None
+    delta = (ed - today).days
+    if delta < 0 or delta > max_days:
+        _earnings_neg_cache[ticker] = True
+        return None
+    out = {"date": ed.isoformat(), "days_ahead": delta}
+    _earnings_cache[ticker] = out
+    return out
+
+
+def compute_portfolio_health(context: dict) -> dict:
+    """Deterministic per-axis portfolio-health scores (0-100) computed from the
+    grounding context. Run alongside the LLM so the AI Analysis tab never shows
+    empty bars when the LLM degrades, times out, or returns nulls.
+
+    Returns: {diversification, quality, risk, momentum} — None for any axis
+    whose input data is too sparse.
+
+      • diversification — penalizes single-holding and single-sector concentration
+      • quality         — bucketed score over ROE / profit margin / debt-to-equity,
+                          weighted by position size
+      • risk            — inverse risk (higher = safer): concentration penalty
+                          + holding-count bonus
+      • momentum        — weighted 20-day return across holdings, mapped to 0-100
+
+    Caller is expected to merge: prefer the LLM's value, fall back to these.
+    """
+    aggregate = context.get("aggregate") or {}
+    holdings = context.get("holdings") or []
+
+    # --- Diversification ---
+    div = None
+    if aggregate:
+        top_h = aggregate.get("top_holding_pct") or 0
+        top_s = aggregate.get("top_sector_pct") or 0
+        sector_count = len(aggregate.get("sector_allocation") or [])
+        n = aggregate.get("n_holdings") or len(holdings)
+        score = 100
+        if top_h > 20:           score -= (top_h - 20) * 1.4
+        if top_s > 35:           score -= (top_s - 35) * 1.0
+        if sector_count < 4:     score -= (4 - sector_count) * 8
+        if n < 8:                score -= (8 - n) * 3
+        div = max(0, min(100, round(score)))
+
+    # --- Quality ---
+    def _bucket_roe(v):
+        if v is None: return None
+        if v < 0:  return 5
+        if v < 8:  return 30
+        if v < 14: return 55
+        if v < 20: return 75
+        return 90
+
+    def _bucket_margin(v):
+        if v is None: return None
+        if v < 0:  return 5
+        if v < 5:  return 30
+        if v < 10: return 55
+        if v < 20: return 75
+        return 90
+
+    def _bucket_de(v):
+        if v is None: return None
+        # yfinance debt_to_equity is sometimes in percent (e.g. 120 = 1.2x).
+        # Normalise heuristically: anything > 5 is almost certainly a percent.
+        d = v / 100.0 if v > 5 else v
+        if d > 2:    return 15
+        if d > 1:    return 40
+        if d > 0.5:  return 65
+        return 85
+
+    quality_pairs: list[tuple[float, float]] = []
+    for h in holdings:
+        snap = h.get("snapshot") or {}
+        per = [b for b in (
+            _bucket_roe(snap.get("roe_pct")),
+            _bucket_margin(snap.get("profit_margin_pct")),
+            _bucket_de(snap.get("debt_to_equity")),
+        ) if b is not None]
+        if per:
+            w = h.get("weight_pct") or 0
+            quality_pairs.append((sum(per) / len(per), w))
+    qty = None
+    if quality_pairs:
+        num = sum(s * w for s, w in quality_pairs)
+        den = sum(w for _, w in quality_pairs)
+        qty = round(num / den) if den > 0 else round(sum(s for s, _ in quality_pairs) / len(quality_pairs))
+
+    # --- Risk (inverse: high = safer) ---
+    risk = None
+    if aggregate:
+        score = 100
+        top_h = aggregate.get("top_holding_pct") or 0
+        top_s = aggregate.get("top_sector_pct") or 0
+        if aggregate.get("concentration_flag"):  score -= 25
+        if top_h > 25:                            score -= (top_h - 25) * 1.5
+        if top_s > 40:                            score -= (top_s - 40) * 0.8
+        # Penalize unrealized-loss tilt: average unrealized P&L < 0 is risky.
+        pnls = [h.get("unrealized_pnl_pct") for h in holdings if h.get("unrealized_pnl_pct") is not None]
+        if pnls:
+            avg_pnl = sum(pnls) / len(pnls)
+            if avg_pnl < -10: score -= 10
+            elif avg_pnl < -5: score -= 5
+        risk = max(0, min(100, round(score)))
+
+    # --- Momentum — weighted 20d return, mapped to 0-100 ---
+    mom = None
+    mom_pairs: list[tuple[float, float]] = []
+    for h in holdings:
+        t = (h.get("ticker") or "").upper()
+        sig = technicals.compute_signals(t) if t else None
+        if sig and sig.get("momentum_20d_pct") is not None:
+            w = h.get("weight_pct") or 0
+            mom_pairs.append((sig["momentum_20d_pct"], w))
+    if mom_pairs:
+        wnum = sum(m * w for m, w in mom_pairs)
+        wden = sum(w for _, w in mom_pairs)
+        if wden > 0:
+            avg = wnum / wden
+            # [-20, +20] → [0, 100] linear; clipped.
+            mom = max(0, min(100, round(50 + avg * 2.5)))
+
+    return {
+        "diversification": div,
+        "quality": qty,
+        "risk": risk,
+        "momentum": mom,
+    }
 
 
 def build_movers_context(holdings: list[dict], market_ctx: dict | None = None) -> dict:
@@ -656,6 +848,28 @@ def build_movers_context(holdings: list[dict], market_ctx: dict | None = None) -
     holdings_ctx: list[dict] = []
     total_value = 0.0
     weighted_change = 0.0
+
+    # Batch pgvector semantic match across ALL tickers at once — far cheaper
+    # than one RPC per ticker. Returns annotated news with `affected_ticker`.
+    semantic_by_ticker: dict[str, list[dict]] = {}
+    try:
+        all_tickers = [
+            (h.get("ticker") or "").upper() for h in (holdings or []) if h.get("ticker")
+        ]
+        if all_tickers and vector_store.is_available():
+            matches = vector_store.match_news_for_tickers(
+                tickers=all_tickers,
+                match_count=max(20, len(all_tickers) * 3),
+                recency_hours=36,
+                match_threshold=0.55,
+            )
+            for m in matches:
+                aff = (m.get("affected_ticker") or "").upper()
+                if not aff:
+                    continue
+                semantic_by_ticker.setdefault(aff, []).append(m)
+    except Exception as e:
+        logger.warning("semantic match failed in movers context: %s", e)
 
     for h in holdings or []:
         t = (h.get("ticker") or "").upper()
@@ -676,6 +890,7 @@ def build_movers_context(holdings: list[dict], market_ctx: dict | None = None) -
         if change is not None:
             weighted_change += (change or 0) * value
 
+        # Keyword news (RSS) — ticker literally named in headline
         news_items: list[dict] = []
         try:
             raw = data_ingestion.retrieve_context(t, top_k=3)
@@ -689,15 +904,38 @@ def build_movers_context(holdings: list[dict], market_ctx: dict | None = None) -
         except Exception as e:
             logger.warning("news fetch failed in movers for %s: %s", t, e)
 
+        # Semantic news (pgvector) — themes that affect this ticker even when
+        # the headline never names it. This is what kills "UNEXPLAINED" for
+        # moves like ONGC on crude headlines or VEDL on aluminium headlines.
+        sem_items: list[dict] = []
+        for i, m in enumerate((semantic_by_ticker.get(t) or [])[:3]):
+            sem_items.append({
+                "id": f"{t}_sem[{i}]",
+                "source": m.get("source"),
+                "headline": m.get("headline"),
+                "similarity": round(float(m.get("similarity") or 0), 3),
+            })
+
+        # Technical signals (RSI, volume, MA position, momentum)
+        tech = technicals.compute_signals(t)
+
+        # Upcoming earnings in the next 14 days — Tomorrow uses this to surface
+        # holding-specific catalysts instead of generic macro themes.
+        earnings = _upcoming_earnings(t, max_days=14)
+
         holdings_ctx.append({
             "ticker": t,
             "name": meta.get("name"),
             "sector": sector,
+            "current_price": _safe(price),
             "position_value": round(value, 2),
             "change_percent_today": change,
             "sector_index_return_today": sector_return,
             "excess_return_today": excess,
             "news": news_items,
+            "semantic_news": sem_items,
+            "technicals": tech,
+            "upcoming_earnings": earnings,
         })
 
     # Portfolio-level return today (value-weighted)
@@ -725,6 +963,7 @@ def build_movers_context(holdings: list[dict], market_ctx: dict | None = None) -
         "market": {
             "indices": market_ctx.get("indices", {}),
             "sectors": market_ctx.get("sectors", []),
+            "flows": market_ctx.get("flows"),
         },
     }
 
