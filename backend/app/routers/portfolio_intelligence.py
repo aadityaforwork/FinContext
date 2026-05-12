@@ -9,12 +9,12 @@ High-stakes output goes through a verifier pass.
 import asyncio
 import json
 import logging
-from fastapi import APIRouter
+from fastapi import APIRouter, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.core.compliance import with_disclaimer
-from app.services import ai_client, grounding
+from app.services import ai_client, grounding, vector_store
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/intelligence", tags=["portfolio-intelligence"])
@@ -542,6 +542,48 @@ def _news_feed_cache_key(positions: list[dict], watchlist: list[str]) -> str:
     return f"{bucket}|{h_key}|{w_key}"
 
 
+def _flatten_news_for_ingest(context: dict) -> list[dict]:
+    """Same as _collect_candidate_news but includes snippets — used for
+    embedding into the vector store. Output schema matches what
+    vector_store.ingest_news_items() expects.
+    """
+    out: list[dict] = []
+    for h in context.get("holdings", []):
+        for n in h.get("news", []):
+            out.append({
+                "headline": n.get("headline"),
+                "snippet": n.get("snippet"),
+                "source": n.get("source"),
+                "scope": "stock_specific",
+                "scope_ticker": h.get("ticker"),
+            })
+    for w in context.get("watchlist", []):
+        for n in w.get("news", []):
+            out.append({
+                "headline": n.get("headline"),
+                "snippet": n.get("snippet"),
+                "source": n.get("source"),
+                "scope": "stock_specific",
+                "scope_ticker": w.get("ticker"),
+            })
+    for n in context.get("india_headlines", []):
+        out.append({
+            "headline": n.get("headline"),
+            "snippet": n.get("snippet"),
+            "source": n.get("source"),
+            "scope": "macro",
+        })
+    for n in context.get("global_headlines", []):
+        out.append({
+            "headline": n.get("headline"),
+            "snippet": n.get("snippet"),
+            "source": n.get("source"),
+            "scope": "global",
+            "country": n.get("country"),
+        })
+    return out
+
+
 def _collect_candidate_news(context: dict) -> list[dict]:
     """Flatten all news available in the morning-brief context into a single list.
 
@@ -597,12 +639,55 @@ def _collect_candidate_news(context: dict) -> list[dict]:
     return candidates[:90]  # generous cap for large portfolios
 
 
+def _merge_semantic_into_candidates(
+    base: list[dict],
+    semantic_hits: list[dict],
+) -> list[dict]:
+    """Merge semantic-retrieval results into the base candidate list. Semantic
+    hits surface news affecting a user's stock even when the headline doesn't
+    name it (e.g. 'renewable subsidies' → TATAPOWER). We dedup by headline
+    text so the same news doesn't appear twice when both pipelines catch it.
+
+    Each semantic hit carries an `affected_ticker` (the user's stock that
+    matched closest) — we pass that through to the LLM as a strong hint.
+    """
+    if not semantic_hits:
+        return base
+
+    seen_headlines = {(c.get("headline") or "").strip().lower() for c in base}
+    extras: list[dict] = []
+    for h in semantic_hits:
+        headline = (h.get("headline") or "").strip()
+        if not headline or headline.lower() in seen_headlines:
+            continue
+        seen_headlines.add(headline.lower())
+        extras.append({
+            "id": f"semantic[{h.get('id')}]",
+            "headline": headline,
+            "source": h.get("source"),
+            "scope": h.get("scope") or "macro",
+            "scope_ticker": h.get("affected_ticker"),
+            "semantic_match_ticker": h.get("affected_ticker"),
+            "semantic_similarity": round(float(h.get("similarity") or 0), 3),
+        })
+    return (base + extras)[:120]  # bump cap a bit since semantic adds value
+
+
 @router.post("/news-feed")
-async def news_feed(req: NewsFeedRequest):
+async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
     """Annotated news stream — every relevant headline scored against the user's portfolio.
 
     Returns items with: impact_level, direction, affected_tickers (from user's universe),
     one-sentence reason, source citation. Items with no portfolio relevance are filtered out.
+
+    Pipeline:
+      1. Build RSS-based context (per-holding news + India + global headlines).
+      2. Fire-and-forget background: embed fresh news into pgvector (idempotent).
+      3. Query pgvector for SEMANTICALLY similar news on the user's universe —
+         this surfaces hits the RSS keyword search misses (e.g. "renewable
+         subsidies" mapping to TATAPOWER even when not named).
+      4. Merge both candidate sets, dedup by headline.
+      5. Send to LLM for annotation.
     """
     demo_mode = not req.positions and not req.watchlist_tickers
     if demo_mode:
@@ -640,7 +725,38 @@ async def news_feed(req: NewsFeedRequest):
             "generated_at": datetime.now(timezone.utc).isoformat(),
         })
 
+    # --- Fire-and-forget: feed today's news into the vector store ---
+    # Caller doesn't wait. Idempotent via content_hash. Steady-state: only
+    # genuinely new headlines pay the embedding cost.
+    if vector_store.is_available():
+        background.add_task(
+            vector_store.ingest_news_items,
+            _flatten_news_for_ingest(context),
+        )
+
     candidates = _collect_candidate_news(context)
+
+    # --- Semantic retrieval over pgvector ---
+    # Returns news matching the SHAPE of user's stocks even when the headline
+    # never names them. THIS is the wedge we built pgvector for.
+    user_holdings = [h["ticker"] for h in context.get("holdings", [])]
+    user_watchlist = [w["ticker"] for w in context.get("watchlist", [])]
+    universe = user_holdings + user_watchlist
+    semantic_hits = []
+    if vector_store.is_available() and universe:
+        try:
+            semantic_hits = await asyncio.to_thread(
+                vector_store.match_news_for_tickers,
+                universe,
+                40,    # match_count — fetch enough to enrich the LLM context
+                48,    # recency_hours
+                0.55,  # cosine similarity threshold (0.55 = "clearly related")
+            )
+        except Exception as e:
+            logger.warning(f"semantic retrieval failed: {e}")
+
+    candidates = _merge_semantic_into_candidates(candidates, semantic_hits)
+
     if not candidates:
         return with_disclaimer({
             "demo_mode": demo_mode,
@@ -648,9 +764,6 @@ async def news_feed(req: NewsFeedRequest):
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "user_universe": context.get("user_universe", {}),
         })
-
-    user_holdings = [h["ticker"] for h in context.get("holdings", [])]
-    user_watchlist = [w["ticker"] for w in context.get("watchlist", [])]
 
     # Build a slim CONTEXT for batch annotation.
     annotation_ctx = {
@@ -680,7 +793,12 @@ async def news_feed(req: NewsFeedRequest):
         "(India macro), 'global' (overseas event with India impact).\n"
         "6. Order output by impact_level (high → medium → low). Cap at 30 items.\n"
         "7. For users with 20+ holdings, lean toward keeping items even at 'low' impact — "
-        "the user wants breadth of coverage across their portfolio, not just headline events."
+        "the user wants breadth of coverage across their portfolio, not just headline events.\n"
+        "8. Some candidates carry `semantic_match_ticker` + `semantic_similarity` (0-1). "
+        "These are surfaced by vector search — they're news that doesn't NAME the ticker but "
+        "is semantically close to its business. Treat these as valid signal: include the named "
+        "ticker in affected_tickers if the transmission mechanism is real. Higher similarity "
+        "(>0.7) = stronger signal."
     )
     schema = """{
   "items": [

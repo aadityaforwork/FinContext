@@ -21,6 +21,7 @@ from app.routers import (
     global_news,
     company_data,
     risk,
+    embeddings as embeddings_router,
 )
 from app.core.config import settings
 
@@ -67,6 +68,7 @@ app.include_router(portfolio_intelligence.router)
 app.include_router(global_news.router)
 app.include_router(company_data.router)
 app.include_router(risk.router)
+app.include_router(embeddings_router.router)
 
 
 @app.get("/health", tags=["system"])

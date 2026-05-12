@@ -16,6 +16,7 @@ import UniverseRail from "./components/UniverseRail";
 import WatchlistDrawer from "./components/WatchlistDrawer";
 import ScreenerDrawer from "./components/ScreenerDrawer";
 import SettingsView from "./components/SettingsView";
+import OnboardingModal, { shouldShowOnboarding } from "./components/OnboardingModal";
 import { useAuth } from "./context/AuthContext";
 import { supabase } from "./lib/supabase";
 import { useToast } from "./components/Toast";
@@ -31,11 +32,41 @@ export default function App() {
   const [companyTicker, setCompanyTicker] = useState(null);
   // Drawer state for the hub-and-drawer model. Only one drawer open at a time.
   const [drawer, setDrawer] = useState(null); // "watchlist" | "screener" | null
+  // First-run onboarding modal (shown to new users with empty universe).
+  const [showOnboarding, setShowOnboarding] = useState(false);
 
   // Redirect unauthenticated users to /login
   useEffect(() => {
     if (!loading && !user) router.replace("/login");
   }, [loading, user, router]);
+
+  // First-run detection: brand-new users (empty portfolio + empty watchlist,
+  // no localStorage flag) get the onboarding modal. Don't block render — let
+  // the dashboard load with demo data, then overlay the modal.
+  useEffect(() => {
+    if (!user?.id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const [{ data: portfolio }, { data: watch }] = await Promise.all([
+          supabase.from("portfolio").select("ticker").eq("user_id", user.id).limit(1),
+          supabase.from("watchlist").select("ticker").eq("user_id", user.id).limit(1),
+        ]);
+        if (cancelled) return;
+        if (
+          shouldShowOnboarding({
+            hasPortfolio: (portfolio?.length || 0) > 0,
+            hasWatchlist: (watch?.length || 0) > 0,
+          })
+        ) {
+          setShowOnboarding(true);
+        }
+      } catch {
+        // Silent — onboarding is a nice-to-have, not a blocker.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [user?.id]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -137,6 +168,13 @@ export default function App() {
         open={drawer === "screener"}
         onClose={() => setDrawer(null)}
         onNavigate={handleNavigate}
+      />
+
+      {/* First-run onboarding overlay */}
+      <OnboardingModal
+        open={showOnboarding}
+        onClose={() => setShowOnboarding(false)}
+        userName={user?.user_metadata?.name || user?.user_metadata?.full_name || ""}
       />
     </div>
   );
