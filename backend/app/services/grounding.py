@@ -45,6 +45,52 @@ _news_query_cache: TTLCache = TTLCache(maxsize=40, ttl=1800)  # 30 min per news 
 _earnings_cache: TTLCache = TTLCache(maxsize=300, ttl=43200)   # 12 h positive
 _earnings_neg_cache: TTLCache = TTLCache(maxsize=300, ttl=300) # 5 min negative
 
+# Thread pool for parallelizing per-holding enrichment in build_movers_context.
+# 12 workers covers the typical 30-50 holding portfolio while staying gentle on
+# yfinance rate limits (Yahoo gets cranky beyond ~20 concurrent connections).
+from concurrent.futures import ThreadPoolExecutor as _Pool
+_movers_pool = _Pool(max_workers=12, thread_name_prefix="movers-enrich")
+
+# Lightweight cache for the price-only path (fast_info). Separate from
+# _snapshot_cache so the heavy build_portfolio_context flow (which needs full
+# fundamentals) and the light build_movers_context flow (which only needs
+# price + change) don't fight over the same TTL.
+_fast_snap_cache: TTLCache = TTLCache(maxsize=400, ttl=900)   # 15 min positive
+_fast_snap_neg:   TTLCache = TTLCache(maxsize=400, ttl=60)    # 60 s negative
+
+
+def _fetch_fast_snapshot(ticker: str) -> dict:
+    """fast_info-only snapshot — returns {current_price, change_percent}.
+    Used by build_movers_context which doesn't need the full PE/ROE bundle.
+    ~5-10× faster than _fetch_snapshot because it skips the slow .info JSON.
+    Returns {} on failure; caller falls back to buy_price.
+    """
+    if ticker in _fast_snap_cache:
+        return _fast_snap_cache[ticker]
+    if ticker in _fast_snap_neg:
+        return {}
+    yf_symbol = resolve_yf_symbol(ticker)
+    if not yf_symbol:
+        _fast_snap_neg[ticker] = True
+        return {}
+    try:
+        fast = yf.Ticker(yf_symbol).fast_info
+        price = float(fast.last_price) if hasattr(fast, "last_price") else None
+        prev = float(fast.previous_close) if hasattr(fast, "previous_close") else None
+        if price is None or prev is None or prev == 0:
+            _fast_snap_neg[ticker] = True
+            return {}
+        out = {
+            "current_price": round(price, 2),
+            "change_percent": round((price - prev) / prev * 100, 2),
+        }
+        _fast_snap_cache[ticker] = out
+        return out
+    except Exception as e:
+        logger.debug("fast snapshot failed for %s: %s", ticker, e)
+        _fast_snap_neg[ticker] = True
+        return {}
+
 
 # ---------------------------------------------------------------------------
 # Sector → NIFTY sector-index symbol. Lets us compute excess return
@@ -871,26 +917,31 @@ def build_movers_context(holdings: list[dict], market_ctx: dict | None = None) -
     except Exception as e:
         logger.warning("semantic match failed in movers context: %s", e)
 
-    for h in holdings or []:
+    # ---- Parallel per-holding enrichment ------------------------------------
+    # Each holding needs ~4 sync calls (snapshot, RSS news, technicals, earnings)
+    # that are individually 100-500ms. Sequentially that's 25-40s for a 41-stock
+    # portfolio; in 12 threads it drops to ~3-5s. Heavy yfinance functions are
+    # I/O-bound (HTTPS to Yahoo) so threading gives near-linear speedup despite
+    # the GIL. Caches are mostly idempotent under concurrent writes.
+    def _enrich_one(h: dict) -> dict | None:
         t = (h.get("ticker") or "").upper()
         if not t:
-            continue
+            return None
         meta = TICKER_TO_META.get(t, {"name": t, "sector": "Unknown"})
-        snap = _fetch_snapshot(t)
+        # Light snapshot — only price + change (we don't need PE/ROE here).
+        # Skips the slow t.info call → 5-10× faster cold path.
+        snap = _fetch_fast_snapshot(t)
         price = snap.get("current_price") or h.get("buy_price") or 0.0
         qty = float(h.get("quantity") or 0)
         value = price * qty
-        total_value += value
         change = snap.get("change_percent")
         sector = meta.get("sector", "Unknown")
         sector_return = sector_returns.get(sector)
         excess = None
         if change is not None and sector_return is not None:
             excess = round(change - sector_return, 2)
-        if change is not None:
-            weighted_change += (change or 0) * value
 
-        # Keyword news (RSS) — ticker literally named in headline
+        # Keyword news (RSS)
         news_items: list[dict] = []
         try:
             raw = data_ingestion.retrieve_context(t, top_k=3)
@@ -904,26 +955,21 @@ def build_movers_context(holdings: list[dict], market_ctx: dict | None = None) -
         except Exception as e:
             logger.warning("news fetch failed in movers for %s: %s", t, e)
 
-        # Semantic news (pgvector) — themes that affect this ticker even when
-        # the headline never names it. This is what kills "UNEXPLAINED" for
-        # moves like ONGC on crude headlines or VEDL on aluminium headlines.
-        sem_items: list[dict] = []
-        for i, m in enumerate((semantic_by_ticker.get(t) or [])[:3]):
-            sem_items.append({
+        # Semantic news from the pre-fetched batch (cheap dict lookup).
+        sem_items = [
+            {
                 "id": f"{t}_sem[{i}]",
                 "source": m.get("source"),
                 "headline": m.get("headline"),
                 "similarity": round(float(m.get("similarity") or 0), 3),
-            })
+            }
+            for i, m in enumerate((semantic_by_ticker.get(t) or [])[:3])
+        ]
 
-        # Technical signals (RSI, volume, MA position, momentum)
         tech = technicals.compute_signals(t)
-
-        # Upcoming earnings in the next 14 days — Tomorrow uses this to surface
-        # holding-specific catalysts instead of generic macro themes.
         earnings = _upcoming_earnings(t, max_days=14)
 
-        holdings_ctx.append({
+        return {
             "ticker": t,
             "name": meta.get("name"),
             "sector": sector,
@@ -936,7 +982,23 @@ def build_movers_context(holdings: list[dict], market_ctx: dict | None = None) -
             "semantic_news": sem_items,
             "technicals": tech,
             "upcoming_earnings": earnings,
-        })
+            # Stash for the aggregator below.
+            "_value_for_total": value,
+            "_change_for_weighted": change,
+        }
+
+    # Submit all and wait — preserve input order via .map().
+    results = list(_movers_pool.map(_enrich_one, holdings or []))
+    for r in results:
+        if r is None:
+            continue
+        # Pull aggregator fields out of the per-holding dict before storing.
+        v = r.pop("_value_for_total", 0.0)
+        c = r.pop("_change_for_weighted", None)
+        total_value += v
+        if c is not None:
+            weighted_change += c * v
+        holdings_ctx.append(r)
 
     # Portfolio-level return today (value-weighted)
     portfolio_return = round(weighted_change / total_value, 2) if total_value else None

@@ -612,7 +612,7 @@ async def _movers_generator(raw_holdings: list[dict]):
             "sector_index_return_today": h.get("sector_index_return_today"),
             "excess_return_today": h.get("excess_return_today"),
             "mover_bucket": h.get("mover_bucket"),
-            "news": _slim_news(h.get("news"), limit=2),
+            "news": _slim_news(h.get("news"), limit=1),         # was 2
             "semantic_news": _slim_sem(h.get("semantic_news"), limit=2),
             "technicals": _slim_tech(h.get("technicals")),
         }
@@ -629,7 +629,7 @@ async def _movers_generator(raw_holdings: list[dict]):
             ],
             "flows": movers_ctx.get("market", {}).get("flows"),
         },
-        "india_headlines": _slim_news(market_ctx.get("india_headlines"), limit=5),
+        "india_headlines": _slim_news(market_ctx.get("india_headlines"), limit=4),
     }
 
     # -------- Tomorrow outlook --------
@@ -703,12 +703,14 @@ async def _movers_generator(raw_holdings: list[dict]):
   "data_gaps": [ str, ... ]
 }"""
 
-    # Slim tomorrow CONTEXT: cap global to 2/country, drop snippets everywhere.
+    # Slim tomorrow CONTEXT: cap global to 1/country, drop snippets everywhere.
+    # Tomorrow's LLM call doesn't need rich news context — it works mostly
+    # off per_holding catalysts + a couple of macro headlines.
     slim_global = []
     per_country: dict[str, int] = {}
     for n in market_ctx.get("global_headlines", []):
         c = n.get("country") or "?"
-        if per_country.get(c, 0) >= 2:
+        if per_country.get(c, 0) >= 1:    # was 2
             continue
         per_country[c] = per_country.get(c, 0) + 1
         slim_global.append({
@@ -834,15 +836,11 @@ async def _movers_generator(raw_holdings: list[dict]):
         except Exception as e:
             logger.warning("outcome_ledger logging failed: %s", e)
 
-    if mover_holdings:
-        try:
-            # 2500 tokens — today_data now carries technical_state + multi-source
-            # attributions per mover, so 1024 truncates the verifier's JSON
-            # ("Unterminated string..." in the parser). Bumped to fit.
-            today_verified = await asyncio.to_thread(ai_client.verify_claims, today_data, today_input, 2500)
-            today_data = today_verified.get("verified", today_data)
-        except Exception as e:
-            logger.warning("today verifier failed: %s", e)
+    # Verifier intentionally NOT run on movers output. It cost 10-15s
+    # end-to-end and added little value here: the today_data already comes out
+    # of OpenAI's JSON mode with strict schema and every claim cites a source
+    # id from CONTEXT. Risk of hallucinated unsupported claims is low. The
+    # /portfolio (AI Analysis) endpoint still uses the verifier where it matters.
 
     # Per-ticker raw evidence for click-through detail modals. Keyed by ticker
     # so the frontend can show the full reasoning chain (cited sources, raw
