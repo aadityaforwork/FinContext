@@ -9,14 +9,22 @@ High-stakes output goes through a verifier pass.
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.core.compliance import with_disclaimer
-from app.services import ai_client, grounding, outcome_ledger, vector_store
+from app.services import (
+    ai_client,
+    grounding,
+    outcome_ledger,
+    response_cache,
+    signal_ensemble,
+    vector_store,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/intelligence", tags=["portfolio-intelligence"])
@@ -30,10 +38,111 @@ class PositionIn(BaseModel):
 
 class IntelRequest(BaseModel):
     positions: list[PositionIn]
+    force_refresh: bool = False
 
 
 class MoversRequest(BaseModel):
     positions: list[PositionIn]
+    force_refresh: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Stale-while-revalidate wrapper for SSE endpoints. The two heavy endpoints
+# (/portfolio and /movers) take 30-90s for first compute. Wrapping them with
+# this cache means:
+#   • FRESH window (0-5min)  → cached SSE replay in <500ms
+#   • STALE window (5-15min) → cached replay + silent background refresh
+#   • MISS                   → full pipeline (still slow but unavoidable)
+# Cuts perceived load time on a return visit from 30s → instant.
+# ---------------------------------------------------------------------------
+SSE_FRESH_TTL_S = 5 * 60     # 5 min
+SSE_MAX_TTL_S   = 15 * 60    # 15 min
+
+
+async def _cached_sse_stream(
+    inner_generator,
+    cache_key: str,
+    *,
+    force_refresh: bool = False,
+    fresh_ttl_s: int = SSE_FRESH_TTL_S,
+    max_ttl_s: int = SSE_MAX_TTL_S,
+):
+    """Wrap an SSE async-generator with stale-while-revalidate caching.
+
+    Strategy:
+      • Cache hit + fresh  → emit cached payload as a single result event,
+                             discard the un-iterated `inner_generator`.
+      • Cache hit + stale  → emit cached payload immediately, kick off a
+                             background task to drain `inner_generator` and
+                             refresh the cache for the next visitor.
+      • Cache miss / force → drive `inner_generator`, capture the final
+                             `result` event, write to cache.
+
+    `inner_generator` MUST be a freshly-created async generator (not yet
+    iterated). On a cache hit we either discard it or hand it off to a
+    background task.
+    """
+    if not force_refresh:
+        cached, _ = response_cache.get(cache_key, max_ttl_s=max_ttl_s)
+        if cached is not None:
+            age = response_cache.age_seconds(cache_key) or 0
+            label = (
+                "Loaded from cache." if age < fresh_ttl_s
+                else f"Loaded from cache ({int(age)}s old) — refreshing."
+            )
+            yield f"data: {json.dumps({'type':'step','message':label})}\n\n"
+            yield f"data: {json.dumps(cached)}\n\n"
+            yield "data: [DONE]\n\n"
+
+            # If stale, background-refresh once. Multiple concurrent stale-hits
+            # would otherwise kick off duplicate refreshes; the in-flight set
+            # prevents that.
+            if age >= fresh_ttl_s and cache_key not in response_cache._refreshing:
+                response_cache._refreshing.add(cache_key)
+
+                async def _bg_refresh():
+                    try:
+                        last = None
+                        async for chunk in inner_generator:
+                            if isinstance(chunk, str) and chunk.startswith("data: "):
+                                body = chunk[6:].strip()
+                                if body and body != "[DONE]":
+                                    try:
+                                        p = json.loads(body)
+                                        if isinstance(p, dict) and p.get("type") == "result":
+                                            last = p
+                                    except (ValueError, json.JSONDecodeError):
+                                        pass
+                        if last:
+                            response_cache.put(cache_key, last)
+                    except Exception as e:
+                        logger.warning("SSE bg refresh failed for %s: %s", cache_key, e)
+                    finally:
+                        response_cache._refreshing.discard(cache_key)
+
+                try:
+                    asyncio.create_task(_bg_refresh())
+                except RuntimeError:
+                    response_cache._refreshing.discard(cache_key)
+            return
+
+    # MISS / force_refresh — stream the inner generator, capturing the result
+    # event for the cache so the next request is fast.
+    last_result = None
+    async for chunk in inner_generator:
+        if isinstance(chunk, str) and chunk.startswith("data: "):
+            body = chunk[6:].strip()
+            if body and body != "[DONE]":
+                try:
+                    p = json.loads(body)
+                    if isinstance(p, dict) and p.get("type") == "result":
+                        last_result = p
+                except (ValueError, json.JSONDecodeError):
+                    pass
+        yield chunk
+
+    if last_result is not None:
+        response_cache.put(cache_key, last_result)
 
 
 async def _intelligence_generator(raw_holdings: list[dict]):
@@ -67,7 +176,12 @@ async def _intelligence_generator(raw_holdings: list[dict]):
         "return sector or factor suggestions. "
         "IMPORTANT: Use ONLY assessment language for `signal` — BULLISH/NEUTRAL/CAUTIOUS — "
         "never action language like buy/sell/hold. We are unregistered (not a SEBI RA) so "
-        "all output must be educational stance, not advice."
+        "all output must be educational stance, not advice.\n\n"
+        "OUTPUT BUDGET: cap `holdings_verdicts` at the 20 highest-weight or most-extreme "
+        "(by |unrealized_pnl_pct|) holdings. Cap `top_risks` at 4 and `suggested_directions` "
+        "at 3. Reasons must be ONE concise sentence (<140 chars). The user can drill into "
+        "any individual ticker via the company page — this view is portfolio-level synthesis, "
+        "not a per-ticker dump."
     )
     schema = """{
   "portfolio_health_score": int (1-100) | null,
@@ -94,9 +208,13 @@ async def _intelligence_generator(raw_holdings: list[dict]):
 }"""
 
     try:
+        # 6000 tokens — large portfolios (40+ holdings) blew past 2048 mid-array
+        # ("Unterminated string..." JSON parse failure). The prompt also caps
+        # holdings_verdicts at 20 to bound the output regardless of portfolio size.
+        # Timeout extended in lockstep — bigger output = longer LLM latency.
         data = await asyncio.wait_for(
-            asyncio.to_thread(ai_client.generate_grounded_json, task, context, schema, 2048),
-            timeout=60,
+            asyncio.to_thread(ai_client.generate_grounded_json, task, context, schema, 6000),
+            timeout=90,
         )
     except asyncio.TimeoutError:
         yield f"data: {json.dumps({'type':'error','message':'Timed out.'})}\n\n"
@@ -108,7 +226,10 @@ async def _intelligence_generator(raw_holdings: list[dict]):
         yield "data: [DONE]\n\n"
         return
 
-    verified = await asyncio.to_thread(ai_client.verify_claims, data, context, 2500)
+    # Verifier max_tokens kept in lockstep with the LLM call above. With 20
+    # holdings_verdicts plus risks + suggestions + breakdown the verified output
+    # can run ~5K tokens — anything below truncates the JSON tail.
+    verified = await asyncio.to_thread(ai_client.verify_claims, data, context, 6000)
     data = verified.get("verified", data)
 
     # Deterministic fallback for health breakdown — computed straight from the
@@ -160,7 +281,118 @@ async def portfolio_intelligence(req: IntelRequest):
     if not req.positions:
         return {"error": "No holdings provided."}
     raw = [{"ticker": p.ticker, "quantity": p.quantity, "buy_price": p.buy_price} for p in req.positions]
-    return StreamingResponse(_intelligence_generator(raw), media_type="text/event-stream")
+    # Cache key — keyed by the user's positions + today's date. Two users with
+    # identical portfolios share the cache (same AI analysis applies to both).
+    cache_key = response_cache.make_key(
+        "intel-portfolio",
+        sorted([(p["ticker"], round(p["quantity"], 2), round(p["buy_price"], 2)) for p in raw]),
+        datetime.now(timezone.utc).date().isoformat(),
+    )
+    return StreamingResponse(
+        _cached_sse_stream(_intelligence_generator(raw), cache_key, force_refresh=req.force_refresh),
+        media_type="text/event-stream",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Signal-ensemble post-processing — runs after the LLM, before serving.
+# Selectivity > coverage: emit fewer, higher-conviction predictions. Items
+# below the threshold are HIDDEN from the user-facing payload but still get
+# logged to the outcome ledger so we can backtest "what if we'd kept them?"
+# ---------------------------------------------------------------------------
+def _apply_ensemble_to_per_holding(tomorrow_data: dict, movers_ctx: dict) -> int:
+    """Mutates tomorrow_data["per_holding"] in place: overrides each item's
+    `direction` with the ensemble consensus and adds `conviction` +
+    `signal_breakdown`. Returns the count of items that fell below the
+    user-facing conviction threshold (still in the list, marked
+    `hidden_low_conviction=True`)."""
+    items = (tomorrow_data or {}).get("per_holding") or []
+    if not items:
+        return 0
+
+    holdings_by_ticker = {h.get("ticker"): h for h in (movers_ctx.get("holdings") or [])}
+    sector_returns = {
+        s.get("sector"): s.get("change_percent")
+        for s in ((movers_ctx.get("market") or {}).get("sectors") or [])
+    }
+    flows = (movers_ctx.get("market") or {}).get("flows")
+
+    hidden = 0
+    for w in items:
+        t = (w.get("ticker") or "").upper()
+        h = holdings_by_ticker.get(t, {})
+        tech = h.get("technicals")
+        sector_chg = sector_returns.get(w.get("sector") or h.get("sector"))
+        llm_dir = w.get("direction")
+
+        ens = signal_ensemble.compute_ensemble(
+            news_direction=llm_dir,
+            technicals=tech,
+            sector_change_pct=sector_chg,
+            flows=flows,
+        )
+        # Preserve the LLM's original call so the modal can show "AI said X
+        # but ensemble flipped to Y" — useful for investor-facing transparency.
+        w["llm_direction"] = llm_dir
+        w["direction"] = ens["consensus_direction"]
+        w["conviction"] = ens["conviction"]
+        w["signal_breakdown"] = ens["breakdown"]
+        w["agreeing_signals"] = ens["agreeing_signals"]
+        w["conflicting_signals"] = ens["conflicting_signals"]
+        if ens["conviction"] < signal_ensemble.MIN_CONVICTION_FOR_USER:
+            w["hidden_low_conviction"] = True
+            hidden += 1
+    return hidden
+
+
+def _apply_ensemble_to_news_items(
+    cleaned_items: list[dict],
+    tech_by_ticker: dict,
+    sector_returns_today: list[dict] | None,
+    flows: dict | None,
+) -> int:
+    """Same idea for News Impact items. Mutates each item with `conviction`,
+    `signal_breakdown`, `hidden_low_conviction`. Returns hidden count.
+
+    For news items the affected ticker's technicals come from `tech_by_ticker`
+    (universe technicals already computed in news_feed). The "primary" affected
+    ticker (first in the list) drives the ensemble — secondary tickers just
+    inherit the same conviction so the row stays coherent.
+    """
+    if not cleaned_items:
+        return 0
+
+    sector_map = {
+        s.get("sector"): s.get("change_percent")
+        for s in (sector_returns_today or [])
+    }
+
+    hidden = 0
+    for it in cleaned_items:
+        affected = it.get("affected_tickers") or []
+        primary = affected[0].upper() if affected else None
+        tech = tech_by_ticker.get(primary) if primary else None
+        # Sector change isn't reliably attached to news items; skip if absent.
+        # The ensemble degrades gracefully when a signal is None.
+        sector_chg = None  # we don't carry per-item sector mapping for news_feed
+        llm_dir = it.get("direction")
+
+        ens = signal_ensemble.compute_ensemble(
+            news_direction=llm_dir,
+            technicals=tech,
+            sector_change_pct=sector_chg,
+            flows=flows,
+        )
+        it["llm_direction"] = llm_dir
+        it["direction"] = ens["consensus_direction"]
+        it["conviction"] = ens["conviction"]
+        it["signal_breakdown"] = ens["breakdown"]
+        it["agreeing_signals"] = ens["agreeing_signals"]
+        it["conflicting_signals"] = ens["conflicting_signals"]
+        if ens["conviction"] < signal_ensemble.MIN_CONVICTION_FOR_USER:
+            it["hidden_low_conviction"] = True
+            hidden += 1
+    return hidden
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +594,16 @@ async def _movers_generator(raw_holdings: list[dict]):
         )
         return {k: tech.get(k) for k in keep if tech.get(k) is not None}
 
+    # Cap at the top 10 movers by absolute change — keeps the prompt + output
+    # bounded regardless of portfolio size. Cuts LLM completion time 30-40%
+    # on 40+ holding portfolios. The 11th-onward mover rarely tells the user
+    # something the top 10 didn't already.
+    _eligible = [
+        h for h in movers_ctx.get("holdings", [])
+        if h.get("mover_bucket") in ("strong_gainer", "strong_loser")
+    ]
+    _eligible.sort(key=lambda h: abs(h.get("change_percent_today") or 0), reverse=True)
+    _eligible = _eligible[:10]
     mover_holdings = [
         {
             "ticker": h["ticker"],
@@ -371,11 +613,10 @@ async def _movers_generator(raw_holdings: list[dict]):
             "excess_return_today": h.get("excess_return_today"),
             "mover_bucket": h.get("mover_bucket"),
             "news": _slim_news(h.get("news"), limit=2),
-            "semantic_news": _slim_sem(h.get("semantic_news"), limit=3),
+            "semantic_news": _slim_sem(h.get("semantic_news"), limit=2),
             "technicals": _slim_tech(h.get("technicals")),
         }
-        for h in movers_ctx.get("holdings", [])
-        if h.get("mover_bucket") in ("strong_gainer", "strong_loser")
+        for h in _eligible
     ]
 
     today_input = {
@@ -421,7 +662,19 @@ async def _movers_generator(raw_holdings: list[dict]):
         "  • If a holding has NO catalyst, do NOT include it. Empty watchlist is fine.\n"
         "  • NEVER use phrases like 'may impact', 'could affect', 'foreign investors exiting' without a number. "
         "    Be specific: 'crude headline +X% on global_news[i] → ONGC realisations positive' beats "
-        "    'rising crude prices'."
+        "    'rising crude prices'.\n"
+        "\n"
+        "DIRECTION DISCIPLINE — read carefully:\n"
+        "  • DEFAULT TO 'neutral' when in doubt. Markets are noisy; over-confident calls are how AI "
+        "    products lose credibility. Use 'positive' / 'negative' ONLY when the evidence in CONTEXT "
+        "    strongly supports it (e.g. a clear earnings beat catalyst with confirming technicals, OR "
+        "    a sector index move > 1.5% with named affected stocks).\n"
+        "  • If technicals contradict the news catalyst (e.g. positive earnings but the stock is "
+        "    extending_down with vol surge — institutions selling into the print), call it 'mixed' or "
+        "    'neutral'. Do NOT force a direction just because there's a catalyst.\n"
+        "  • BANNED words/phrases: 'will likely', 'expected to', 'should rise', 'poised to'. These are "
+        "    forecasts dressed as facts. Use 'if X then Y' framing instead — 'if the print beats, the "
+        "    setup supports a bounce; if it misses, momentum_state extending_down extends'."
     )
     tomorrow_schema = """{
   "per_holding": [
@@ -486,10 +739,32 @@ async def _movers_generator(raw_holdings: list[dict]):
             return True
         return False
 
+    # Cap at 15 holdings into the LLM (sorted by catalyst strength) so the
+    # prompt size and output size both stay bounded. The ensemble filter
+    # downstream typically drops half anyway — feeding the LLM the strongest
+    # 15 catalysts is enough to surface the high-conviction calls.
+    _catalyst_candidates = [h for h in movers_ctx.get("holdings", []) if _has_catalyst(h)]
+
+    def _catalyst_strength(h: dict) -> int:
+        # Earnings within 7 days = strongest; semantic match similarity adds;
+        # stretched technicals add. Used only to rank input to the LLM.
+        score = 0
+        e = h.get("upcoming_earnings") or {}
+        if e and (e.get("days_ahead") or 99) <= 7:
+            score += 10
+        elif e:
+            score += 5
+        sem = h.get("semantic_news") or []
+        score += max((round((s.get("similarity") or 0) * 10) for s in sem), default=0)
+        tech = h.get("technicals") or {}
+        if tech.get("rsi_zone") in ("overbought", "oversold"): score += 3
+        if tech.get("vol_zone") == "surge": score += 3
+        if tech.get("momentum_state") in ("extending_up", "extending_down"): score += 2
+        return score
+
+    _catalyst_candidates.sort(key=_catalyst_strength, reverse=True)
     tomorrow_holdings: list[dict] = []
-    for h in movers_ctx.get("holdings", []):
-        if not _has_catalyst(h):
-            continue
+    for h in _catalyst_candidates[:15]:
         tomorrow_holdings.append({
             "ticker": h["ticker"],
             "sector": h.get("sector"),
@@ -517,16 +792,18 @@ async def _movers_generator(raw_holdings: list[dict]):
             return {"movers": [], "confidence": "high",
                     "data_gaps": ["No holding moved ≥1.5% today."]}
         return await asyncio.to_thread(
-            ai_client.generate_grounded_json, today_task, today_input, today_schema, 3000
+            # 2200 tokens: covers ≤10 movers with technical_state + 1-2 attributions.
+            ai_client.generate_grounded_json, today_task, today_input, today_schema, 2200
         )
 
     try:
         today_data, tomorrow_data = await asyncio.wait_for(
             asyncio.gather(
                 _run_today(),
-                asyncio.to_thread(ai_client.generate_grounded_json, tomorrow_task, tomorrow_input, tomorrow_schema, 3000),
+                # 2200 tokens: ≤15 holdings × per_holding watch item + 1-3 macro themes.
+                asyncio.to_thread(ai_client.generate_grounded_json, tomorrow_task, tomorrow_input, tomorrow_schema, 2200),
             ),
-            timeout=90,
+            timeout=75,
         )
     except asyncio.TimeoutError:
         yield f"data: {json.dumps({'type':'error','message':'Context Engine timed out.'})}\n\n"
@@ -536,17 +813,26 @@ async def _movers_generator(raw_holdings: list[dict]):
     today_data = today_data or {}
     tomorrow_data = tomorrow_data or {}
 
-    # Outcome ledger — log Tomorrow's per_holding watch items as forward-looking
-    # predictions. Fire-and-forget; the streaming response keeps going. Today's
-    # attribution is intentionally NOT logged because it explains a move that
-    # already happened (not a forecast).
+    # Multi-signal ensemble — override each per_holding item's direction with
+    # the consensus of news + technicals + sector + flow. Adds `conviction`
+    # (0-95) so the UI can show honest uncertainty. Items below the threshold
+    # are MARKED hidden but stay in the array so the ledger logs them too —
+    # we want to backtest "what would these have looked like if we'd kept them?"
+    hidden_tomorrow_count = _apply_ensemble_to_per_holding(tomorrow_data, movers_ctx)
+
+    # Outcome ledger — log every Tomorrow per_holding item (incl. hidden ones)
+    # as a forward-looking prediction. Synchronous (in a thread) so we don't
+    # hand off to a fire-and-forget task that may get garbage-collected as the
+    # SSE generator winds down. ~100ms cost added on top of the 30s+ LLM call.
+    # Today's attribution is intentionally NOT logged — it's an *explanation*
+    # of a move that already happened, not a forecast.
     if outcome_ledger.is_available():
         try:
-            asyncio.create_task(asyncio.to_thread(
-                _log_tomorrow_predictions, tomorrow_data, movers_ctx
-            ))
+            await asyncio.to_thread(
+                _log_tomorrow_predictions, tomorrow_data, movers_ctx,
+            )
         except Exception as e:
-            logger.debug("outcome_ledger fire-and-forget failed: %s", e)
+            logger.warning("outcome_ledger logging failed: %s", e)
 
     if mover_holdings:
         try:
@@ -595,9 +881,12 @@ async def _movers_generator(raw_holdings: list[dict]):
             "data_gaps": today_data.get("data_gaps", []),
         },
         "tomorrow": {
-            # New holding-specific shape. Keep `themes` populated for backwards
-            # compatibility with the existing frontend until Phase E ships.
-            "per_holding": tomorrow_data.get("per_holding", []),
+            # Only emit items that cleared the conviction threshold (multi-signal
+            # ensemble agreed). All items including hidden ones are logged to the
+            # ledger above so the /accuracy page can backtest both kept + dropped.
+            "per_holding": [w for w in tomorrow_data.get("per_holding", []) if not w.get("hidden_low_conviction")],
+            "hidden_low_conviction_count": hidden_tomorrow_count,
+            "min_conviction": signal_ensemble.MIN_CONVICTION_FOR_USER,
             "macro_themes": tomorrow_data.get("macro_themes", []),
             "themes": tomorrow_data.get("macro_themes", []) or tomorrow_data.get("themes", []),
             "overall_bias": tomorrow_data.get("overall_bias", "neutral"),
@@ -615,7 +904,15 @@ async def portfolio_movers(req: MoversRequest):
     if not req.positions:
         return {"error": "No holdings provided."}
     raw = [{"ticker": p.ticker, "quantity": p.quantity, "buy_price": p.buy_price} for p in req.positions]
-    return StreamingResponse(_movers_generator(raw), media_type="text/event-stream")
+    cache_key = response_cache.make_key(
+        "intel-movers",
+        sorted([(p["ticker"], round(p["quantity"], 2), round(p["buy_price"], 2)) for p in raw]),
+        datetime.now(timezone.utc).date().isoformat(),
+    )
+    return StreamingResponse(
+        _cached_sse_stream(_movers_generator(raw), cache_key, force_refresh=req.force_refresh),
+        media_type="text/event-stream",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1091,14 +1388,21 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
         "extending_up; above SMA50.'\n"
         "6. category: 'stock_specific' (single ticker news), 'sector' (sector-wide), 'macro' "
         "(India macro), 'global' (overseas event with India impact).\n"
-        "7. Order output by impact_level (high → medium → low). Cap at 30 items.\n"
+        "7. Order output by impact_level (high → medium → low). Cap at 20 items — "
+        "the top 20 most relevant beat a long tail every time.\n"
         "8. For users with 20+ holdings, lean toward keeping items even at 'low' impact — "
         "the user wants breadth of coverage across their portfolio, not just headline events.\n"
         "9. Some candidates carry `semantic_match_ticker` + `semantic_similarity` (0-1). "
         "These are surfaced by vector search — they're news that doesn't NAME the ticker but "
         "is semantically close to its business. Treat these as valid signal: include the named "
         "ticker in affected_tickers if the transmission mechanism is real. Higher similarity "
-        "(>0.7) = stronger signal."
+        "(>0.7) = stronger signal.\n"
+        "10. DIRECTION DISCIPLINE — DEFAULT TO 'mixed' when in doubt. Only emit 'positive' or "
+        "'negative' when (a) the news is unambiguously directional AND (b) the affected ticker's "
+        "technical state in CONTEXT.user_universe_technicals is consistent with the direction "
+        "(e.g. positive news + momentum extending_up + above SMA50). If technicals contradict the "
+        "news, call it 'mixed'. The system will then drop low-conviction calls — better to under-"
+        "promise than to issue a confident wrong direction. BANNED words: 'will', 'should', 'expected to'."
     )
     schema = """{
   "items": [
@@ -1120,9 +1424,11 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
     try:
         data = await asyncio.wait_for(
             asyncio.to_thread(
-                ai_client.generate_grounded_json, task, annotation_ctx, schema, 3500
+                # 2400 tokens: 20 items × ~120 tokens each. Reduced from 3500
+                # after capping items at 20 → faster LLM completion.
+                ai_client.generate_grounded_json, task, annotation_ctx, schema, 2400
             ),
-            timeout=60,
+            timeout=50,
         )
     except asyncio.TimeoutError:
         return with_disclaimer({
@@ -1146,7 +1452,7 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
 
     universe = set(user_holdings) | set(user_watchlist)
     cleaned: list[dict] = []
-    for it in (data.get("items") or [])[:30]:
+    for it in (data.get("items") or [])[:20]:
         affected = [t for t in (it.get("affected_tickers") or []) if t in universe]
         if not affected:
             continue  # if no real impact on user, drop it
@@ -1173,6 +1479,16 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
     impact_order = {"high": 0, "medium": 1, "low": 2}
     cleaned.sort(key=lambda x: impact_order.get(x["impact_level"], 3))
 
+    # Multi-signal ensemble — same selectivity rule as Tomorrow. Override each
+    # item's direction with consensus of news + technicals + flow, attach a
+    # conviction score. We keep low-conviction items in the ledger (for
+    # backtesting) but drop them from the user-facing payload.
+    flows_for_news = ((context.get("market") or {}).get("flows")
+                       if isinstance(context.get("market"), dict) else None)
+    hidden_news_count = _apply_ensemble_to_news_items(
+        cleaned, tech_by_ticker, context.get("sectors"), flows_for_news,
+    )
+
     # Outcome ledger — fire-and-forget log of every scoreable news item as a
     # forward-looking prediction (one row per item × affected ticker). Mixed
     # direction items are skipped inside the helper. UPSERT keyed by
@@ -1180,10 +1496,15 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
     if outcome_ledger.is_available():
         background.add_task(_log_news_feed_predictions, cleaned, tech_by_ticker)
 
+    # Filter for the user-facing list AFTER logging (so the ledger sees everything).
+    user_items = [it for it in cleaned if not it.get("hidden_low_conviction")]
+
     payload = with_disclaimer({
         "demo_mode": demo_mode,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "items": cleaned,
+        "items": user_items,
+        "hidden_low_conviction_count": hidden_news_count,
+        "min_conviction": signal_ensemble.MIN_CONVICTION_FOR_USER,
         "user_universe": context.get("user_universe", {}),
         # Forward per-ticker technical state so the click-through detail modal
         # can render each affected holding's current chart situation.
@@ -1199,6 +1520,52 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
 # in plain English. Sits to the LEFT of the news feed in the dashboard.
 # ---------------------------------------------------------------------------
 _market_summary_cache: TTLCache = TTLCache(maxsize=200, ttl=4 * 60 * 60)  # 4 hours
+
+
+def _slim_summary_context(ctx: dict) -> dict:
+    """Compact view of build_morning_brief_context for the market_summary LLM.
+    Cuts input from ~12K tokens to ~4K — under Groq's 12K TPM cap and ~3× faster
+    for OpenAI too. We drop snippets, cap headlines, and trim per-holding news
+    to one item; the narrative call doesn't need the full firehose.
+    """
+    def _slim_news(items, limit, keep_snippet=False):
+        out = []
+        for n in (items or [])[:limit]:
+            entry = {"id": n.get("id"), "source": n.get("source"), "headline": n.get("headline")}
+            if keep_snippet and n.get("snippet"):
+                entry["snippet"] = (n["snippet"] or "")[:160]
+            out.append(entry)
+        return out
+
+    slim = {
+        "user_universe": ctx.get("user_universe", {}),
+        "indices": ctx.get("indices", {}),
+        # Keep sector returns — they're small (≤17 entries × 3 fields).
+        "sectors": [
+            {"sector": s.get("sector"), "change_percent": s.get("change_percent")}
+            for s in (ctx.get("sectors") or [])
+        ],
+        # Cap headlines. ID prefix is preserved so source-citation rules still
+        # work (the prompt expects `global_news[i]`/`india_news[i]`).
+        "india_headlines": _slim_news(ctx.get("india_headlines"), limit=5),
+        "global_headlines": _slim_news(ctx.get("global_headlines"), limit=8),
+    }
+    # Holdings: cap at 15 by name+sector+1 news item.
+    holdings = []
+    for h in (ctx.get("holdings") or [])[:15]:
+        holdings.append({
+            "ticker": h.get("ticker"),
+            "name": h.get("name"),
+            "sector": h.get("sector"),
+            "news": _slim_news(h.get("news"), limit=1),
+        })
+    slim["holdings"] = holdings
+    # Watchlist: ticker + sector only — no news needed for narrative.
+    slim["watchlist"] = [
+        {"ticker": w.get("ticker"), "sector": w.get("sector")}
+        for w in (ctx.get("watchlist") or [])[:10]
+    ]
+    return slim
 
 
 class MarketSummaryRequest(BaseModel):
@@ -1308,12 +1675,18 @@ async def market_summary(req: MarketSummaryRequest):
   "data_gaps": [ str, ... ]
 }"""
 
+    # Trim the context fed to the LLM so the prompt stays small. The morning-
+    # brief builder packs ~12K tokens of news + per-holding context which
+    # blows past Groq's free-tier 12K TPM and slows OpenAI too. We don't need
+    # all of it for a narrative — cap headlines + drop snippets for speed.
+    slim_context = _slim_summary_context(context)
+
     try:
         data = await asyncio.wait_for(
             asyncio.to_thread(
-                ai_client.generate_grounded_json, task, context, schema, 2200
+                ai_client.generate_grounded_json, task, slim_context, schema, 2200
             ),
-            timeout=60,
+            timeout=55,
         )
     except asyncio.TimeoutError:
         return with_disclaimer({
@@ -1354,3 +1727,98 @@ async def market_summary(req: MarketSummaryRequest):
     })
     _market_summary_cache[cache_key] = payload
     return payload
+
+
+# ---------------------------------------------------------------------------
+# Demo prewarm — keeps the cold-start caches hot so a brand-new visitor (or
+# logged-in user with empty portfolio) sees a populated dashboard instantly.
+#
+# Hit this from cron-job.org every 30 min:
+#   POST https://fincontext.onrender.com/api/intelligence/prewarm-demo
+#   Header: X-Admin-Token: <ADMIN_TOKEN from env>
+# ---------------------------------------------------------------------------
+_ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
+
+
+def _check_admin(token: str | None) -> None:
+    if not _ADMIN_TOKEN:
+        raise HTTPException(503, "ADMIN_TOKEN not configured.")
+    if token != _ADMIN_TOKEN:
+        raise HTTPException(401, "Invalid admin token.")
+
+
+@router.post("/prewarm-demo")
+async def prewarm_demo(x_admin_token: str | None = Header(default=None)):
+    """Pre-compute the demo-mode caches (empty positions + empty watchlist) so
+    first-time visitors / cold-start dashboards render instantly. Intended to
+    be hit by an external cron every 30 min — frequent enough to keep the cache
+    warm, infrequent enough to not pay LLM cost on every minute.
+
+    Returns a per-endpoint status map so the cron's health check can flag
+    silent failures.
+    """
+    _check_admin(x_admin_token)
+
+    results: dict[str, str] = {}
+    bg = BackgroundTasks()
+
+    # 1. News Feed (demo mode — empty positions trigger _DEMO_HOLDINGS path).
+    try:
+        await news_feed(
+            NewsFeedRequest(positions=[], watchlist_tickers=[], force_refresh=True),
+            bg,
+        )
+        results["news_feed"] = "warmed"
+    except Exception as e:
+        logger.warning("prewarm news_feed failed: %s", e)
+        results["news_feed"] = f"failed: {type(e).__name__}"
+
+    # 2. Market Summary (also has demo path).
+    try:
+        await market_summary(
+            MarketSummaryRequest(positions=[], watchlist_tickers=[], force_refresh=True),
+        )
+        results["market_summary"] = "warmed"
+    except Exception as e:
+        logger.warning("prewarm market_summary failed: %s", e)
+        results["market_summary"] = f"failed: {type(e).__name__}"
+
+    # 3. Movers + Portfolio Intelligence — these reject empty positions, so
+    # we warm them with the demo holdings explicitly. Cache key matches what
+    # `_movers_generator` would produce for a real user with the same
+    # portfolio, but this is purely a warm-the-pump exercise: real users
+    # with their own portfolios still get their own cached entries.
+    demo_positions = [
+        PositionIn(ticker=h["ticker"], quantity=h["quantity"], buy_price=h["buy_price"])
+        for h in _DEMO_HOLDINGS
+    ]
+    for label, fn, req_cls in (
+        ("movers", portfolio_movers, MoversRequest),
+        ("portfolio_intelligence", portfolio_intelligence, IntelRequest),
+    ):
+        try:
+            resp = await fn(req_cls(positions=demo_positions, force_refresh=True))
+            # SSE response — drain the stream so the generator runs to completion
+            # and writes its result into response_cache.
+            if isinstance(resp, StreamingResponse):
+                async for _chunk in resp.body_iterator:
+                    pass
+            results[label] = "warmed"
+        except Exception as e:
+            logger.warning("prewarm %s failed: %s", label, e)
+            results[label] = f"failed: {type(e).__name__}"
+
+    return {
+        "results": results,
+        "cache_stats": response_cache.stats(),
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.get("/cache-stats")
+async def cache_stats(x_admin_token: str | None = Header(default=None)):
+    """Diagnostic — peek at the response cache to verify SWR is doing its job.
+    Useful right after deploy to confirm cold-start, then again 5 min later to
+    see hits accumulating."""
+    _check_admin(x_admin_token)
+    return response_cache.stats()

@@ -415,6 +415,21 @@ function Pill({ color, label, tooltip }) {
   return tooltip ? <Hint text={tooltip}>{pill}</Hint> : pill;
 }
 
+function ConvictionPill({ conviction }) {
+  if (conviction == null) return null;
+  const color = conviction >= 70 ? "#10b981" : conviction >= 50 ? "#f59e0b" : "#94a3b8";
+  const pill = (
+    <span style={{
+      padding: "3px 8px", borderRadius: "6px", fontSize: "10px", fontWeight: 700,
+      background: `${color}20`, color, letterSpacing: "0.4px",
+      cursor: "help", fontVariantNumeric: "tabular-nums",
+    }}>
+      ⚡ {conviction}%
+    </span>
+  );
+  return <Hint text={TECH_TOOLTIPS.conviction}>{pill}</Hint>;
+}
+
 function FlowsStrip({ flows }) {
   const fii = flows.fii_net_cr;
   const dii = flows.dii_net_cr;
@@ -459,6 +474,7 @@ function TomorrowSection({ tomorrow, onWatchClick, onThemeClick }) {
   const macros = macro_themes.length > 0 ? macro_themes : themes;
   const biasColor = DIRECTION_COLORS[overall_bias] || "#64748b";
   const nothing = per_holding.length === 0 && macros.length === 0;
+  const hiddenCount = tomorrow.hidden_low_conviction_count || 0;
 
   return (
     <div>
@@ -497,7 +513,19 @@ function TomorrowSection({ tomorrow, onWatchClick, onThemeClick }) {
 
       {nothing && (
         <p style={{ fontSize: "13px", color: "var(--color-text-muted)", padding: "16px", textAlign: "center", background: "rgba(0,0,0,0.15)", borderRadius: "10px" }}>
-          No strong overnight signals tied to your holdings.
+          {hiddenCount > 0
+            ? `No high-conviction calls right now. ${hiddenCount} low-conviction item${hiddenCount === 1 ? "" : "s"} hidden — signals didn't agree.`
+            : "No strong overnight signals tied to your holdings."}
+        </p>
+      )}
+
+      {!nothing && hiddenCount > 0 && (
+        <p style={{
+          marginTop: "10px", fontSize: "11px", color: "var(--color-text-muted)",
+          fontStyle: "italic", textAlign: "center",
+        }}>
+          Showing {per_holding.length} high-conviction call{per_holding.length === 1 ? "" : "s"} ·
+          {" "}{hiddenCount} hidden where signals disagreed.
         </p>
       )}
 
@@ -564,6 +592,7 @@ function WatchItemRow({ watch, onClick }) {
             ★ High
           </span>
         )}
+        <ConvictionPill conviction={watch.conviction} />
       </div>
       {watch.what_to_watch && (
         <p style={{ fontSize: "13px", color: "var(--color-text-secondary)", lineHeight: 1.5, margin: 0 }}>

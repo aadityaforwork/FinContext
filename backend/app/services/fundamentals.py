@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 import yfinance as yf
 
-from app.nse_universe import TICKER_TO_YF, TICKER_TO_META, NSE_STOCKS
+from app.nse_universe import TICKER_TO_YF, TICKER_TO_META, NSE_STOCKS, resolve_yf_symbol
 from app.services.cache import make_named_cache
 
 logger = logging.getLogger(__name__)
@@ -41,11 +41,13 @@ _peers_cache = make_named_cache("fundamentals", maxsize=100)
 # Internals
 # ---------------------------------------------------------------------------
 def _resolve_ticker(ticker: str) -> tuple[yf.Ticker, str, str]:
-    """Resolve an internal ticker to a yfinance Ticker, raising LookupError if unknown."""
+    """Resolve an internal ticker to a yfinance Ticker. Falls back to
+    `{TICKER}.NS` for tickers outside our curated universe so users with
+    long-tail NSE holdings still get fundamentals."""
     ticker = ticker.upper()
-    yf_symbol = TICKER_TO_YF.get(ticker)
+    yf_symbol = resolve_yf_symbol(ticker)
     if not yf_symbol:
-        raise LookupError(f"Ticker '{ticker}' not found in NSE universe")
+        raise LookupError(f"Ticker '{ticker}' could not be resolved")
     return yf.Ticker(yf_symbol), ticker, yf_symbol
 
 
@@ -290,7 +292,7 @@ def get_peers(ticker: str, max_peers: int = 6) -> dict:
     for p in universe:
         t = p["ticker"]
         try:
-            yf_obj = yf.Ticker(TICKER_TO_YF[t])
+            yf_obj = yf.Ticker(resolve_yf_symbol(t))
             info = yf_obj.info or {}
             price, _, mkt_cap = _quote_from_fast_info(yf_obj)
 

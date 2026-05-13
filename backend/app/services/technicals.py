@@ -19,7 +19,7 @@ import time as _time
 import yfinance as yf
 from cachetools import TTLCache
 
-from app.nse_universe import TICKER_TO_YF
+from app.nse_universe import TICKER_TO_YF, resolve_yf_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ def compute_signals(ticker: str) -> dict | None:
         return _tech_cache[ticker]
     if ticker in _tech_neg_cache:
         return None
-    yf_symbol = TICKER_TO_YF.get(ticker)
+    yf_symbol = resolve_yf_symbol(ticker)
     if not yf_symbol:
         _tech_neg_cache[ticker] = True
         return None

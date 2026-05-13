@@ -43,9 +43,15 @@ CREATE INDEX IF NOT EXISTS ai_predictions_ticker_date_idx
   ON public.ai_predictions(ticker, prediction_date DESC);
 CREATE INDEX IF NOT EXISTS ai_predictions_source_idx
   ON public.ai_predictions(source);
-CREATE UNIQUE INDEX IF NOT EXISTS ai_predictions_dedup_uidx
-  ON public.ai_predictions(dedup_key)
-  WHERE dedup_key IS NOT NULL;
+
+-- Real UNIQUE constraint (not a partial index) — required for PostgREST's
+-- `?on_conflict=dedup_key` upsert. Multiple NULLs are allowed in a UNIQUE
+-- constraint by default, so dedup_key NULL = no dedup (intended for hand-
+-- inserted rows that don't go through log_predictions).
+ALTER TABLE public.ai_predictions
+  DROP CONSTRAINT IF EXISTS ai_predictions_dedup_key_unique;
+ALTER TABLE public.ai_predictions
+  ADD CONSTRAINT ai_predictions_dedup_key_unique UNIQUE (dedup_key);
 
 -- ---------------------------------------------------------------------------
 -- prediction_outcomes — one row per (prediction, horizon) pair

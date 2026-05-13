@@ -28,7 +28,7 @@ from typing import Any, Iterable
 import yfinance as yf
 from dotenv import load_dotenv
 
-from app.nse_universe import TICKER_TO_YF
+from app.nse_universe import TICKER_TO_YF, resolve_yf_symbol
 
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -133,7 +133,7 @@ def _fetch_price_history(ticker: str, start_date: date) -> dict[str, float]:
     """Return {iso_date: close_price} for `ticker` from `start_date` to today.
     Only trading days. Empty dict on failure.
     """
-    yf_symbol = TICKER_TO_YF.get(ticker)
+    yf_symbol = resolve_yf_symbol(ticker)
     if not yf_symbol:
         return {}
     try:

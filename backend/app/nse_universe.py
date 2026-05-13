@@ -35,13 +35,22 @@ NSE_STOCKS = [
     {"ticker": "HCLTECH", "yf_symbol": "HCLTECH.NS", "name": "HCL Technologies", "sector": "IT"},
     {"ticker": "WIPRO", "yf_symbol": "WIPRO.NS", "name": "Wipro Ltd", "sector": "IT"},
     {"ticker": "TECHM", "yf_symbol": "TECHM.NS", "name": "Tech Mahindra", "sector": "IT"},
+    # LTIM — Yahoo Finance currently has no working symbol for LTIMindtree
+    # (LTIM.NS / LTIMINDTREE.* / LTI.NS all return KeyError as of May 2026).
+    # Symbol kept so the universe stays complete; live price will return None
+    # and the UI shows "—" until Yahoo restores coverage.
     {"ticker": "LTIM", "yf_symbol": "LTIM.NS", "name": "LTIMindtree Ltd", "sector": "IT"},
     {"ticker": "PERSISTENT", "yf_symbol": "PERSISTENT.NS", "name": "Persistent Systems", "sector": "IT"},
     {"ticker": "COFORGE", "yf_symbol": "COFORGE.NS", "name": "Coforge Ltd", "sector": "IT"},
     {"ticker": "MPHASIS", "yf_symbol": "MPHASIS.NS", "name": "Mphasis Ltd", "sector": "IT"},
 
     # Automobiles
-    {"ticker": "TATAMOTORS", "yf_symbol": "TATAMOTORS.NS", "name": "Tata Motors Ltd", "sector": "Automobiles"},
+    # TATAMOTORS demerged in 2024 into TATAMOTORS-PV (TMPV.NS) and
+    # TATAMOTORS-CV (TMCV.NS). The unified TATAMOTORS.NS is gone. We point
+    # the legacy ticker at TMPV.NS (passenger vehicles — the larger arm) so
+    # users with old positions still see a live price; new positions should
+    # use TATAMOTORS-TMCV / TATAMOTORS-TMPV explicitly.
+    {"ticker": "TATAMOTORS", "yf_symbol": "TMPV.NS", "name": "Tata Motors PV (post-demerger)", "sector": "Automobiles"},
     {"ticker": "MARUTI", "yf_symbol": "MARUTI.NS", "name": "Maruti Suzuki India", "sector": "Automobiles"},
     {"ticker": "M&M", "yf_symbol": "M&M.NS", "name": "Mahindra & Mahindra", "sector": "Automobiles"},
     {"ticker": "BAJAJ-AUTO", "yf_symbol": "BAJAJ-AUTO.NS", "name": "Bajaj Auto Ltd", "sector": "Automobiles"},
@@ -105,7 +114,8 @@ NSE_STOCKS = [
     {"ticker": "SIEMENS", "yf_symbol": "SIEMENS.NS", "name": "Siemens Ltd", "sector": "Capital Goods"},
     {"ticker": "ABB", "yf_symbol": "ABB.NS", "name": "ABB India Ltd", "sector": "Capital Goods"},
     {"ticker": "CUMMINSIND", "yf_symbol": "CUMMINSIND.NS", "name": "Cummins India Ltd", "sector": "Capital Goods"},
-    {"ticker": "HBLPOWER", "yf_symbol": "HBLPOWER.NS", "name": "HBL Engineering Ltd", "sector": "Capital Goods"},
+    # HBL Power Systems renamed → HBL Engineering. Yahoo lists it as HBLENGINE.NS.
+    {"ticker": "HBLPOWER", "yf_symbol": "HBLENGINE.NS", "name": "HBL Engineering Ltd", "sector": "Capital Goods"},
 
     # Metals & Mining
     {"ticker": "TATASTEEL", "yf_symbol": "TATASTEEL.NS", "name": "Tata Steel Ltd", "sector": "Metals"},
@@ -147,7 +157,10 @@ NSE_STOCKS = [
 
     # Fintech & New Age
     {"ticker": "PAYTM", "yf_symbol": "PAYTM.NS", "name": "One97 Communications (Paytm)", "sector": "Fintech"},
-    {"ticker": "ZOMATO", "yf_symbol": "ZOMATO.NS", "name": "Zomato Ltd", "sector": "Internet"},
+    # Zomato rebranded to Eternal in May 2025 — NSE symbol changed to ETERNAL.
+    # Keep ZOMATO as the internal ticker (matches user portfolios) but route to
+    # the new Yahoo symbol.
+    {"ticker": "ZOMATO", "yf_symbol": "ETERNAL.NS", "name": "Eternal Ltd (formerly Zomato)", "sector": "Internet"},
     {"ticker": "NYKAA", "yf_symbol": "NYKAA.NS", "name": "FSN E-Commerce (Nykaa)", "sector": "Internet"},
     {"ticker": "POLICYBZR", "yf_symbol": "POLICYBZR.NS", "name": "PB Fintech (Policybazaar)", "sector": "Fintech"},
     {"ticker": "DELHIVERY", "yf_symbol": "DELHIVERY.NS", "name": "Delhivery Ltd", "sector": "Logistics"},
@@ -162,12 +175,47 @@ NSE_STOCKS = [
     {"ticker": "ASIANPAINT", "yf_symbol": "ASIANPAINT.NS", "name": "Asian Paints Ltd", "sector": "Consumer"},
     {"ticker": "BERGEPAINT", "yf_symbol": "BERGEPAINT.NS", "name": "Berger Paints India", "sector": "Consumer"},
     {"ticker": "INDIGO", "yf_symbol": "INDIGO.NS", "name": "InterGlobe Aviation", "sector": "Aviation"},
-    {"ticker": "SPICEJET", "yf_symbol": "SPICEJET.NS", "name": "SpiceJet Ltd", "sector": "Aviation"},
+    # Yahoo lost SPICEJET.NS coverage; the BSE listing (SPICEJET.BO) still feeds.
+    {"ticker": "SPICEJET", "yf_symbol": "SPICEJET.BO", "name": "SpiceJet Ltd", "sector": "Aviation"},
     {"ticker": "JIOFIN", "yf_symbol": "JIOFIN.NS", "name": "Jio Financial Services", "sector": "Finance"},
     {"ticker": "SBICARD", "yf_symbol": "SBICARD.NS", "name": "SBI Cards & Payment", "sector": "Finance"},
     {"ticker": "CHOLAFIN", "yf_symbol": "CHOLAFIN.NS", "name": "Cholamandalam Finance", "sector": "Finance"},
     {"ticker": "MUTHOOTFIN", "yf_symbol": "MUTHOOTFIN.NS", "name": "Muthoot Finance", "sector": "Finance"},
     {"ticker": "MANAPPURAM", "yf_symbol": "MANAPPURAM.NS", "name": "Manappuram Finance", "sector": "Finance"},
+
+    # Capital markets / depositories
+    {"ticker": "BSE",        "yf_symbol": "BSE.NS",        "name": "BSE Ltd",                    "sector": "Capital Markets"},
+    {"ticker": "CDSL",       "yf_symbol": "CDSL.NS",       "name": "Central Depository Services","sector": "Capital Markets"},
+    {"ticker": "IEX",        "yf_symbol": "IEX.NS",        "name": "Indian Energy Exchange",     "sector": "Capital Markets"},
+
+    # Internet — Eternal (the post-rename Zomato; users hold ETERNAL directly)
+    {"ticker": "ETERNAL",    "yf_symbol": "ETERNAL.NS",    "name": "Eternal Ltd (formerly Zomato)", "sector": "Internet"},
+
+    # Tata Motors post-demerger entities — held as their own tickers
+    {"ticker": "TMPV",       "yf_symbol": "TMPV.NS",       "name": "Tata Motors Passenger Vehicles", "sector": "Automobiles"},
+    {"ticker": "TMCV",       "yf_symbol": "TMCV.NS",       "name": "Tata Motors Commercial Vehicles","sector": "Automobiles"},
+
+    # Auto / EV
+    {"ticker": "MOTHERSON",  "yf_symbol": "MOTHERSON.NS",  "name": "Samvardhana Motherson",      "sector": "Automobiles"},
+    {"ticker": "OLAELEC",    "yf_symbol": "OLAELEC.NS",    "name": "Ola Electric Mobility",      "sector": "Automobiles"},
+    {"ticker": "OLECTRA",    "yf_symbol": "OLECTRA.NS",    "name": "Olectra Greentech",          "sector": "Automobiles"},
+    {"ticker": "WHEELS",     "yf_symbol": "WHEELS.NS",     "name": "Wheels India",               "sector": "Automobiles"},
+
+    # Renewables
+    {"ticker": "INOXWIND",   "yf_symbol": "INOXWIND.NS",   "name": "Inox Wind",                  "sector": "Power"},
+    {"ticker": "SUZLON",     "yf_symbol": "SUZLON.NS",     "name": "Suzlon Energy",              "sector": "Power"},
+
+    # Capital goods / defense / railways
+    {"ticker": "MAZDOCK",    "yf_symbol": "MAZDOCK.NS",    "name": "Mazagon Dock Shipbuilders",  "sector": "Capital Goods"},
+    {"ticker": "TECHNOE",    "yf_symbol": "TECHNOE.NS",    "name": "Techno Electric & Engineering","sector": "Capital Goods"},
+    {"ticker": "TITAGARH",   "yf_symbol": "TITAGARH.NS",   "name": "Titagarh Rail Systems",      "sector": "Capital Goods"},
+
+    # Metals / chemicals
+    {"ticker": "HINDZINC",   "yf_symbol": "HINDZINC.NS",   "name": "Hindustan Zinc",             "sector": "Metals & Mining"},
+    {"ticker": "UPL",        "yf_symbol": "UPL.NS",        "name": "UPL Ltd",                    "sector": "Pharmaceuticals"},
+
+    # Misc
+    {"ticker": "AIIL",       "yf_symbol": "AIIL.NS",       "name": "Authum Investment & Infrastructure", "sector": "Finance"},
 ]
 
 # Build lookup maps
@@ -176,6 +224,27 @@ TICKER_TO_META = {s["ticker"]: {"name": s["name"], "sector": s["sector"]} for s 
 
 # All unique sectors for filtering
 ALL_SECTORS = sorted(set(s["sector"] for s in NSE_STOCKS))
+
+
+def resolve_yf_symbol(ticker: str) -> str | None:
+    """Resolve any ticker to a yfinance symbol.
+
+    Strategy:
+      1. Curated TICKER_TO_YF map (handles renames/demergers like ZOMATO→ETERNAL)
+      2. Fallback: append `.NS` to the uppercased ticker — works for ~95% of
+         NSE-listed names that aren't in our curated universe.
+
+    Always returns a string. The caller invokes yfinance and handles the case
+    where the symbol returns no data (rate limit, delisted, Yahoo coverage gap).
+    Use this everywhere instead of `TICKER_TO_YF.get(ticker)` so users with
+    holdings outside the curated 140 still get live prices.
+    """
+    if not ticker:
+        return None
+    t = ticker.upper().strip()
+    if not t:
+        return None
+    return TICKER_TO_YF.get(t) or f"{t}.NS"
 
 
 def search_stocks(query: str, sector: str | None = None, limit: int = 50) -> list[dict]:

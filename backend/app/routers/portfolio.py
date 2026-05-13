@@ -12,7 +12,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 from cachetools import TTLCache
 import yfinance as yf
-from app.nse_universe import TICKER_TO_YF, TICKER_TO_META
+from app.nse_universe import TICKER_TO_YF, TICKER_TO_META, resolve_yf_symbol
 
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
 
@@ -36,9 +36,10 @@ def _get_live_price(ticker: str) -> tuple[float | None, float | None]:
     """
     if ticker in _price_cache:
         return _price_cache[ticker]
-    yf_symbol = TICKER_TO_YF.get(ticker)
+    # Resolver falls back to `{TICKER}.NS` for tickers outside our curated
+    # universe — covers the long tail of NSE stocks that real users hold.
+    yf_symbol = resolve_yf_symbol(ticker)
     if not yf_symbol:
-        # Unknown ticker — cache the miss so we don't keep looking it up.
         _price_cache[ticker] = (None, None)
         return (None, None)
     try:

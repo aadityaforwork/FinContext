@@ -11,7 +11,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 from cachetools import TTLCache
 import yfinance as yf
-from app.nse_universe import TICKER_TO_YF, TICKER_TO_META
+from app.nse_universe import TICKER_TO_YF, TICKER_TO_META, resolve_yf_symbol
 
 router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])
 
@@ -29,7 +29,7 @@ def _get_price(ticker: str) -> tuple[float | None, float | None]:
     """
     if ticker in _price_cache:
         return _price_cache[ticker]
-    yf_symbol = TICKER_TO_YF.get(ticker)
+    yf_symbol = resolve_yf_symbol(ticker)
     if not yf_symbol:
         _price_cache[ticker] = (None, None)
         return (None, None)

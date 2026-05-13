@@ -21,6 +21,7 @@ from app.nse_universe import (
     TICKER_TO_YF,
     TICKER_TO_META,
     ALL_SECTORS,
+    resolve_yf_symbol,
     search_stocks,
 )
 from app.services.data_ingestion import retrieve_context
@@ -46,7 +47,7 @@ def _get_quote(ticker: str) -> tuple[float, float]:
     if cache_key in _browse_cache:
         return _browse_cache[cache_key]
 
-    yf_symbol = TICKER_TO_YF.get(ticker)
+    yf_symbol = resolve_yf_symbol(ticker)
     if not yf_symbol:
         return (0.0, 0.0)
 
@@ -66,7 +67,7 @@ def _get_quote(ticker: str) -> tuple[float, float]:
 
 def _get_history(ticker: str, period: str = "1mo") -> list[dict]:
     """Get historical OHLCV for any NSE universe ticker."""
-    yf_symbol = TICKER_TO_YF.get(ticker)
+    yf_symbol = resolve_yf_symbol(ticker)
     if not yf_symbol:
         return []
     try:

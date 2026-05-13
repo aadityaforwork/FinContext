@@ -27,7 +27,7 @@ import feedparser
 import yfinance as yf
 from cachetools import TTLCache
 
-from app.nse_universe import TICKER_TO_META, TICKER_TO_YF, NSE_STOCKS
+from app.nse_universe import TICKER_TO_META, TICKER_TO_YF, NSE_STOCKS, resolve_yf_symbol
 from app.services import data_ingestion, market_flows, technicals, vector_store
 
 logger = logging.getLogger(__name__)
@@ -135,7 +135,7 @@ def _fetch_snapshot(ticker: str) -> dict:
         return _snapshot_cache[ticker]
     if ticker in _snapshot_neg_cache:
         return {}
-    yf_symbol = TICKER_TO_YF.get(ticker)
+    yf_symbol = resolve_yf_symbol(ticker)
     if not yf_symbol:
         _snapshot_neg_cache[ticker] = True
         return {}
@@ -665,7 +665,7 @@ def _upcoming_earnings(ticker: str, max_days: int = 14) -> dict | None:
         return _earnings_cache[ticker]
     if ticker in _earnings_neg_cache:
         return None
-    yf_symbol = TICKER_TO_YF.get(ticker)
+    yf_symbol = resolve_yf_symbol(ticker)
     if not yf_symbol:
         _earnings_neg_cache[ticker] = True
         return None

@@ -134,6 +134,45 @@ async def embeddings_health(x_admin_token: str | None = Header(default=None)):
     }
 
 
+@router.get("/ticker-health")
+async def ticker_health(x_admin_token: str | None = Header(default=None)):
+    """Scan every NSE_STOCKS yfinance symbol and report which ones return no
+    live price data right now. Use this to detect renames / delistings /
+    Yahoo-side coverage drops before users notice "₹0" rows in their portfolio.
+
+    Slow — makes ~125 yfinance calls. Run on demand, not on a hot path.
+    Returns: {ok_count, broken_count, broken: [{ticker, yf_symbol, reason}], checked_at}
+    """
+    _check_admin(x_admin_token)
+    import time
+    import yfinance as yf
+    from app.nse_universe import TICKER_TO_YF
+
+    broken: list[dict] = []
+    ok_count = 0
+    for i, (ticker, yf_sym) in enumerate(TICKER_TO_YF.items()):
+        try:
+            info = yf.Ticker(yf_sym).fast_info
+            price = float(info.last_price) if hasattr(info, "last_price") else None
+            prev = float(info.previous_close) if hasattr(info, "previous_close") else None
+            if not price or not prev:
+                broken.append({"ticker": ticker, "yf_symbol": yf_sym, "reason": "no_price"})
+            else:
+                ok_count += 1
+        except Exception as e:
+            broken.append({"ticker": ticker, "yf_symbol": yf_sym, "reason": type(e).__name__})
+        if i and i % 25 == 0:
+            time.sleep(0.5)  # gentle pacing — don't hammer Yahoo
+
+    return {
+        "ok_count": ok_count,
+        "broken_count": len(broken),
+        "total": len(TICKER_TO_YF),
+        "broken": broken,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @router.post("/test-match")
 async def test_match(
     tickers: list[str],

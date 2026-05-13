@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import Link from "next/link";
 
 export default function Sidebar({ activeNav, onNavChange }) {
   const [isMobile, setIsMobile] = useState(false);
@@ -22,6 +23,13 @@ export default function Sidebar({ activeNav, onNavChange }) {
   const navItems = [
     { id: "dashboard", label: "Dashboard", icon: "📊" },
     { id: "settings",  label: "Settings",  icon: "⚙️" },
+  ];
+
+  // Off-app routes — real Next.js pages, navigated via <Link>. Track record
+  // is the public accuracy page; we surface it here so investors / users can
+  // get to it from inside the app, not just the landing.
+  const externalLinks = [
+    { id: "accuracy", label: "Track record", icon: "🎯", href: "/accuracy" },
   ];
 
   // ---- MOBILE: Bottom Navigation Bar ----
@@ -64,6 +72,25 @@ export default function Sidebar({ activeNav, onNavChange }) {
             <span style={{ fontSize: "20px" }}>{item.icon}</span>
             <span style={{ fontSize: "9px", fontWeight: 600, letterSpacing: "0.02em" }}>{item.label}</span>
           </button>
+        ))}
+        {externalLinks.map((item) => (
+          <Link
+            key={item.id}
+            href={item.href}
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: "2px",
+              padding: "6px 0",
+              minWidth: "48px",
+              color: "var(--color-text-muted)",
+              textDecoration: "none",
+            }}
+          >
+            <span style={{ fontSize: "20px" }}>{item.icon}</span>
+            <span style={{ fontSize: "9px", fontWeight: 600, letterSpacing: "0.02em" }}>{item.label}</span>
+          </Link>
         ))}
       </nav>
     );
@@ -150,6 +177,32 @@ export default function Sidebar({ activeNav, onNavChange }) {
               <span style={{ fontSize: "18px" }}>{item.icon}</span>
               {!isTablet && <span>{item.label}</span>}
             </button>
+          ))}
+          {externalLinks.map((item) => (
+            <Link
+              key={item.id}
+              href={item.href}
+              title={isTablet ? item.label : undefined}
+              style={{
+                width: "100%",
+                display: "flex",
+                alignItems: "center",
+                gap: "12px",
+                padding: isTablet ? "10px 0" : "10px 14px",
+                borderRadius: "12px",
+                fontSize: "14px",
+                fontWeight: 500,
+                textDecoration: "none",
+                transition: "all 0.2s",
+                justifyContent: isTablet ? "center" : "flex-start",
+                background: "transparent",
+                color: "var(--color-text-secondary)",
+                borderLeft: isTablet ? "none" : "3px solid transparent",
+              }}
+            >
+              <span style={{ fontSize: "18px" }}>{item.icon}</span>
+              {!isTablet && <span>{item.label}</span>}
+            </Link>
           ))}
         </div>
       </nav>

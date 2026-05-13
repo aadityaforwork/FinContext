@@ -18,6 +18,7 @@ export const TECH_TOOLTIPS = {
   sma_state:     "Whether the current price sits above or below the 50-day moving average. The single quickest read of medium-term trend direction.",
   from_20d_high: "How far below the highest close of the last 20 trading days. 0% = at the high (resistance). −5% leaves room before a fresh high.",
   from_20d_low:  "How far above the lowest close of the last 20 trading days. 0% = at the low (support). Larger positive numbers mean more cushion above support.",
+  conviction:    "How many independent signals agree with this call (news + technicals + sector move + FII/DII flow). Capped at 95 — markets are never certain. Below 50 is hidden. 50–69 = directional but soft. 70+ = multiple signals agree.",
 };
 
 const TOOLTIP_WIDTH = 260;

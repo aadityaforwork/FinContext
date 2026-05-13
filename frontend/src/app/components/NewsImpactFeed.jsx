@@ -128,6 +128,12 @@ function NewsRow({ item, onTickerClick, onOpen }) {
         >
           <span>{catIcon}</span>
           <span>{dot.label}</span>
+          {item.conviction != null && (
+            <>
+              <span style={{ opacity: 0.5 }}>·</span>
+              <ConvictionChip conviction={item.conviction} />
+            </>
+          )}
           {item.source && (
             <>
               <span style={{ opacity: 0.5 }}>·</span>
@@ -307,7 +313,14 @@ export default function NewsImpactFeed({ onNavigate }) {
           <p style={{ fontSize: "10px", color: "var(--color-text-muted)", marginTop: "3px", letterSpacing: "0.02em" }}>
             {feed?.demo_mode
               ? "Sample feed — add holdings for live personalization"
-              : `${items.length} ${items.length === 1 ? "item" : "items"} scored against your universe`}
+              : (
+                <>
+                  {items.length} high-conviction {items.length === 1 ? "item" : "items"}
+                  {feed?.hidden_low_conviction_count > 0 && (
+                    <> · {feed.hidden_low_conviction_count} hidden where signals didn't agree</>
+                  )}
+                </>
+              )}
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
@@ -714,4 +727,20 @@ function TechPill({ color, label, tooltip }) {
     </span>
   );
   return tooltip ? <Hint text={tooltip}>{pill}</Hint> : pill;
+}
+
+function ConvictionChip({ conviction }) {
+  if (conviction == null) return null;
+  const color = conviction >= 70 ? "var(--color-accent-green)" : conviction >= 50 ? "#f59e0b" : "#94a3b8";
+  const chip = (
+    <span style={{
+      padding: "1px 6px", borderRadius: "4px",
+      background: `${color}1f`, color,
+      fontSize: "10px", fontWeight: 700, fontVariantNumeric: "tabular-nums",
+      letterSpacing: "0.02em", cursor: "help",
+    }}>
+      ⚡ {conviction}%
+    </span>
+  );
+  return <Hint text={TECH_TOOLTIPS.conviction}>{chip}</Hint>;
 }
