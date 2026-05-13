@@ -212,9 +212,11 @@ async def _intelligence_generator(raw_holdings: list[dict]):
         # ("Unterminated string..." JSON parse failure). The prompt also caps
         # holdings_verdicts at 20 to bound the output regardless of portfolio size.
         # Timeout extended in lockstep — bigger output = longer LLM latency.
+        # 150s on Render: OpenAI from Render is 2-3× slower than local, and a
+        # premature timeout dumps the user into a retry loop that costs more.
         data = await asyncio.wait_for(
             asyncio.to_thread(ai_client.generate_grounded_json, task, context, schema, 6000),
-            timeout=90,
+            timeout=150,
         )
     except asyncio.TimeoutError:
         yield f"data: {json.dumps({'type':'error','message':'Timed out.'})}\n\n"
@@ -805,7 +807,11 @@ async def _movers_generator(raw_holdings: list[dict]):
                 # 2200 tokens: ≤15 holdings × per_holding watch item + 1-3 macro themes.
                 asyncio.to_thread(ai_client.generate_grounded_json, tomorrow_task, tomorrow_input, tomorrow_schema, 2200),
             ),
-            timeout=75,
+            # 130s on Render — today + tomorrow run in parallel so the
+            # bottleneck is whichever is slower. With verifier removed and
+            # context tightened the typical wall time is 30-60s but we leave
+            # generous headroom for Render's slower OpenAI round-trips.
+            timeout=130,
         )
     except asyncio.TimeoutError:
         yield f"data: {json.dumps({'type':'error','message':'Context Engine timed out.'})}\n\n"
@@ -1426,7 +1432,10 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
                 # after capping items at 20 → faster LLM completion.
                 ai_client.generate_grounded_json, task, annotation_ctx, schema, 2400
             ),
-            timeout=50,
+            # 110s on Render's free tier — OpenAI from Render is 2-3× slower
+            # than from a laptop and the request retry loop after a premature
+            # timeout costs the user more than just waiting once.
+            timeout=110,
         )
     except asyncio.TimeoutError:
         return with_disclaimer({
@@ -1684,7 +1693,10 @@ async def market_summary(req: MarketSummaryRequest):
             asyncio.to_thread(
                 ai_client.generate_grounded_json, task, slim_context, schema, 2200
             ),
-            timeout=55,
+            # 90s — narrative output is faster than news annotation but Render
+            # IO + OpenAI latency still costs vs local. Better to wait than
+            # serve an error and force the user to retry.
+            timeout=90,
         )
     except asyncio.TimeoutError:
         return with_disclaimer({
