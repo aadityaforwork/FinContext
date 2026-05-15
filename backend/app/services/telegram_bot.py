@@ -116,19 +116,26 @@ def _fmt_signed_inr(n: float | None) -> str:
 def format_daily_brief(
     *,
     user_name: str | None,
-    portfolio: dict | None,
-    news_items: Iterable[dict],
-    movers: Iterable[dict],
-    holdings_today: dict | None,
-    web_url: str | None = None,
-    today_label: str | None = None,
-    max_news: int = 4,
-    max_movers: int = 3,
+    today_label: str | None,
+    web_url: str | None,
+    brief: dict,
 ) -> str:
-    """Render the personalized morning brief as Telegram-flavored HTML.
+    """Render the pre-market brief as Telegram HTML.
 
-    Inputs use the same shape as the news_feed + movers backend payloads, so
-    the cron script can pass them straight through with no reshaping.
+    `brief` is the dict returned by `routers.telegram._build_user_brief`:
+        {
+          portfolio:         {total_pnl, total_pnl_percent},
+          movers:            [{ticker, move_percent, day_pnl_inr}, ...],
+          holdings_today:    {ticker: {...}},
+          indices:           {nifty_50: {value, change_percent}, ...},
+          flows:             {fii_net_cr, dii_net_cr, ...} | None,
+          policy_items:      [{headline, source, scope, affected_sectors,
+                                affected_holdings}, ...],
+          upcoming_earnings: [{ticker, date, days_ahead}, ...],
+        }
+
+    Sections are emitted only when their data is present, so the brief stays
+    tight on quiet days and rich when there's a lot to say.
     """
     parts: list[str] = []
 
@@ -136,78 +143,109 @@ def format_daily_brief(
     greeting = f"Hi {_esc(user_name)}, " if user_name else ""
     today = _esc(today_label) if today_label else ""
     parts.append(
-        f"📊 <b>FinContext</b>"
-        + (f" — {today}" if today else "")
+        f"📊 <b>FinContext</b> — Pre-Market Brief"
+        + (f"\n<i>{today} · NSE opens 9:15 AM IST</i>" if today else "")
     )
     if greeting:
-        parts.append(greeting + "your portfolio brief is ready.")
-
-    # --- Portfolio top strip
-    if portfolio:
-        pnl = portfolio.get("total_pnl")
-        pct = portfolio.get("total_pnl_percent")
-        if pnl is not None and pct is not None:
-            arrow = "📈" if pnl >= 0 else "📉"
-            parts.append("")
-            parts.append(
-                f"{arrow} <b>Portfolio today</b>: "
-                f"{_fmt_signed_inr(pnl)} ({pct:+.2f}%)"
-            )
-
-    # --- Top movers
-    movers_list = list(movers)[:max_movers]
-    if movers_list:
         parts.append("")
-        parts.append("<b>📊 Today's movers</b>")
-        for m in movers_list:
-            ticker = _esc(m.get("ticker"))
-            mp = m.get("move_percent")
-            arrow = "▲" if (mp or 0) >= 0 else "▼"
-            holding = (holdings_today or {}).get((m.get("ticker") or "").upper())
-            stake_str = ""
-            if holding and holding.get("day_pnl_inr") is not None:
-                stake_str = f" · your {_fmt_signed_inr(holding['day_pnl_inr'])}"
-            attribution = (m.get("attribution") or [{}])[0].get("text") if m.get("attribution") else ""
-            attr_str = ""
-            if attribution:
-                attr_str = f"\n   <i>{_esc(attribution[:140])}</i>"
-            parts.append(
-                f"• <b>{ticker}</b> {arrow} {mp:+.1f}%{stake_str}{attr_str}"
-            )
+        parts.append(greeting.rstrip(", ") + " — here's what to watch today.")
 
-    # --- Top news
-    news_list = list(news_items)[:max_news]
-    if news_list:
+    # --- Yesterday's close: portfolio P&L + top contributors
+    portfolio = brief.get("portfolio") or {}
+    pnl = portfolio.get("total_pnl")
+    pct = portfolio.get("total_pnl_percent")
+    if pnl is not None:
+        arrow = "📈" if pnl >= 0 else "📉"
         parts.append("")
-        parts.append("<b>📰 News hitting your portfolio</b>")
-        for i, n in enumerate(news_list, 1):
-            head = _esc((n.get("headline") or "")[:140])
-            impact = (n.get("impact_level") or "").upper()
-            tags = []
-            if impact:
-                tags.append(impact)
-            if (n.get("scope") or "").startswith("policy_"):
-                tags.append("RBI" if n["scope"] == "policy_rbi" else "POLICY")
-            tag_str = f" [{' · '.join(tags)}]" if tags else ""
-            parts.append(f"{i}. <b>{head}</b>{tag_str}")
-            reason = n.get("reason")
-            if reason:
-                parts.append(f"   <i>{_esc(reason[:200])}</i>")
-            # Compute aggregate stake across affected tickers
-            affected = n.get("affected_tickers") or []
-            if affected and holdings_today:
-                day_pnl = 0.0
-                hits = 0
-                for t in affected:
-                    h = holdings_today.get((t or "").upper())
-                    if h and h.get("day_pnl_inr") is not None:
-                        day_pnl += h["day_pnl_inr"]
-                        hits += 1
-                if hits > 0:
-                    label = affected[0] if hits == 1 else f"{hits} positions"
-                    parts.append(
-                        f"   → your {_esc(label)}: today {_fmt_signed_inr(day_pnl)}"
-                    )
+        parts.append(
+            f"{arrow} <b>Yesterday's close</b>: "
+            f"{_fmt_signed_inr(pnl)}"
+            + (f" ({pct:+.2f}%)" if pct is not None else "")
+        )
+        movers = list(brief.get("movers") or [])[:3]
+        if movers:
+            mover_strs = []
+            for m in movers:
+                t = _esc(m.get("ticker"))
+                mp = m.get("move_percent") or 0
+                d_pnl = m.get("day_pnl_inr")
+                arrow = "▲" if mp >= 0 else "▼"
+                pnl_str = f" ({_fmt_signed_inr(d_pnl)})" if d_pnl is not None else ""
+                mover_strs.append(f"{arrow} <b>{t}</b> {mp:+.1f}%{pnl_str}")
+            parts.append("Top: " + " · ".join(mover_strs))
+
+    # --- Overnight: indices + FII/DII flows
+    indices = brief.get("indices") or {}
+    flows = brief.get("flows") or {}
+    if indices or flows:
+        parts.append("")
+        parts.append("<b>🌐 Overnight</b>")
+        idx_strs = []
+        for label, key in [
+            ("NIFTY 50", "nifty_50"),
+            ("MIDCAP", "nifty_midcap_100"),
+            ("SENSEX", "sensex"),
+        ]:
+            idx = indices.get(key)
+            if not idx:
+                continue
+            v = idx.get("value")
+            cp = idx.get("change_percent")
+            if v is None:
+                continue
+            arrow = "▲" if (cp or 0) >= 0 else "▼"
+            cp_str = f" {arrow}{abs(cp):.2f}%" if cp is not None else ""
+            idx_strs.append(f"<b>{label}</b> {v:,.0f}{cp_str}")
+        if idx_strs:
+            parts.append(" · ".join(idx_strs))
+
+        fii = flows.get("fii_net_cr") if isinstance(flows, dict) else None
+        dii = flows.get("dii_net_cr") if isinstance(flows, dict) else None
+        flow_strs = []
+        if fii is not None:
+            sign = "+" if fii >= 0 else "−"
+            flow_strs.append(f"FII {sign}₹{abs(round(fii)):,} cr")
+        if dii is not None:
+            sign = "+" if dii >= 0 else "−"
+            flow_strs.append(f"DII {sign}₹{abs(round(dii)):,} cr")
+        if flow_strs:
+            parts.append(" · ".join(flow_strs))
+
+    # --- Policy & regulatory items hitting the user's sectors
+    policy_items = brief.get("policy_items") or []
+    if policy_items:
+        parts.append("")
+        parts.append("<b>📋 Policy &amp; regulatory · your sectors</b>")
+        for i, p in enumerate(policy_items, 1):
+            head = _esc((p.get("headline") or "")[:160])
+            scope = p.get("scope") or ""
+            tag = "RBI" if scope == "policy_rbi" else "PIB"
+            sectors = p.get("affected_sectors") or []
+            holdings = p.get("affected_holdings") or []
+            parts.append(f"{i}. <b>{head}</b> [{tag}]")
+            if sectors:
+                parts.append(f"   <i>Sector: {_esc(' · '.join(sectors))}</i>")
+            if holdings:
+                parts.append(
+                    f"   → Your: <b>{_esc(', '.join(holdings))}</b>"
+                )
+
+    # --- Upcoming earnings (next 7 days, your holdings)
+    earnings = brief.get("upcoming_earnings") or []
+    if earnings:
+        parts.append("")
+        parts.append("<b>📅 Earnings this week · your holdings</b>")
+        for e in earnings:
+            t = _esc(e.get("ticker"))
+            date = _esc(e.get("date"))
+            days = e.get("days_ahead")
+            when = (
+                "today" if days == 0
+                else "tomorrow" if days == 1
+                else f"in {days} days" if days is not None
+                else date
+            )
+            parts.append(f"• <b>{t}</b> — {date} ({when})")
 
     # --- Footer
     parts.append("")

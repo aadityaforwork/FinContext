@@ -43,9 +43,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 from supabase import create_client
 
-from app.services import policy_feeds, telegram_bot
-from app.services.grounding import _fetch_fast_snapshot
-from app.nse_universe import resolve_yf_symbol
+from app.services import grounding, policy_feeds, telegram_bot
+from app.services.grounding import _fetch_fast_snapshot, _upcoming_earnings
+from app.nse_universe import TICKER_TO_META, resolve_yf_symbol
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/telegram", tags=["telegram"])
@@ -356,9 +356,21 @@ _brief_pool = ThreadPoolExecutor(max_workers=8)
 
 
 def _build_user_brief(user_id: str) -> dict | None:
-    """Fetch this user's portfolio + watchlist, compute deterministic P&L
-    + top movers + latest policy items. Returns the kwargs for
-    `format_daily_brief`, or None if there's nothing meaningful to send.
+    """Build the pre-market brief payload for one user.
+
+    Sent ~8:30 AM IST — NSE opens at 9:15, so framing is *yesterday's close +
+    overnight*, NOT "today's movers" (those don't exist yet at this hour).
+
+    Pulled from already-cached sources, no LLM call:
+      - per-holding live snapshot (fast_info, 5-min cache) for yesterday's
+        close P&L + top contributors
+      - market context (10-min cache) for indices, FII/DII flows, policy
+        headlines from PIB + RBI overnight
+      - upcoming earnings per holding (12-h cache)
+
+    Filters policy items to those affecting the user's actual sectors so the
+    brief stays relevant — a steel PLI release goes only to people holding
+    steel names.
     """
     try:
         positions_res = (
@@ -375,7 +387,7 @@ def _build_user_brief(user_id: str) -> dict | None:
     if not positions:
         return None  # no holdings → no brief
 
-    # holdings_today via fast snapshot — same shape used everywhere else
+    # ---- Per-holding live snapshot (yesterday's close P&L) ----
     holdings_today: dict[str, dict] = {}
     movers_list: list[dict] = []
     total_pnl = 0.0
@@ -408,7 +420,7 @@ def _build_user_brief(user_id: str) -> dict | None:
         movers_list.append({
             "ticker": ticker,
             "move_percent": round(change_pct, 2),
-            "attribution": [],   # no LLM in v0; can layer in v1
+            "day_pnl_inr": round(day_pnl, 2),
         })
 
     if total_value > 0:
@@ -420,37 +432,79 @@ def _build_user_brief(user_id: str) -> dict | None:
     pct = (total_pnl / total_value * 100) if total_value > 0 else 0
     portfolio = {"total_pnl": round(total_pnl, 2), "total_pnl_percent": round(pct, 2)}
 
-    # Top 3 movers by absolute % move
-    movers_list.sort(key=lambda m: abs(m["move_percent"]), reverse=True)
+    # Top 3 movers by absolute ₹ contribution (more meaningful than %)
+    movers_list.sort(key=lambda m: abs(m.get("day_pnl_inr") or 0), reverse=True)
+    top_movers = movers_list[:3]
 
-    # Latest policy items — high signal, free of LLM cost
+    # ---- Market context: indices, FII/DII flows, policy items ----
     try:
-        policy_items = policy_feeds.fetch_all_policy_items(limit_per_source=8)[:6]
-    except Exception:
-        policy_items = []
+        market_ctx = grounding.build_market_context() or {}
+    except Exception as e:
+        logger.warning("brief: market_context failed: %s", e)
+        market_ctx = {}
 
-    # Convert policy items to news_items shape the formatter expects.
-    user_tickers = list(holdings_today.keys())
-    user_holdings_by_sector: dict[str, list[str]] = {}
-    # We don't have sector mapping here without TICKER_TO_META — skip the
-    # sector→ticker join in v0 and just surface the policy item with no
-    # affected_tickers (formatter handles missing field gracefully).
-    news_for_brief = [
-        {
+    indices = market_ctx.get("indices") or {}
+    flows = market_ctx.get("flows")
+    all_policy = market_ctx.get("policy_headlines") or []
+
+    # ---- Filter policy items to user's sectors ----
+    # Map each user holding to its sector via TICKER_TO_META, then keep only
+    # policy items whose `affected_sectors` overlaps the user's sector set.
+    holdings_by_sector: dict[str, list[str]] = {}
+    user_sectors: set[str] = set()
+    for ticker in holdings_today:
+        sector = (TICKER_TO_META.get(ticker) or {}).get("sector") or "Unknown"
+        holdings_by_sector.setdefault(sector, []).append(ticker)
+        user_sectors.add(sector)
+
+    relevant_policy: list[dict] = []
+    for p in all_policy:
+        affected = set(p.get("affected_sectors") or [])
+        # Match either by exact sector name OR by partial keyword (the policy
+        # tags like "Banking & Finance" don't always match TICKER_TO_META's
+        # "Banks", "Financial Services" — coarse match is intentional).
+        intersection: list[str] = []
+        for sec in affected:
+            sec_lower = sec.lower()
+            for user_sec in user_sectors:
+                if sec_lower in user_sec.lower() or user_sec.lower() in sec_lower:
+                    intersection.append(user_sec)
+        intersection = sorted(set(intersection))
+        if not intersection:
+            continue
+        # Collect the user's specific tickers in those matched sectors.
+        affected_holdings: list[str] = []
+        for s in intersection:
+            affected_holdings.extend(holdings_by_sector.get(s, []))
+        relevant_policy.append({
             "headline": p.get("headline"),
+            "source": p.get("source"),
             "scope": p.get("scope"),
-            "impact_level": "med",
-            "reason": (p.get("snippet") or "")[:200],
-            "affected_tickers": [],
-        }
-        for p in policy_items
-    ]
+            "affected_sectors": intersection,
+            "affected_holdings": sorted(set(affected_holdings)),
+        })
+    relevant_policy = relevant_policy[:5]
+
+    # ---- Upcoming earnings (next 7 days) for the user's holdings ----
+    upcoming_earnings: list[dict] = []
+    for ticker in list(holdings_today.keys())[:15]:  # cap to bound yfinance load
+        try:
+            e = _upcoming_earnings(ticker, max_days=7)
+        except Exception:
+            e = None
+        if e:
+            upcoming_earnings.append({"ticker": ticker, **e})
+    upcoming_earnings.sort(key=lambda x: x.get("days_ahead", 99))
+    upcoming_earnings = upcoming_earnings[:5]
 
     return {
         "portfolio": portfolio,
-        "news_items": news_for_brief,
-        "movers": movers_list,
+        "movers": top_movers,
         "holdings_today": holdings_today,
+        "indices": indices,
+        "flows": flows,
+        "policy_items": relevant_policy,
+        "upcoming_earnings": upcoming_earnings,
     }
 
 
@@ -475,26 +529,29 @@ async def send_daily_brief(x_admin_token: str | None = Header(default=None)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Could not list links: {e}")
 
-    today_label = datetime.now(timezone.utc).astimezone().strftime("%a, %b %d")
+    # Format date in IST (UTC+5:30) regardless of where the server runs —
+    # the brief is for an Indian-market audience.
+    ist_now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+    today_label = ist_now.strftime("%a, %b %d")
     sent = 0
     skipped = 0
     failed = 0
 
     for t in targets:
         try:
-            brief_kwargs = _build_user_brief(t["user_id"])
+            brief = _build_user_brief(t["user_id"])
         except Exception as e:
             logger.warning("brief build failed for %s: %s", t["user_id"], e)
             failed += 1
             continue
-        if not brief_kwargs:
+        if not brief:
             skipped += 1
             continue
         text = telegram_bot.format_daily_brief(
             user_name=t.get("telegram_username"),
             today_label=today_label,
             web_url=WEB_APP_URL,
-            **brief_kwargs,
+            brief=brief,
         )
         resp = telegram_bot.send_message(t["telegram_chat_id"], text)
         if resp.get("ok"):
