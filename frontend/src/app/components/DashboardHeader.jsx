@@ -1,7 +1,13 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import { SearchIcon, BellIcon, LogoutIcon } from "./Icons";
 
+/**
+ * DashboardHeader — "editorial terminal" redesign.
+ * Hairline-bordered controls, SVG icons (no inline path soup), a flat
+ * monogram avatar (no gradient disc). Title scaled down from the loud 24px.
+ */
 export default function DashboardHeader({ onSearch, user, onLogout }) {
   const today = new Date().toLocaleDateString("en-IN", {
     weekday: "long",
@@ -17,12 +23,8 @@ export default function DashboardHeader({ onSearch, user, onLogout }) {
 
   useEffect(() => {
     function onDocClick(e) {
-      if (menuRef.current && !menuRef.current.contains(e.target)) {
-        setMenuOpen(false);
-      }
-      if (bellRef.current && !bellRef.current.contains(e.target)) {
-        setBellOpen(false);
-      }
+      if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false);
+      if (bellRef.current && !bellRef.current.contains(e.target)) setBellOpen(false);
     }
     document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
@@ -40,85 +42,100 @@ export default function DashboardHeader({ onSearch, user, onLogout }) {
     "A";
   const displayName = user?.name || user?.email || "";
 
+  // Shared icon-button styling — hairline border, solid surface, no glow.
+  const iconBtn = {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: "34px",
+    height: "34px",
+    borderRadius: "var(--radius-control)",
+    background: "var(--color-bg-card)",
+    border: "1px solid var(--border-subtle)",
+    color: "var(--color-text-secondary)",
+    cursor: "pointer",
+    transition: "border-color 0.15s, color 0.15s",
+  };
+
   return (
     <header className="header-responsive">
       <div>
-        <h2 style={{ fontSize: "24px", fontWeight: 700, color: "var(--color-text-primary)" }}>
+        <h2
+          style={{
+            fontSize: "19px",
+            fontWeight: 700,
+            color: "var(--color-text-primary)",
+            letterSpacing: "-0.02em",
+          }}
+        >
           Dashboard
         </h2>
-        <p style={{ fontSize: "13px", marginTop: "2px", color: "var(--color-text-muted)" }}>
-          {today} • NSE / BSE
+        <p
+          style={{
+            fontSize: "12px",
+            marginTop: "3px",
+            color: "var(--color-text-muted)",
+            letterSpacing: "0.005em",
+          }}
+        >
+          {today} &nbsp;·&nbsp; NSE / BSE
         </p>
       </div>
 
       <div className="header-actions">
+        {/* Search */}
         <div className="header-search" style={{ position: "relative" }}>
           <input
             type="text"
-            placeholder="Search tickers..."
+            placeholder="Search tickers…"
             onKeyDown={handleKeyDown}
             style={{
               width: "100%",
-              padding: "8px 16px 8px 38px",
-              borderRadius: "12px",
+              padding: "8px 14px 8px 36px",
+              borderRadius: "var(--radius-control)",
               fontSize: "13px",
               border: "1px solid var(--border-subtle)",
               outline: "none",
               background: "var(--color-bg-card)",
               color: "var(--color-text-primary)",
+              transition: "border-color 0.15s",
             }}
+            onFocus={(e) => (e.currentTarget.style.borderColor = "var(--border-active)")}
+            onBlur={(e) => (e.currentTarget.style.borderColor = "var(--border-subtle)")}
           />
-          <svg
+          <span
             style={{
               position: "absolute",
-              left: "12px",
+              left: "11px",
               top: "50%",
               transform: "translateY(-50%)",
-              width: "16px",
-              height: "16px",
+              display: "flex",
               color: "var(--color-text-muted)",
+              pointerEvents: "none",
             }}
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
           >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
-            />
-          </svg>
+            <SearchIcon size={15} />
+          </span>
         </div>
 
+        {/* Notifications */}
         <div ref={bellRef} style={{ position: "relative" }}>
           <button
             type="button"
             onClick={() => setBellOpen((v) => !v)}
             aria-label="Notifications"
             aria-expanded={bellOpen}
-            style={{
-              position: "relative",
-              padding: "8px",
-              borderRadius: "12px",
-              background: "var(--color-bg-card)",
-              border: "none",
-              cursor: "pointer",
+            style={iconBtn}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.borderColor = "var(--border-strong)";
+              e.currentTarget.style.color = "var(--color-text-primary)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.borderColor = "var(--border-subtle)";
+              e.currentTarget.style.color = "var(--color-text-secondary)";
             }}
           >
-            <svg
-              style={{ width: "20px", height: "20px", color: "var(--color-text-secondary)" }}
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"
-              />
-            </svg>
+            <BellIcon size={17} />
           </button>
 
           {bellOpen && (
@@ -127,22 +144,22 @@ export default function DashboardHeader({ onSearch, user, onLogout }) {
               style={{
                 position: "absolute",
                 right: 0,
-                top: "44px",
-                minWidth: "260px",
+                top: "42px",
+                minWidth: "262px",
                 background: "var(--color-bg-card)",
                 border: "1px solid var(--border-subtle)",
-                borderRadius: "12px",
-                boxShadow: "var(--shadow-card)",
+                borderRadius: "var(--radius-card)",
+                boxShadow: "var(--shadow-pop)",
                 padding: "14px",
                 zIndex: 100,
               }}
             >
-              <p style={{ fontSize: "13px", fontWeight: 700, color: "var(--color-text-primary)" }}>
+              <p style={{ fontSize: "12.5px", fontWeight: 700, color: "var(--color-text-primary)" }}>
                 Notifications
               </p>
               <p
                 style={{
-                  fontSize: "12px",
+                  fontSize: "11.5px",
                   color: "var(--color-text-muted)",
                   marginTop: "6px",
                   lineHeight: 1.5,
@@ -154,28 +171,27 @@ export default function DashboardHeader({ onSearch, user, onLogout }) {
           )}
         </div>
 
-        {/* User menu */}
+        {/* User menu — flat monogram avatar */}
         <div ref={menuRef} style={{ position: "relative" }}>
           <button
             type="button"
             onClick={() => setMenuOpen((v) => !v)}
             title={displayName}
             style={{
-              width: "36px",
-              height: "36px",
-              borderRadius: "50%",
+              width: "34px",
+              height: "34px",
+              borderRadius: "var(--radius-control)",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              fontSize: "14px",
+              fontSize: "13px",
               fontWeight: 700,
-              color: "white",
-              border: "none",
+              color: "var(--color-text-primary)",
+              border: "1px solid var(--border-strong)",
               cursor: "pointer",
               overflow: "hidden",
               padding: 0,
-              background:
-                "linear-gradient(135deg, var(--color-accent-primary), var(--color-accent-cyan))",
+              background: "var(--color-bg-card-hover)",
             }}
           >
             {user?.avatar_url ? (
@@ -196,21 +212,27 @@ export default function DashboardHeader({ onSearch, user, onLogout }) {
               style={{
                 position: "absolute",
                 right: 0,
-                top: "44px",
+                top: "42px",
                 minWidth: "220px",
                 background: "var(--color-bg-card)",
                 border: "1px solid var(--border-subtle)",
-                borderRadius: "12px",
-                boxShadow: "var(--shadow-card)",
-                padding: "8px",
+                borderRadius: "var(--radius-card)",
+                boxShadow: "var(--shadow-pop)",
+                padding: "6px",
                 zIndex: 100,
               }}
             >
-              <div style={{ padding: "8px 10px", borderBottom: "1px solid var(--border-subtle)", marginBottom: "6px" }}>
-                <p style={{ fontSize: "13px", fontWeight: 600, color: "var(--color-text-primary)" }}>
+              <div
+                style={{
+                  padding: "8px 10px",
+                  borderBottom: "1px solid var(--border-subtle)",
+                  marginBottom: "4px",
+                }}
+              >
+                <p style={{ fontSize: "12.5px", fontWeight: 600, color: "var(--color-text-primary)" }}>
                   {user?.name || "Signed in"}
                 </p>
-                <p style={{ fontSize: "12px", color: "var(--color-text-muted)", wordBreak: "break-all" }}>
+                <p style={{ fontSize: "11.5px", color: "var(--color-text-muted)", wordBreak: "break-all" }}>
                   {user?.email}
                 </p>
               </div>
@@ -223,17 +245,27 @@ export default function DashboardHeader({ onSearch, user, onLogout }) {
                 style={{
                   width: "100%",
                   textAlign: "left",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "9px",
                   padding: "8px 10px",
-                  borderRadius: "8px",
+                  borderRadius: "var(--radius-control)",
                   border: "none",
                   background: "transparent",
-                  color: "var(--color-text-primary)",
+                  color: "var(--color-text-secondary)",
                   cursor: "pointer",
-                  fontSize: "13px",
+                  fontSize: "12.5px",
                 }}
-                onMouseEnter={(e) => (e.currentTarget.style.background = "var(--color-bg-card-hover)")}
-                onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "var(--color-bg-card-hover)";
+                  e.currentTarget.style.color = "var(--color-text-primary)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "transparent";
+                  e.currentTarget.style.color = "var(--color-text-secondary)";
+                }}
               >
+                <LogoutIcon size={15} />
                 Sign out
               </button>
             </div>

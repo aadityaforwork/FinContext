@@ -5,6 +5,7 @@ import { supabase } from "../lib/supabase";
 import { API_BASE } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { Spinner } from "./Loaders";
+import { SearchIcon, TargetIcon } from "./Icons";
 
 /**
  * UniverseRail — premium tabbed rail.
@@ -431,7 +432,7 @@ export default function UniverseRail({
               onClick={onOpenScreener}
               style={quickActionStyle}
             >
-              🔍 Find
+              <SearchIcon size={12} /> Find
             </button>
           )}
           {onOpenWatchlist && (
@@ -440,7 +441,7 @@ export default function UniverseRail({
               onClick={onOpenWatchlist}
               style={quickActionStyle}
             >
-              ⭐ Watch
+              <TargetIcon size={12} /> Watch
             </button>
           )}
         </div>
@@ -482,14 +483,18 @@ const inlineLinkStyle = {
 
 const quickActionStyle = {
   flex: 1,
-  padding: "5px 8px",
-  borderRadius: "5px",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: "5px",
+  padding: "6px 8px",
+  borderRadius: "var(--radius-pill)",
   border: "1px solid var(--border-subtle)",
-  background: "transparent",
+  background: "var(--color-bg-card)",
   color: "var(--color-text-secondary)",
   fontSize: "10.5px",
-  fontWeight: 700,
+  fontWeight: 600,
   cursor: "pointer",
-  letterSpacing: "0.02em",
+  letterSpacing: "0.01em",
   lineHeight: 1.4,
 };

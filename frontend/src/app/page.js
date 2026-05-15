@@ -16,12 +16,14 @@ import UniverseRail from "./components/UniverseRail";
 import WatchlistDrawer from "./components/WatchlistDrawer";
 import ScreenerDrawer from "./components/ScreenerDrawer";
 import SettingsView from "./components/SettingsView";
+import AccuracyView from "./components/AccuracyView";
 import OnboardingModal, { shouldShowOnboarding } from "./components/OnboardingModal";
 import { useAuth } from "./context/AuthContext";
 import { supabase } from "./lib/supabase";
 import { useToast } from "./components/Toast";
 import BrandedSplash from "./components/BrandedSplash";
 import ComplianceFooter from "./components/ComplianceFooter";
+import { prewarmIntelligence } from "./lib/prewarm";
 
 export default function App() {
   const { user, loading, logout } = useAuth();
@@ -92,6 +94,18 @@ export default function App() {
               { onConflict: "ticker,user_id", ignoreDuplicates: false }
             );
           }
+          // Fire-and-forget: warm the backend cache for news-feed + movers so
+          // the user's first dashboard paint isn't a cold LLM round-trip.
+          // Pull current watchlist so prewarm sees the same context the
+          // dashboard will request a few seconds later.
+          try {
+            const { data: watchRows } = await supabase
+              .from("watchlist").select("ticker").eq("user_id", user.id);
+            prewarmIntelligence({
+              positions,
+              watchlistTickers: (watchRows || []).map((r) => r.ticker),
+            });
+          } catch { /* prewarm is best-effort */ }
           setTimeout(
             () => toast.success(`Synced ${positions.length} positions from Zerodha`),
             300
@@ -114,19 +128,45 @@ export default function App() {
     if (page === "company" && ticker) setCompanyTicker(ticker);
   };
 
+  // ---- Keep-alive view rendering --------------------------------------------
+  // Switching tabs used to unmount the previous view, throwing away its state
+  // and forcing a re-fetch when the user came back. We now lazy-mount each
+  // view on first visit and keep it alive (display:none when inactive) so
+  // returning to a tab is instant — no spinner, no reload.
+  //
+  // `visitedViews` is the set of views ever opened in this session. Unvisited
+  // ones render `null` so we don't pre-fetch every panel on page load.
+  const [visitedViews, setVisitedViews] = useState(() => new Set(["dashboard"]));
+  useEffect(() => {
+    setVisitedViews((prev) => {
+      if (prev.has(activeNav)) return prev;
+      const next = new Set(prev);
+      next.add(activeNav);
+      return next;
+    });
+  }, [activeNav]);
+
   if (loading || !user) {
     return <BrandedSplash />;
   }
+
+  const renderTab = (id, build) => {
+    if (!visitedViews.has(id)) return null;
+    return (
+      <div
+        key={id}
+        style={{ display: activeNav === id ? "block" : "none" }}
+      >
+        {build()}
+      </div>
+    );
+  };
 
   return (
     <div className="app-shell">
       <Sidebar
         activeNav={activeNav}
-        onNavChange={(nav) => {
-          setActiveNav(nav);
-          setAnalysisTicker(null);
-          setCompanyTicker(null);
-        }}
+        onNavChange={(nav) => setActiveNav(nav)}
       />
 
       <main className="main-content">
@@ -137,20 +177,21 @@ export default function App() {
         />
 
         <div className="content-area">
-          {activeNav === "dashboard" && (
+          {renderTab("dashboard", () => (
             <DashboardView
               onNavigate={handleNavigate}
               onOpenWatchlist={() => setDrawer("watchlist")}
               onOpenScreener={() => setDrawer("screener")}
             />
-          )}
-          {activeNav === "settings"  && <SettingsView />}
+          ))}
+          {renderTab("accuracy",  () => <AccuracyView embedded />)}
+          {renderTab("settings",  () => <SettingsView />)}
           {/* Full-page views reached via dashboard CTAs or ticker clicks */}
-          {activeNav === "screener"  && <ScreenerView onNavigate={handleNavigate} />}
-          {activeNav === "watchlist" && <WatchlistView onNavigate={handleNavigate} />}
-          {activeNav === "portfolio" && <PortfolioView onNavigate={handleNavigate} />}
-          {activeNav === "analysis"  && <AnalysisView initialTicker={analysisTicker} />}
-          {activeNav === "company"   && <CompanyView ticker={companyTicker} onNavigate={handleNavigate} />}
+          {renderTab("screener",  () => <ScreenerView onNavigate={handleNavigate} />)}
+          {renderTab("watchlist", () => <WatchlistView onNavigate={handleNavigate} />)}
+          {renderTab("portfolio", () => <PortfolioView onNavigate={handleNavigate} />)}
+          {renderTab("analysis",  () => <AnalysisView initialTicker={analysisTicker} />)}
+          {renderTab("company",   () => <CompanyView ticker={companyTicker} onNavigate={handleNavigate} />)}
         </div>
 
         {/* Dashboard handles its own disclaimer per-pane; other views show the footer. */}

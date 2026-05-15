@@ -2,41 +2,60 @@
 
 /* =========================================================
    FinContext — Design System (Tailwind CSS v4)
-   Premium dark-mode financial dashboard
+   "Editorial terminal" — restrained, sharp, fast.
+   No gradients, no glassmorphism, no glow shadows. Borders
+   carry structure; one accent used sparingly; numbers are
+   the loudest thing on screen.
    ========================================================= */
 
 /* ---------------------------------------------------------
-   Theme: Register CSS custom properties as design tokens
+   Theme tokens
    --------------------------------------------------------- */
 @theme {
-  --color-bg-primary: #0a0e17;
-  --color-bg-secondary: #111827;
-  --color-bg-card: #1a1f2e;
-  --color-bg-card-hover: #232940;
+  /* Surfaces — true neutrals, near-black base. The blue-navy
+     tint is gone; this reads as "instrument", not "template". */
+  --color-bg-primary: #0a0a0c;
+  --color-bg-secondary: #121214;
+  --color-bg-card: #151517;
+  --color-bg-card-hover: #1c1c1f;
 
+  /* One accent (indigo). Used for: active nav, the single
+     primary CTA per view, key figures. Not decoration. */
   --color-accent-primary: #6366f1;
   --color-accent-secondary: #818cf8;
-  --color-accent-blue: #3b82f6;
-  --color-accent-cyan: #06b6d4;
-  --color-accent-green: #10b981;
-  --color-accent-red: #ef4444;
-  --color-accent-amber: #f59e0b;
+  --color-accent-blue: #6366f1;     /* alias → primary; kept so old refs don't break */
+  /* Quiet secondary, only for categorical distinction (e.g. sector vs holding). */
+  --color-accent-cyan: #2da8be;
+  /* Semantic — reserved strictly for P&L / direction. */
+  --color-accent-green: #2ebd6b;
+  --color-accent-red: #e5484d;
+  --color-accent-amber: #d99a2b;
 
-  --color-text-primary: #f1f5f9;
-  --color-text-secondary: #94a3b8;
-  --color-text-muted: #64748b;
+  /* Text — three tiers, tighter contrast steps. */
+  --color-text-primary: #ededee;
+  --color-text-secondary: #9a9aa3;
+  --color-text-muted: #66666e;
 }
 
 /* ---------------------------------------------------------
-   Base Layer: Global element styles
+   Base layer
    --------------------------------------------------------- */
 @layer base {
   :root {
-    --bg-glass: rgba(26, 31, 46, 0.7);
-    --border-subtle: rgba(148, 163, 184, 0.1);
-    --border-active: rgba(99, 102, 241, 0.4);
-    --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.3);
-    --shadow-glow: 0 0 30px rgba(99, 102, 241, 0.15);
+    /* `--bg-glass` kept as a name (many components reference it) but it is
+       now a SOLID surface — glassmorphism removed for clarity + speed. */
+    --bg-glass: #151517;
+    --border-subtle: rgba(255, 255, 255, 0.07);
+    --border-strong: rgba(255, 255, 255, 0.12);
+    --border-active: rgba(99, 102, 241, 0.45);
+    /* One subtle shadow tier. No 24px ambient blur, no glow. */
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.5);
+    --shadow-glow: none;             /* killed — kept as no-op for old refs */
+    /* Radii — editorial, not bubbly. */
+    --radius-card: 10px;
+    --radius-control: 8px;
+    --radius-pill: 6px;
   }
 
   * {
@@ -56,66 +75,72 @@
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     min-height: 100vh;
+    /* Tabular numerals everywhere by default — this is a numbers product. */
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.006em;
   }
 
-  /* Scrollbar styling */
+  /* Scrollbar — thin, neutral, unobtrusive. */
   ::-webkit-scrollbar {
-    width: 6px;
+    width: 8px;
+    height: 8px;
   }
   ::-webkit-scrollbar-track {
-    background: var(--color-bg-primary);
+    background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    background: var(--color-text-muted);
-    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: var(--color-text-secondary);
+    background: rgba(255, 255, 255, 0.18);
+  }
+
+  /* Crisp focus ring — accessible without the glow. */
+  :focus-visible {
+    outline: 2px solid var(--color-accent-primary);
+    outline-offset: 1px;
   }
 }
 
 /* ---------------------------------------------------------
-   Keyframe Animations
+   Keyframes — kept deliberately few. Motion is quiet.
    --------------------------------------------------------- */
 @keyframes blink-caret {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
 }
 
+/* One entrance animation. Subtle 6px rise — not a 16px lurch. */
 @keyframes fadeInUp {
-  from {
-    opacity: 0;
-    transform: translateY(16px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
+/* Live-status dot — a gentle breath, no scale-jump. */
 @keyframes pulse-dot {
-  0%, 100% { transform: scale(1); opacity: 1; }
-  50% { transform: scale(1.5); opacity: 0.5; }
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
 }
 
 @keyframes shimmer {
-  0% { background-position: -200% 0; }
+  0%   { background-position: -200% 0; }
   100% { background-position: 200% 0; }
 }
 
 /* ---------------------------------------------------------
-   Custom Utility Classes (Tailwind v4 @utility syntax)
+   Utility classes
    --------------------------------------------------------- */
+/* The workhorse surface. Solid fill + hairline border + 10px radius.
+   No backdrop blur, no glow. This is what makes it look "designed". */
 @utility glass-card {
-  background: var(--bg-glass);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  background: var(--color-bg-card);
   border: 1px solid var(--border-subtle);
-  border-radius: 16px;
+  border-radius: var(--radius-card);
 }
 
+/* "Active" emphasis is now a slightly stronger border — no box-shadow glow. */
 @utility glow-border {
-  box-shadow: var(--shadow-glow);
   border: 1px solid var(--border-active);
 }
 
@@ -129,11 +154,15 @@
 }
 
 @utility animate-fade-in {
-  animation: fadeInUp 0.4s ease-out forwards;
+  animation: fadeInUp 0.28s ease-out forwards;
+}
+
+@utility animate-fade-up {
+  animation: fadeInUp 0.28s ease-out forwards;
 }
 
 @utility pulse-dot {
-  animation: pulse-dot 2s ease-in-out infinite;
+  animation: pulse-dot 2.4s ease-in-out infinite;
 }
 
 @utility shimmer {
@@ -144,71 +173,76 @@
     var(--color-bg-card) 75%
   );
   background-size: 200% 100%;
-  animation: shimmer 1.5s infinite;
+  animation: shimmer 1.4s infinite;
+}
+
+/* living-row — micro-interaction for clickable list rows. A 1px lift +
+   brighter hairline on hover, and a settle on :active so it reads on touch
+   too (mobile has no hover). Transform/border only — cheap to composite. */
+@utility living-row {
+  transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+  &:hover {
+    transform: translateY(-1px);
+    border-color: var(--border-strong, rgba(255,255,255,0.16));
+  }
+  &:active {
+    transform: translateY(0);
+  }
+}
+
+/* Respect reduced-motion: kill entrance + lift animation for users who ask. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-delay: 0ms !important;
+    transition-duration: 0.001ms !important;
+  }
 }
 
 /* ---------------------------------------------------------
-   New Animations for Redesign
+   Backwards-compat no-ops + downgrades.
+   These utilities are referenced across components. Rather than
+   sweep every call site, we redefine them as quiet/no-op so the
+   redesign propagates without breaking class references.
    --------------------------------------------------------- */
 @keyframes ringFill {
   from { stroke-dashoffset: 283; }
 }
 
-@keyframes countUp {
-  from { opacity: 0; transform: scale(0.5); }
-  to { opacity: 1; transform: scale(1); }
-}
-
-@keyframes slideInRight {
-  from { opacity: 0; transform: translateX(24px); }
-  to { opacity: 1; transform: translateX(0); }
-}
-
-@keyframes pulseGlow {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.4); }
-  50% { box-shadow: 0 0 20px 4px rgba(99, 102, 241, 0.15); }
-}
-
+/* countUp / slideIn — downgraded to the same quiet fade. No scale-pop,
+   no 24px slide. Calmer + faster. */
 @utility animate-count-up {
-  animation: countUp 0.6s ease-out forwards;
+  animation: fadeInUp 0.28s ease-out forwards;
 }
 
 @utility animate-slide-in {
-  animation: slideInRight 0.5s ease-out forwards;
+  animation: fadeInUp 0.28s ease-out forwards;
 }
 
+/* Glow pulse — killed. `animation: none` so existing class refs are harmless
+   (Tailwind v4 rejects an empty @utility block, so this is the no-op form). */
 @utility animate-pulse-glow {
-  animation: pulseGlow 2s ease-in-out infinite;
+  animation: none;
 }
 
+/* gradient-text — now a solid colour. The gradient was the loudest
+   piece of "AI slop"; a confident solid reads as more premium. */
 @utility gradient-text {
-  background: linear-gradient(135deg, var(--color-accent-primary), var(--color-accent-cyan));
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: var(--color-text-primary);
 }
 
-@utility animate-fade-up {
-  animation: fadeInUp 0.5s ease-out forwards;
-}
-
-/* ---------------------------------------------------------
-   Globe Section Animations
-   --------------------------------------------------------- */
+/* Globe panel slide — downgraded to the shared quiet fade. */
 @keyframes slideInPanel {
-  from {
-    opacity: 0;
-    transform: translateX(20px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
+/* markerPulse — strip the glow box-shadow, keep a faint scale tick. */
 @keyframes markerPulse {
-  0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.4); }
-  50% { transform: scale(1.3); box-shadow: 0 0 12px 4px rgba(99, 102, 241, 0.15); }
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.15); }
 }
 
 /* ---------------------------------------------------------

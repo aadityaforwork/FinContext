@@ -29,8 +29,12 @@ from typing import Any, Awaitable, Callable
 logger = logging.getLogger(__name__)
 
 # Default windows. Endpoints can override per-call.
-DEFAULT_FRESH_TTL_S = 5 * 60     # 5 min — return cached, no refresh
-DEFAULT_MAX_TTL_S   = 15 * 60    # 15 min — return cached + refresh in bg
+# Bumped 5/15 → 15/60 because LLM-driven endpoints don't change minute-by-minute
+# and cold Render workers make blocking recomputes painful. The frontend now
+# also keeps a localStorage mirror, so users routinely see <1s paint even
+# across the 60-min stale boundary.
+DEFAULT_FRESH_TTL_S = 15 * 60    # 15 min — return cached, no refresh
+DEFAULT_MAX_TTL_S   = 60 * 60    # 60 min — return cached + refresh in bg
 
 # Cap memory: at ~10 KB per entry, 500 entries ≈ 5 MB.
 _MAX_ENTRIES = 500

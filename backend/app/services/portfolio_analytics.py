@@ -17,8 +17,9 @@ disclaimer) and the risk-explainer agent narrates.
 from __future__ import annotations
 
 import logging
+import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Iterable
+from typing import Any, Iterable
 
 import pandas as pd
 import yfinance as yf
@@ -161,17 +162,26 @@ def compute_risk_brief(
     returns_df = pd.DataFrame({t: risk_metrics.daily_returns(s) for t, s in usable.items()})
 
     # 5. Weights by current value (latest close × qty). Position with no fetched
-    #    price falls back to buy_price so it still contributes a sensible weight.
+    #    price — or a NaN last close (happens for partially-delisted tickers
+    #    like INTEGRAEN where yfinance returns NaN) — falls back to buy_price so
+    #    a single bad price can't poison total_value into NaN.
     current_values: dict[str, float] = {}
     for t, s in usable.items():
         pos = by_ticker.get(t)
         if not pos:
             continue
-        latest = float(s.iloc[-1]) if not s.empty else float(pos.get("buy_price") or 0)
+        buy_price = float(pos.get("buy_price") or 0)
+        latest = float(s.iloc[-1]) if not s.empty else buy_price
+        if math.isnan(latest) or latest <= 0:
+            latest = buy_price
+            data_gaps.append(f"{t}: latest close unavailable; valued at buy price")
         qty = float(pos.get("quantity") or 0)
-        current_values[t] = latest * qty
+        val = latest * qty
+        current_values[t] = val if not math.isnan(val) else 0.0
     total_value = sum(current_values.values())
-    if total_value <= 0:
+    # `NaN <= 0` is False — so guard isnan explicitly or NaN slips straight
+    # through into the concentration math below.
+    if math.isnan(total_value) or total_value <= 0:
         return {**empty_report, "data_gaps": data_gaps + ["zero portfolio value"]}
     weights = pd.Series({t: v / total_value for t, v in current_values.items()})
 
@@ -209,7 +219,7 @@ def compute_risk_brief(
         for p in pairs[:5]
     ]
 
-    return {
+    report = {
         "metrics": {
             "volatility_annualized": vol,
             "beta_vs_nifty50": beta_val,
@@ -237,6 +247,23 @@ def compute_risk_brief(
         "holdings_value": {t: round(v, 2) for t, v in current_values.items()},
         "data_gaps": data_gaps,
     }
+    # Belt-and-suspenders: even with the source guards above, recursively scrub
+    # any NaN / Inf that slipped through — those are not JSON-serializable and
+    # crash the FastAPI response with "Out of range float values".
+    return _json_safe(report)
+
+
+def _json_safe(obj: Any) -> Any:
+    """Recursively replace NaN / Inf floats with None so the payload is always
+    JSON-serializable. Walks dicts, lists, tuples; leaves everything else alone.
+    """
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
 
 
 def _empty_report(risk_free_rate: float) -> dict:

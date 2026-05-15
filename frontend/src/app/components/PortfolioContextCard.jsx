@@ -5,6 +5,9 @@ import { API_BASE as _SHARED_API_BASE } from "../lib/api";
 import { claimText, claimSource } from "../lib/claim";
 import Modal from "./Modal";
 import { Hint, TECH_TOOLTIPS } from "./Tooltips";
+import { CompassIcon, RefreshIcon } from "./Icons";
+import { AnimatedNumber, Reveal } from "./AnimatedNumber";
+import YourStake from "./YourStake";
 
 const API_BASE = _SHARED_API_BASE;
 
@@ -65,25 +68,46 @@ const VOL_COLORS = {
 };
 
 
+// Local cache window for the Context Engine — 60 min. Long enough that the
+// dashboard feels instant on revisits the same morning, short enough that
+// post-lunch news isn't stale by hours.
+const CONTEXT_CACHE_MAX_AGE_MS = 60 * 60 * 1000;
+
+function _contextCacheKey(positions) {
+  if (!positions?.length) return null;
+  const tickers = [...positions]
+    .map((p) => (p?.ticker || "").toUpperCase())
+    .filter(Boolean)
+    .sort()
+    .join(",");
+  if (!tickers) return null;
+  const date = new Date().toISOString().slice(0, 10);
+  return `fc:cache:context-engine:${tickers}:${date}`;
+}
+
 export default function PortfolioContextCard({ positions }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [steps, setSteps] = useState([]);
   const [error, setError] = useState(null);
   const [tab, setTab] = useState("today");
+  const [stale, setStale] = useState(false);                  // showing cached, refresh available
   const [detailTicker, setDetailTicker] = useState(null);     // Today MoverRow modal
   const [watchDetail, setWatchDetail] = useState(null);       // Tomorrow watch item modal
   const [themeDetail, setThemeDetail] = useState(null);       // Tomorrow theme modal
   const terminalRef = useRef(null);
+  const autoRanRef = useRef(false);                           // guard against double-fire
 
   useEffect(() => {
     if (terminalRef.current) terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
   }, [steps]);
 
-  const run = async () => {
+  const run = async (silent = false) => {
     if (!positions?.length) return;
-    setLoading(true);
-    setData(null);
+    if (!silent) {
+      setLoading(true);
+      setData(null);
+    }
     setSteps([]);
     setError(null);
     try {
@@ -108,7 +132,17 @@ export default function PortfolioContextCard({ positions }) {
               const msg = JSON.parse(s);
               if (msg.type === "step") setSteps(prev => [...prev, msg.message]);
               else if (msg.type === "error") { setError(msg.message); setLoading(false); }
-              else if (msg.type === "result") { setData(msg); setLoading(false); }
+              else if (msg.type === "result") {
+                setData(msg);
+                setStale(false);
+                setLoading(false);
+                // Persist to localStorage so the next dashboard open is instant.
+                const key = _contextCacheKey(positions);
+                if (key) {
+                  try { localStorage.setItem(key, JSON.stringify({ data: msg, ts: Date.now() })); }
+                  catch { /* quota / private mode — non-fatal */ }
+                }
+              }
             } catch {}
           }
         }
@@ -120,46 +154,104 @@ export default function PortfolioContextCard({ positions }) {
     }
   };
 
+  // First mount with positions: read cached result if recent, otherwise
+  // auto-fire the run silently. The Context Engine should just BE there when
+  // the user opens the dashboard, not require a button click every visit.
+  useEffect(() => {
+    if (!positions?.length) return;
+    if (autoRanRef.current) return;
+    const key = _contextCacheKey(positions);
+    if (!key) return;
+
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed?.data && Date.now() - (parsed.ts || 0) < CONTEXT_CACHE_MAX_AGE_MS) {
+          setData(parsed.data);
+          setStale(true);
+          autoRanRef.current = true;
+          return;
+        }
+      }
+    } catch { /* bad JSON — fall through to auto-run */ }
+
+    autoRanRef.current = true;
+    run(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [positions]);
+
   const portReturn = data?.portfolio_return_today_pct;
   const portReturnColor = portReturn == null ? "var(--color-text-muted)"
     : portReturn >= 0 ? "var(--color-accent-green)" : "var(--color-accent-red)";
 
   return (
-    <div className="glass-card animate-fade-in" style={{ padding: "24px", marginBottom: "20px" }}>
+    <div className="glass-card animate-fade-in" style={{ padding: "22px", marginBottom: "18px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "16px", flexWrap: "wrap" }}>
         <div>
-          <h3 style={{ fontSize: "16px", fontWeight: 700, color: "var(--color-text-primary)", display: "flex", alignItems: "center", gap: "8px" }}>
-            <span style={{ fontSize: "20px" }}>🧭</span> Context Engine
+          <h3 style={{ fontSize: "15px", fontWeight: 700, color: "var(--color-text-primary)", display: "flex", alignItems: "center", gap: "9px", letterSpacing: "-0.01em" }}>
+            <span style={{ display: "flex", color: "var(--color-accent-primary)" }}><CompassIcon size={17} /></span>
+            Context Engine
           </h3>
-          <p style={{ fontSize: "13px", color: "var(--color-text-muted)", marginTop: "4px", maxWidth: "580px" }}>
+          <p style={{ fontSize: "12.5px", color: "var(--color-text-muted)", marginTop: "5px", maxWidth: "580px", lineHeight: 1.5 }}>
             Why did your portfolio move today — and what global news might move it tomorrow. Every claim cites a real source.
           </p>
         </div>
         {!data && !loading && (
           <button
-            onClick={run}
+            onClick={() => run(false)}
             disabled={!positions?.length}
             style={{
-              padding: "10px 18px", borderRadius: "10px", fontSize: "13px", fontWeight: 600,
-              background: positions?.length ? "linear-gradient(135deg, var(--color-accent-primary), var(--color-accent-cyan))" : "var(--color-bg-tertiary)",
-              color: positions?.length ? "white" : "var(--color-text-muted)",
-              border: "none", cursor: positions?.length ? "pointer" : "not-allowed",
+              padding: "9px 16px", borderRadius: "var(--radius-control)", fontSize: "12.5px", fontWeight: 600,
+              background: positions?.length ? "var(--color-accent-primary)" : "var(--color-bg-card-hover)",
+              color: positions?.length ? "#fff" : "var(--color-text-muted)",
+              border: positions?.length ? "1px solid var(--color-accent-primary)" : "1px solid var(--border-subtle)",
+              cursor: positions?.length ? "pointer" : "not-allowed",
+              transition: "filter 0.15s",
             }}
+            onMouseEnter={(e) => { if (positions?.length) e.currentTarget.style.filter = "brightness(1.12)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.filter = "none"; }}
           >
             Run Context Engine
           </button>
         )}
         {data && (
-          <button
-            onClick={run}
-            style={{
-              padding: "6px 12px", borderRadius: "8px", fontSize: "12px",
-              border: "1px solid var(--border-subtle)", background: "transparent",
-              color: "var(--color-text-muted)", cursor: "pointer",
-            }}
-          >
-            ↻ Refresh
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            {stale && (
+              <span
+                title="Showing your last analysis from this session — click Refresh to re-run."
+                style={{
+                  display: "inline-flex", alignItems: "center", gap: "5px",
+                  padding: "3px 8px", borderRadius: "9999px",
+                  background: "rgba(99,102,241,0.10)",
+                  border: "1px solid rgba(99,102,241,0.22)",
+                  fontSize: "9px", fontWeight: 700,
+                  color: "var(--color-accent-secondary)",
+                  letterSpacing: "0.04em", textTransform: "uppercase",
+                }}
+              >
+                <span
+                  className="pulse-dot"
+                  style={{
+                    width: "5px", height: "5px", borderRadius: "50%",
+                    background: "var(--color-accent-secondary)",
+                  }}
+                />
+                Cached
+              </span>
+            )}
+            <button
+              onClick={() => run(false)}
+              style={{
+                display: "flex", alignItems: "center", gap: "6px",
+                padding: "6px 11px", borderRadius: "var(--radius-control)", fontSize: "12px", fontWeight: 600,
+                border: "1px solid var(--border-subtle)", background: "var(--color-bg-card)",
+                color: "var(--color-text-secondary)", cursor: "pointer",
+              }}
+            >
+              <RefreshIcon size={13} /> Refresh
+            </button>
+          </div>
         )}
       </div>
 
@@ -191,21 +283,27 @@ export default function PortfolioContextCard({ positions }) {
           <div style={{ display: "flex", gap: "16px", flexWrap: "wrap", marginBottom: "18px" }}>
             <div style={{ flex: "1 1 160px", padding: "14px 16px", background: "rgba(0,0,0,0.2)", borderRadius: "10px" }}>
               <div style={{ fontSize: "11px", color: "var(--color-text-muted)", textTransform: "uppercase", letterSpacing: "1px" }}>Your portfolio today</div>
-              <div style={{ fontSize: "26px", fontWeight: 800, color: portReturnColor, marginTop: "4px", fontVariantNumeric: "tabular-nums" }}>
-                {portReturn == null ? "—" : `${portReturn > 0 ? "+" : ""}${portReturn}%`}
-              </div>
+              <AnimatedNumber
+                value={portReturn}
+                format={(v) => (v == null || Number.isNaN(v)) ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(2)}%`}
+                style={{ display: "block", fontSize: "26px", fontWeight: 800, color: portReturnColor, marginTop: "4px" }}
+              />
             </div>
             {data.market_indices && Object.entries(data.market_indices).filter(([, v]) => v).map(([k, v]) => (
               <div key={k} style={{ flex: "1 1 140px", padding: "14px 16px", background: "rgba(0,0,0,0.2)", borderRadius: "10px" }}>
                 <div style={{ fontSize: "11px", color: "var(--color-text-muted)", textTransform: "uppercase", letterSpacing: "1px" }}>
                   {k.replace(/_/g, " ")}
                 </div>
-                <div style={{ fontSize: "18px", fontWeight: 700, color: "var(--color-text-primary)", fontVariantNumeric: "tabular-nums" }}>
-                  {v.value?.toLocaleString("en-IN")}
-                </div>
-                <div style={{ fontSize: "12px", fontWeight: 600, fontVariantNumeric: "tabular-nums", color: v.change_percent >= 0 ? "var(--color-accent-green)" : "var(--color-accent-red)" }}>
-                  {v.change_percent >= 0 ? "+" : ""}{v.change_percent}%
-                </div>
+                <AnimatedNumber
+                  value={v.value}
+                  format={(n) => (n == null || Number.isNaN(n)) ? "—" : Math.round(n).toLocaleString("en-IN")}
+                  style={{ display: "block", fontSize: "18px", fontWeight: 700, color: "var(--color-text-primary)" }}
+                />
+                <AnimatedNumber
+                  value={v.change_percent}
+                  format={(n) => (n == null || Number.isNaN(n)) ? "—" : `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`}
+                  style={{ display: "block", fontSize: "12px", fontWeight: 600, color: v.change_percent >= 0 ? "var(--color-accent-green)" : "var(--color-accent-red)" }}
+                />
               </div>
             ))}
           </div>
@@ -225,11 +323,16 @@ export default function PortfolioContextCard({ positions }) {
           </div>
 
           {tab === "today" && (
-            <TodaySection today={data.today} onMoverClick={(t) => setDetailTicker(t)} />
+            <TodaySection
+              today={data.today}
+              holdingsToday={data.holdings_today}
+              onMoverClick={(t) => setDetailTicker(t)}
+            />
           )}
           {tab === "tomorrow" && (
             <TomorrowSection
               tomorrow={data.tomorrow}
+              holdingsToday={data.holdings_today}
               onWatchClick={(w) => setWatchDetail(w)}
               onThemeClick={(t) => setThemeDetail(t)}
             />
@@ -283,7 +386,7 @@ function TabButton({ active, onClick, children }) {
   );
 }
 
-function TodaySection({ today, onMoverClick }) {
+function TodaySection({ today, holdingsToday, onMoverClick }) {
   if (!today) return null;
   const { movers = [], top_positive_driver, top_negative_driver, confidence, data_gaps = [] } = today;
 
@@ -306,7 +409,15 @@ function TodaySection({ today, onMoverClick }) {
         </p>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-          {movers.map((m, i) => <MoverRow key={i} mover={m} onClick={() => onMoverClick?.(m.ticker)} />)}
+          {movers.map((m, i) => (
+            <Reveal key={i} index={i}>
+              <MoverRow
+                mover={m}
+                holdingsToday={holdingsToday}
+                onClick={() => onMoverClick?.(m.ticker)}
+              />
+            </Reveal>
+          ))}
         </div>
       )}
 
@@ -315,7 +426,7 @@ function TodaySection({ today, onMoverClick }) {
   );
 }
 
-function MoverRow({ mover, onClick }) {
+function MoverRow({ mover, onClick, holdingsToday }) {
   const pos = (mover.move_percent ?? 0) >= 0;
   const tech = mover.technical_state;
   return (
@@ -326,11 +437,12 @@ function MoverRow({ mover, onClick }) {
       onKeyDown={(e) => { if (onClick && (e.key === "Enter" || e.key === " ")) onClick(); }}
       onMouseEnter={(e) => { if (onClick) e.currentTarget.style.background = "rgba(99,102,241,0.04)"; }}
       onMouseLeave={(e) => { if (onClick) e.currentTarget.style.background = "rgba(255,255,255,0.02)"; }}
+      className={onClick ? "living-row" : undefined}
       style={{
         padding: "14px 16px", background: "rgba(255,255,255,0.02)",
         border: "1px solid var(--border-subtle)", borderRadius: "10px",
         cursor: onClick ? "pointer" : "default",
-        transition: "background 0.15s, border-color 0.15s",
+        transition: "transform 0.16s ease, background 0.15s, border-color 0.15s",
       }}>
       <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "10px", flexWrap: "wrap" }}>
         <span style={{ fontSize: "14px", fontWeight: 700, color: "var(--color-text-primary)" }}>{mover.ticker}</span>
@@ -368,6 +480,13 @@ function MoverRow({ mover, onClick }) {
       {tech && (tech.rsi_zone || tech.vol_zone || tech.momentum_state || tech.sma_state) && (
         <TechBadges tech={tech} />
       )}
+      {/* Personalization — what this move did to YOUR ₹ today. Hidden if the
+          ticker isn't in the user's portfolio (rare for movers but possible). */}
+      <YourStake
+        tickers={[mover.ticker]}
+        holdingsToday={holdingsToday}
+        variant="mover"
+      />
     </div>
   );
 }
@@ -443,9 +562,11 @@ function FlowsStrip({ flows }) {
         background: "rgba(0,0,0,0.2)", borderLeft: `3px solid ${color}`,
       }}>
         <div style={{ fontSize: "10px", color: "var(--color-text-muted)", textTransform: "uppercase", letterSpacing: "1px" }}>{label}</div>
-        <div style={{ fontSize: "15px", fontWeight: 700, color, fontVariantNumeric: "tabular-nums", marginTop: "2px" }}>
-          {positive ? "+" : ""}{Math.round(value).toLocaleString("en-IN")} cr
-        </div>
+        <AnimatedNumber
+          value={value}
+          format={(n) => `${n >= 0 ? "+" : ""}${Math.round(n).toLocaleString("en-IN")} cr`}
+          style={{ display: "block", fontSize: "15px", fontWeight: 700, color, marginTop: "2px" }}
+        />
         <div style={{ fontSize: "10px", color: "var(--color-text-muted)", marginTop: "2px" }}>
           {positive ? "buying" : "selling"}
         </div>
@@ -460,7 +581,7 @@ function FlowsStrip({ flows }) {
   );
 }
 
-function TomorrowSection({ tomorrow, onWatchClick, onThemeClick }) {
+function TomorrowSection({ tomorrow, holdingsToday, onWatchClick, onThemeClick }) {
   if (!tomorrow) return null;
   const {
     per_holding = [],
@@ -494,7 +615,13 @@ function TomorrowSection({ tomorrow, onWatchClick, onThemeClick }) {
           <SectionLabel>For your holdings ({per_holding.length})</SectionLabel>
           <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
             {per_holding.map((w, i) => (
-              <WatchItemRow key={`w-${i}`} watch={w} onClick={() => onWatchClick?.(w)} />
+              <Reveal key={`w-${i}`} index={i}>
+                <WatchItemRow
+                  watch={w}
+                  holdingsToday={holdingsToday}
+                  onClick={() => onWatchClick?.(w)}
+                />
+              </Reveal>
             ))}
           </div>
         </div>
@@ -505,7 +632,13 @@ function TomorrowSection({ tomorrow, onWatchClick, onThemeClick }) {
           <SectionLabel>Cross-market themes</SectionLabel>
           <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
             {macros.map((t, i) => (
-              <ThemeRow key={`t-${i}`} theme={t} onClick={() => onThemeClick?.(t)} />
+              <Reveal key={`t-${i}`} index={i}>
+                <ThemeRow
+                  theme={t}
+                  holdingsToday={holdingsToday}
+                  onClick={() => onThemeClick?.(t)}
+                />
+              </Reveal>
             ))}
           </div>
         </div>
@@ -545,7 +678,7 @@ function SectionLabel({ children }) {
   );
 }
 
-function WatchItemRow({ watch, onClick }) {
+function WatchItemRow({ watch, onClick, holdingsToday }) {
   const direction = watch.direction || "neutral";
   const color = DIRECTION_COLORS[direction] || "#64748b";
   const catalystColor = CATALYST_COLORS[watch.catalyst_type] || "#64748b";
@@ -558,12 +691,13 @@ function WatchItemRow({ watch, onClick }) {
       onKeyDown={(e) => { if (onClick && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onClick(); } }}
       onMouseEnter={(e) => { if (onClick) e.currentTarget.style.background = "rgba(99,102,241,0.04)"; }}
       onMouseLeave={(e) => { if (onClick) e.currentTarget.style.background = "rgba(255,255,255,0.02)"; }}
+      className={onClick ? "living-row" : undefined}
       style={{
         padding: "14px 16px", background: "rgba(255,255,255,0.02)",
         border: "1px solid var(--border-subtle)", borderRadius: "10px",
         borderLeft: `3px solid ${color}`,
         cursor: onClick ? "pointer" : "default",
-        transition: "background 0.15s",
+        transition: "transform 0.16s ease, background 0.15s",
       }}>
       <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "8px", flexWrap: "wrap" }}>
         <span style={{ fontSize: "14px", fontWeight: 700, color: "var(--color-text-primary)" }}>{watch.ticker}</span>
@@ -599,11 +733,18 @@ function WatchItemRow({ watch, onClick }) {
           {watch.what_to_watch}
         </p>
       )}
+      {/* Personalization — your exposure to this ticker. Always shown for
+          watch items since the user holds them by definition. */}
+      <YourStake
+        tickers={[watch.ticker]}
+        holdingsToday={holdingsToday}
+        variant="news"
+      />
     </div>
   );
 }
 
-function ThemeRow({ theme, onClick }) {
+function ThemeRow({ theme, onClick, holdingsToday }) {
   const color = DIRECTION_COLORS[theme.direction] || "#64748b";
   const importance = theme.importance || "medium";
   return (
@@ -614,11 +755,12 @@ function ThemeRow({ theme, onClick }) {
       onKeyDown={(e) => { if (onClick && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onClick(); } }}
       onMouseEnter={(e) => { if (onClick) e.currentTarget.style.background = "rgba(99,102,241,0.04)"; }}
       onMouseLeave={(e) => { if (onClick) e.currentTarget.style.background = "rgba(255,255,255,0.02)"; }}
+      className={onClick ? "living-row" : undefined}
       style={{
         padding: "14px 16px", background: "rgba(255,255,255,0.02)",
         border: "1px solid var(--border-subtle)", borderRadius: "10px", borderLeft: `3px solid ${color}`,
         cursor: onClick ? "pointer" : "default",
-        transition: "background 0.15s",
+        transition: "transform 0.16s ease, background 0.15s",
       }}>
       <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "8px", flexWrap: "wrap" }}>
         <span style={{ fontSize: "14px", fontWeight: 700, color: "var(--color-text-primary)" }}>{theme.theme}</span>
@@ -660,6 +802,12 @@ function ThemeRow({ theme, onClick }) {
           </span>
         ))}
       </div>
+      {/* Personalization — aggregate stake across every holding this theme touches. */}
+      <YourStake
+        tickers={theme.affected_holdings}
+        holdingsToday={holdingsToday}
+        variant="news"
+      />
     </div>
   );
 }

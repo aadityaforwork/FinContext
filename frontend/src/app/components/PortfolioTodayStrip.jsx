@@ -5,6 +5,8 @@ import { supabase } from "../lib/supabase";
 import { API_BASE } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { Spinner } from "./Loaders";
+import { SparkIcon, ChevronRight } from "./Icons";
+import { AnimatedNumber } from "./AnimatedNumber";
 
 /**
  * PortfolioTodayStrip
@@ -171,28 +173,26 @@ export default function PortfolioTodayStrip({ onNavigate }) {
             Portfolio today
           </span>
           <div style={{ display: "flex", alignItems: "baseline", gap: "8px" }}>
-            <span
+            <AnimatedNumber
+              value={pnl}
+              format={formatINR}
               style={{
                 fontSize: "22px",
                 fontWeight: 700,
                 color: accent,
-                fontVariantNumeric: "tabular-nums",
                 fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
                 letterSpacing: "-0.01em",
               }}
-            >
-              {formatINR(pnl)}
-            </span>
-            <span
+            />
+            <AnimatedNumber
+              value={pnlPct}
+              format={(v) => `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`}
               style={{
                 fontSize: "13px",
                 fontWeight: 600,
                 color: accent,
-                fontVariantNumeric: "tabular-nums",
               }}
-            >
-              {pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(2)}%
-            </span>
+            />
           </div>
         </div>
         {demoMode && (
@@ -230,49 +230,56 @@ export default function PortfolioTodayStrip({ onNavigate }) {
           onClick={() => onNavigate?.("analysis")}
           className="dps-cta dps-cta-primary"
           style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "6px",
             padding: "7px 13px",
-            borderRadius: "8px",
-            border: "none",
-            background:
-              "linear-gradient(135deg, var(--color-accent-primary), var(--color-accent-cyan))",
-            color: "white",
+            borderRadius: "var(--radius-control)",
+            border: "1px solid var(--color-accent-primary)",
+            background: "var(--color-accent-primary)",
+            color: "#fff",
             fontSize: "11px",
-            fontWeight: 700,
+            fontWeight: 600,
             cursor: "pointer",
-            letterSpacing: "0.02em",
+            letterSpacing: "0.01em",
             whiteSpace: "nowrap",
+            transition: "filter 0.15s",
           }}
+          onMouseEnter={(e) => (e.currentTarget.style.filter = "brightness(1.12)")}
+          onMouseLeave={(e) => (e.currentTarget.style.filter = "none")}
         >
-          🧠 Run AI Analysis
+          <SparkIcon size={13} /> Run AI Analysis
         </button>
         <button
           type="button"
           onClick={() => onNavigate?.("portfolio")}
           className="dps-cta"
           style={{
-            padding: "7px 13px",
-            borderRadius: "8px",
+            display: "flex",
+            alignItems: "center",
+            gap: "4px",
+            padding: "7px 11px",
+            borderRadius: "var(--radius-control)",
             border: "1px solid var(--border-subtle)",
-            background: "transparent",
+            background: "var(--color-bg-card)",
             color: "var(--color-text-secondary)",
             fontSize: "11px",
             fontWeight: 600,
             cursor: "pointer",
-            letterSpacing: "0.02em",
+            letterSpacing: "0.01em",
             whiteSpace: "nowrap",
+            transition: "border-color 0.15s, color 0.15s",
           }}
           onMouseEnter={(e) => {
-            e.currentTarget.style.background = "rgba(99,102,241,0.08)";
-            e.currentTarget.style.borderColor = "rgba(99,102,241,0.3)";
-            e.currentTarget.style.color = "var(--color-accent-secondary)";
+            e.currentTarget.style.borderColor = "var(--border-strong)";
+            e.currentTarget.style.color = "var(--color-text-primary)";
           }}
           onMouseLeave={(e) => {
-            e.currentTarget.style.background = "transparent";
             e.currentTarget.style.borderColor = "var(--border-subtle)";
             e.currentTarget.style.color = "var(--color-text-secondary)";
           }}
         >
-          Details →
+          Details <ChevronRight size={12} />
         </button>
       </div>
     </div>

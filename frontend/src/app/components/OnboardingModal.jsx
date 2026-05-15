@@ -6,6 +6,7 @@ import { API_BASE } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "./Toast";
 import { Spinner } from "./Loaders";
+import { prewarmIntelligence } from "../lib/prewarm";
 
 /**
  * OnboardingModal
@@ -117,6 +118,14 @@ export default function OnboardingModal({ open, onClose, userName }) {
       if (error) throw error;
 
       try { localStorage.setItem(STORAGE_KEY, "completed"); } catch {}
+      // Warm the news-feed cache for the new universe before the page reloads
+      // so the dashboard paint after reload is sub-second.
+      try {
+        prewarmIntelligence({
+          positions: [],
+          watchlistTickers: selected.map((s) => s.ticker),
+        });
+      } catch { /* best-effort */ }
       toast.success(`Tracking ${selected.length} ${selected.length === 1 ? "stock" : "stocks"}`);
       onClose?.();
       // Soft-reload so all components pick up the new universe.

@@ -20,11 +20,13 @@ from app.core.compliance import with_disclaimer
 from app.services import (
     ai_client,
     grounding,
+    market_data,
     outcome_ledger,
     response_cache,
     signal_ensemble,
     vector_store,
 )
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/intelligence", tags=["portfolio-intelligence"])
@@ -870,6 +872,11 @@ async def _movers_generator(raw_holdings: list[dict]):
             "upcoming_earnings": h.get("upcoming_earnings"),
         }
 
+    # Per-user live snapshot (qty × current price → ₹ stake + day P&L per ticker)
+    # so the frontend can render the "Contributed today" / "Your stake" strip
+    # on every mover, watch item, and theme. Cheap — quotes are 5-min cached.
+    holdings_today = _build_holdings_today(raw_holdings)
+
     result = with_disclaimer({
         "type": "result",
         "portfolio_return_today_pct": movers_ctx.get("portfolio_return_today_pct"),
@@ -877,6 +884,7 @@ async def _movers_generator(raw_holdings: list[dict]):
         "sector_returns": movers_ctx.get("market", {}).get("sectors", []),
         "market_flows": movers_ctx.get("market", {}).get("flows"),
         "holdings_detail": holdings_detail,
+        "holdings_today": holdings_today,
         "today": {
             "top_positive_driver": today_data.get("top_positive_driver"),
             "top_negative_driver": today_data.get("top_negative_driver"),
@@ -1119,6 +1127,82 @@ def _news_feed_cache_key(positions: list[dict], watchlist: list[str]) -> str:
     return f"{bucket}|{h_key}|{w_key}"
 
 
+# Thread pool for parallel quote fetching when building the per-user holdings
+# snapshot. Sized small — each lookup is in market_data's 5-min cache so most
+# requests resolve instantly anyway.
+_holdings_pool = ThreadPoolExecutor(max_workers=12)
+
+
+def _build_holdings_today(positions: list[dict]) -> dict:
+    """Per-ticker live snapshot enriched with this user's specific economics:
+        { ticker: {current_price, change_percent, quantity,
+                   current_value_inr, day_pnl_inr, weight_pct} }
+
+    Powers the "your stake" personalization strip on every news row + mover —
+    so a "BANKBARODA surged 4.6%" headline shows the user "+₹570 today, 1.7%
+    of your portfolio" instead of leaving them to do the math.
+
+    Quotes are pulled via market_data.get_live_quote which has a 5-minute TTL,
+    so this typically completes in <50ms even for 30+ tickers. Failed lookups
+    are silently dropped — the consumer falls back to invested-only display.
+    """
+    if not positions:
+        return {}
+
+    def _fetch(ticker: str) -> tuple[str, dict | None]:
+        try:
+            return ticker, market_data.get_live_quote(ticker)
+        except Exception:
+            return ticker, None
+
+    tickers = [(p.get("ticker") or "").upper() for p in positions if p.get("ticker")]
+    if not tickers:
+        return {}
+
+    quotes: dict[str, dict] = {}
+    for ticker, q in _holdings_pool.map(_fetch, tickers):
+        if q and q.get("current_price"):
+            quotes[ticker] = q
+
+    enriched: dict[str, dict] = {}
+    total_value = 0.0
+    for p in positions:
+        t = (p.get("ticker") or "").upper()
+        if not t:
+            continue
+        q = quotes.get(t)
+        if not q:
+            continue
+        qty = float(p.get("quantity") or 0)
+        current_price = float(q["current_price"])
+        change_pct = float(q.get("change_percent") or 0)
+        current_value = qty * current_price
+        # Reverse out the previous close from the % change to compute today's
+        # absolute ₹ delta on this position. Guard against the degenerate
+        # change_pct = -100% case (would divide by zero).
+        if change_pct > -99.99:
+            prev_close = current_price / (1 + change_pct / 100.0)
+            day_pnl = qty * (current_price - prev_close)
+        else:
+            day_pnl = 0.0
+        enriched[t] = {
+            "current_price": round(current_price, 2),
+            "change_percent": round(change_pct, 2),
+            "quantity": qty,
+            "current_value_inr": round(current_value, 2),
+            "day_pnl_inr": round(day_pnl, 2),
+        }
+        total_value += current_value
+
+    if total_value > 0:
+        for t in enriched:
+            enriched[t]["weight_pct"] = round(
+                enriched[t]["current_value_inr"] / total_value * 100, 2
+            )
+
+    return enriched
+
+
 def _flatten_news_for_ingest(context: dict) -> list[dict]:
     """Same as _collect_candidate_news but includes snippets — used for
     embedding into the vector store. Output schema matches what
@@ -1157,6 +1241,15 @@ def _flatten_news_for_ingest(context: dict) -> list[dict]:
             "source": n.get("source"),
             "scope": "global",
             "country": n.get("country"),
+        })
+    # Policy items (PIB/RBI). Embedded so semantic search surfaces "PLI scheme"
+    # against TATA STEEL even when the keyword annotator misses the link.
+    for n in context.get("policy_headlines", []):
+        out.append({
+            "headline": n.get("headline"),
+            "snippet": n.get("snippet"),
+            "source": n.get("source"),
+            "scope": n.get("scope") or "policy",
         })
     return out
 
@@ -1213,7 +1306,22 @@ def _collect_candidate_news(context: dict) -> list[dict]:
             "country": n.get("country"),
         })
 
-    return candidates[:90]  # generous cap for large portfolios
+    # Policy / regulatory items — PIB government press releases + RBI. The
+    # annotator maps these to user holdings via affected_sectors when no
+    # specific ticker is named (e.g. "PLI expansion to specialty steel" hits
+    # JSWSTEEL/TATASTEEL/JINDALSTEL). Cap at 12 — they're high-signal-density
+    # so the LLM rarely needs more than the most-recent ones.
+    for n in context.get("policy_headlines", [])[:12]:
+        candidates.append({
+            "id": n.get("id"),
+            "headline": n.get("headline"),
+            "source": n.get("source"),
+            "scope": n.get("scope") or "policy",        # policy_pib | policy_rbi
+            "scope_ticker": None,
+            "affected_sectors": n.get("affected_sectors") or [],
+        })
+
+    return candidates[:100]  # bumped from 90 to absorb the policy stream
 
 
 def _merge_semantic_into_candidates(
@@ -1358,10 +1466,20 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
     except Exception as e:
         logger.warning("technicals batch failed for news feed: %s", e)
 
+    # holdings_by_sector — used by the LLM to map a policy item's
+    # `affected_sectors` to the user's specific tickers in that sector.
+    # Lets a "PLI expansion to specialty steel" PIB release flag JSWSTEEL,
+    # TATASTEEL, JINDALSTEL even though the headline names none of them.
+    holdings_by_sector: dict[str, list[str]] = {}
+    for h in context.get("holdings", []):
+        sec = (h.get("sector") or "Unknown")
+        holdings_by_sector.setdefault(sec, []).append(h.get("ticker"))
+
     # Build a slim CONTEXT for batch annotation.
     annotation_ctx = {
         "user_holdings": user_holdings,
         "user_watchlist": user_watchlist,
+        "user_holdings_by_sector": holdings_by_sector,
         "sectors_today": [
             {"sector": s.get("sector"), "change_percent": s.get("change_percent")}
             for s in context.get("sectors", [])
@@ -1401,6 +1519,13 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
         "is semantically close to its business. Treat these as valid signal: include the named "
         "ticker in affected_tickers if the transmission mechanism is real. Higher similarity "
         "(>0.7) = stronger signal.\n"
+        "9b. POLICY ITEMS — if a candidate has scope='policy_pib' or 'policy_rbi' it carries "
+        "`affected_sectors`. These items are government press releases / RBI notifications and "
+        "rarely name specific companies. Map them to the user's holdings by intersecting the "
+        "item's affected_sectors with CONTEXT.user_holdings_by_sector — every matched ticker "
+        "goes into affected_tickers. Set category='macro'. Example: a PIB release with "
+        "affected_sectors=['Banking & Finance'] should set affected_tickers to ALL user "
+        "holdings under Banking. If no sector overlap with the user's portfolio, SKIP the item.\n"
         "10. DIRECTION DISCIPLINE — DEFAULT TO 'mixed' when in doubt. Only emit 'positive' or "
         "'negative' when (a) the news is unambiguously directional AND (b) the affected ticker's "
         "technical state in CONTEXT.user_universe_technicals is consistent with the direction "
@@ -1466,6 +1591,10 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
         tc = it.get("technical_context")
         nid = it.get("news_id")
         orig = candidate_by_id.get(nid) or {}
+        # Forward `scope` + `affected_sectors` from the original candidate so
+        # the frontend can render a distinct POLICY badge + sector chips for
+        # PIB/RBI items. Plain news items have scope='stock_specific'/'macro'/
+        # 'global' and no affected_sectors — those fields just stay null.
         cleaned.append({
             "news_id": nid,
             "headline": (it.get("headline") or "").strip()[:200],
@@ -1480,6 +1609,8 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
             "semantic_match_ticker": orig.get("semantic_match_ticker"),
             "semantic_similarity": orig.get("semantic_similarity"),
             "snippet": (orig.get("snippet") or "")[:280] or None,
+            "scope": orig.get("scope"),
+            "affected_sectors": orig.get("affected_sectors") or [],
         })
 
     # Sort: high → medium → low (already requested in prompt but enforce server-side).
@@ -1506,6 +1637,11 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
     # Filter for the user-facing list AFTER logging (so the ledger sees everything).
     user_items = [it for it in cleaned if not it.get("hidden_low_conviction")]
 
+    # Per-user live snapshot. Cheap because market_data.get_live_quote is cached.
+    # In demo_mode `raw_positions` is _DEMO_HOLDINGS so the demo viewer also
+    # gets meaningful "your stake" numbers — no special-casing needed.
+    holdings_today = _build_holdings_today(raw_positions)
+
     payload = with_disclaimer({
         "demo_mode": demo_mode,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1516,6 +1652,9 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
         # Forward per-ticker technical state so the click-through detail modal
         # can render each affected holding's current chart situation.
         "universe_technicals": tech_by_ticker,
+        # Per-holding live values — frontend renders the "your stake" strip
+        # on each news row from this map.
+        "holdings_today": holdings_today,
         "data_gaps": data.get("data_gaps", []),
     })
     _news_feed_cache[cache_key] = payload

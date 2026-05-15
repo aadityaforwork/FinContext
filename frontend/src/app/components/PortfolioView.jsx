@@ -10,6 +10,7 @@ import RiskMetricsCard from "./RiskMetricsCard";
 import { useToast } from "./Toast";
 import { LoaderHeader, Skeleton } from "./Loaders";
 import { useAuth } from "../context/AuthContext";
+import { prewarmIntelligence } from "../lib/prewarm";
 const API_BASE = _SHARED_API_BASE;
 
 const COLORS = [
@@ -152,6 +153,15 @@ export default function PortfolioView({ onNavigate }) {
             { onConflict: "ticker,user_id" }
           );
         }
+        // Warm the backend intelligence cache while the user reads the toast.
+        try {
+          const { data: watchRows } = await supabase
+            .from("watchlist").select("ticker").eq("user_id", user.id);
+          prewarmIntelligence({
+            positions: data.positions,
+            watchlistTickers: (watchRows || []).map((r) => r.ticker),
+          });
+        } catch { /* prewarm is best-effort */ }
         toast.success(`Imported ${data.positions.length} positions from Kite`);
         fetchPortfolio();
       } else { toast.error(data.detail || "Upload failed"); }

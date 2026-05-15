@@ -1,5 +1,14 @@
 "use client";
 
+/**
+ * AuthCard — shared shell for /login, /signup, /forgot-password, /reset-password.
+ *
+ * "Editorial terminal" aesthetic to match the dashboard:
+ *   - solid surfaces, no radial-gradient backdrops
+ *   - flat monogram (matches Sidebar) — no gradient block
+ *   - hairline borders, 12px card / 8px control radius
+ *   - solid accent CTA, no two-stop gradient
+ */
 export default function AuthCard({ title, subtitle, children }) {
   return (
     <div
@@ -9,8 +18,7 @@ export default function AuthCard({ title, subtitle, children }) {
         alignItems: "center",
         justifyContent: "center",
         padding: "24px",
-        background:
-          "radial-gradient(1200px 600px at 50% -10%, rgba(99,102,241,0.12), transparent 70%), var(--color-bg-primary)",
+        background: "var(--color-bg-primary)",
       }}
     >
       <div
@@ -19,55 +27,87 @@ export default function AuthCard({ title, subtitle, children }) {
           maxWidth: "420px",
           background: "var(--color-bg-card)",
           border: "1px solid var(--border-subtle)",
-          borderRadius: "20px",
-          padding: "32px",
-          boxShadow: "var(--shadow-card)",
+          borderRadius: "var(--radius-card, 12px)",
+          padding: "28px",
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "24px" }}>
+        {/* Brand — flat monogram, matches Sidebar */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "11px",
+            marginBottom: "26px",
+            paddingBottom: "20px",
+            borderBottom: "1px solid var(--border-subtle)",
+          }}
+        >
           <div
             style={{
-              width: "40px",
-              height: "40px",
-              borderRadius: "12px",
+              width: "30px",
+              height: "30px",
+              borderRadius: "7px",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              color: "white",
+              color: "var(--color-text-primary)",
               fontWeight: 700,
-              fontSize: "18px",
-              background:
-                "linear-gradient(135deg, var(--color-accent-primary), var(--color-accent-cyan))",
+              fontSize: "15px",
+              flexShrink: 0,
+              background: "var(--color-bg-card-hover)",
+              border: "1px solid var(--border-strong)",
+              letterSpacing: "-0.03em",
             }}
           >
             F
           </div>
-          <div>
-            <h1 style={{ fontSize: "18px", fontWeight: 700, color: "var(--color-text-primary)" }}>
+          <div style={{ lineHeight: 1.25 }}>
+            <h1
+              style={{
+                fontSize: "14px",
+                fontWeight: 700,
+                color: "var(--color-text-primary)",
+                letterSpacing: "-0.02em",
+              }}
+            >
               FinContext
             </h1>
-            <p style={{ fontSize: "12px", color: "var(--color-text-muted)" }}>
-              Market Intelligence
+            <p
+              style={{
+                fontSize: "10.5px",
+                color: "var(--color-text-muted)",
+                letterSpacing: "0.01em",
+              }}
+            >
+              Market intelligence
             </p>
           </div>
         </div>
 
         <h2
           style={{
-            fontSize: "22px",
+            fontSize: "20px",
             fontWeight: 700,
             color: "var(--color-text-primary)",
             marginBottom: "6px",
+            letterSpacing: "-0.01em",
           }}
         >
           {title}
         </h2>
         {subtitle ? (
-          <p style={{ fontSize: "13px", color: "var(--color-text-secondary)", marginBottom: "20px" }}>
+          <p
+            style={{
+              fontSize: "13px",
+              color: "var(--color-text-secondary)",
+              marginBottom: "22px",
+              lineHeight: 1.5,
+            }}
+          >
             {subtitle}
           </p>
         ) : (
-          <div style={{ marginBottom: "12px" }} />
+          <div style={{ marginBottom: "16px" }} />
         )}
 
         {children}
@@ -76,45 +116,51 @@ export default function AuthCard({ title, subtitle, children }) {
   );
 }
 
+// Inputs — hairline border, slightly recessed surface, focus is the global
+// :focus-visible ring from globals.css so we stay consistent with the dashboard.
 export const authInputStyle = {
   width: "100%",
-  padding: "10px 14px",
-  borderRadius: "10px",
+  padding: "10px 12px",
+  borderRadius: "var(--radius-control, 8px)",
   border: "1px solid var(--border-subtle)",
   background: "var(--color-bg-secondary)",
   color: "var(--color-text-primary)",
-  fontSize: "14px",
+  fontSize: "13.5px",
   outline: "none",
 };
 
+// Primary CTA — solid accent, no gradient. Matches the Run/Refresh buttons
+// across the dashboard for visual consistency.
 export const authButtonStyle = {
   width: "100%",
   padding: "11px 16px",
-  borderRadius: "10px",
-  border: "none",
+  borderRadius: "var(--radius-control, 8px)",
+  border: "1px solid var(--color-accent-primary)",
   cursor: "pointer",
-  fontSize: "14px",
+  fontSize: "13.5px",
   fontWeight: 600,
-  color: "white",
-  background:
-    "linear-gradient(135deg, var(--color-accent-primary), var(--color-accent-secondary))",
-  transition: "opacity 0.15s",
+  color: "#fff",
+  background: "var(--color-accent-primary)",
+  transition: "filter 0.15s, opacity 0.15s",
+  letterSpacing: "0.01em",
 };
 
+// Secondary CTA (used for the Google button when re-enabled) — hairline outline.
 export const authGoogleButtonStyle = {
   width: "100%",
   padding: "10px 16px",
-  borderRadius: "10px",
+  borderRadius: "var(--radius-control, 8px)",
   border: "1px solid var(--border-subtle)",
-  background: "var(--color-bg-secondary)",
+  background: "var(--color-bg-card)",
   color: "var(--color-text-primary)",
-  fontSize: "14px",
+  fontSize: "13.5px",
   fontWeight: 600,
   cursor: "pointer",
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
   gap: "10px",
+  transition: "border-color 0.15s, background 0.15s",
 };
 
 export function GoogleIcon() {

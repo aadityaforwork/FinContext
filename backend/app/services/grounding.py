@@ -28,7 +28,7 @@ import yfinance as yf
 from cachetools import TTLCache
 
 from app.nse_universe import TICKER_TO_META, TICKER_TO_YF, NSE_STOCKS, resolve_yf_symbol
-from app.services import data_ingestion, market_flows, technicals, vector_store
+from app.services import data_ingestion, market_flows, policy_feeds, technicals, vector_store
 
 logger = logging.getLogger(__name__)
 
@@ -663,6 +663,19 @@ def build_market_context() -> dict:
         {"id": f"india_news[{i}]", **n} for i, n in enumerate(india_news_raw)
     ]
 
+    # Policy + regulatory pulse (PIB government press releases + RBI). This is
+    # the Indian-wedge data global tools don't surface. Items carry sector tags
+    # (banking, auto, defence, ...) so the LLM annotator can map them onto the
+    # user's holdings even when the headline names no specific company.
+    policy_items_raw: list[dict] = []
+    try:
+        policy_items_raw = policy_feeds.fetch_all_policy_items(limit_per_source=15)
+    except Exception as e:
+        logger.warning("policy feed fetch failed: %s", e)
+    policy_items = [
+        {"id": f"policy_news[{i}]", **n} for i, n in enumerate(policy_items_raw)
+    ]
+
     global_news: list[dict] = []
     idx = 0
     for src in _GLOBAL_SOURCES:
@@ -693,6 +706,7 @@ def build_market_context() -> dict:
         "flows": flows,
         "india_headlines": india_news,
         "global_headlines": global_news,
+        "policy_headlines": policy_items,
     }
     _market_ctx_cache["market_ctx"] = ctx
     return ctx
@@ -1140,6 +1154,7 @@ def build_morning_brief_context(
         "sectors": market_ctx.get("sectors", []),
         "india_headlines": market_ctx.get("india_headlines", []),
         "global_headlines": market_ctx.get("global_headlines", []),
+        "policy_headlines": market_ctx.get("policy_headlines", []),
         "holdings": holdings_summary,
         "watchlist": watchlist_summary,
     }

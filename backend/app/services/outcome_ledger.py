@@ -373,6 +373,42 @@ def accuracy_summary(
         return {k: _bucket(v) for k, v in groups.items()}
 
     summary = _bucket(rows)
+
+    # Pending-predictions stats. Useful to drive the empty-state UI: the moment
+    # the user runs the Context Engine these counts go up, even before any
+    # outcome has been computed. Keeps the Accuracy page from looking dead while
+    # the daily cron hasn't yet caught up.
+    predictions_logged = 0
+    pending_at_horizon = 0
+    earliest_pending: str | None = None
+    latest_pending: str | None = None
+    distinct_tickers = 0
+    try:
+        all_preds = (
+            _client.table("ai_predictions")
+            .select("id,ticker,prediction_date")
+            .gte("prediction_date", from_date)
+            .limit(10000)
+            .execute()
+            .data
+            or []
+        )
+        predictions_logged = len(all_preds)
+        distinct_tickers = len({r.get("ticker") for r in all_preds if r.get("ticker")})
+        # rows already have horizon outcomes (subset of `rows` from the view)
+        scored_pred_ids = {r["id"] for r in rows if r.get("hit") is not None}
+        pending_rows = [
+            r for r in all_preds if r["id"] not in scored_pred_ids
+        ]
+        pending_at_horizon = len(pending_rows)
+        if pending_rows:
+            dates = sorted(r["prediction_date"] for r in pending_rows if r.get("prediction_date"))
+            if dates:
+                earliest_pending = dates[0]
+                latest_pending = dates[-1]
+    except Exception as e:
+        logger.debug("accuracy_summary pending-stats fetch failed: %s", e)
+
     return {
         "horizon": horizon,
         "days": days,
@@ -382,6 +418,11 @@ def accuracy_summary(
         "by_source":    _group(rows, "source"),
         "by_direction": _group(rows, "direction"),
         "by_catalyst":  _group(rows, "catalyst_type"),
+        "predictions_logged":    predictions_logged,
+        "pending_at_horizon":    pending_at_horizon,
+        "distinct_tickers":      distinct_tickers,
+        "earliest_pending_date": earliest_pending,
+        "latest_pending_date":   latest_pending,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 

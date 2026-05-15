@@ -1,12 +1,18 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { supabase } from "../lib/supabase";
 import { API_BASE } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
+import { useCache } from "../lib/useCache";
 import { Spinner, Skeleton } from "./Loaders";
 import Modal from "./Modal";
 import { Hint, TECH_TOOLTIPS } from "./Tooltips";
+import {
+  SignalIcon, RefreshIcon, CompanyIcon, SectorIcon, MacroIcon, GlobalIcon,
+} from "./Icons";
+import { Reveal } from "./AnimatedNumber";
+import YourStake from "./YourStake";
 
 /**
  * NewsImpactFeed — premium edition
@@ -27,12 +33,22 @@ const DIRECTION = {
   mixed:    { color: "var(--color-accent-amber)", arrow: "◆" },
 };
 
-const CATEGORY_ICON = {
-  stock_specific: "📌",
-  sector: "🏭",
-  macro: "🇮🇳",
-  global: "🌍",
+// SVG category glyphs replace the old emoji map (📌🏭🇮🇳🌍).
+const CATEGORY_GLYPH = {
+  stock_specific: CompanyIcon,
+  sector: SectorIcon,
+  macro: MacroIcon,
+  global: GlobalIcon,
 };
+
+function CatGlyph({ category, size = 13 }) {
+  const G = CATEGORY_GLYPH[category] || MacroIcon;
+  return (
+    <span style={{ display: "flex", color: "var(--color-text-muted)" }}>
+      <G size={size} />
+    </span>
+  );
+}
 
 const CATEGORY_LABEL = {
   stock_specific: "Company news",
@@ -56,10 +72,11 @@ const VOL_COLORS = {
   surge:  "#ef4444",
 };
 
-function NewsRow({ item, onTickerClick, onOpen }) {
+function NewsRow({ item, onTickerClick, onOpen, holdingsToday }) {
   const dot = IMPACT[item.impact_level] || IMPACT.low;
   const dir = DIRECTION[item.direction] || DIRECTION.mixed;
-  const catIcon = CATEGORY_ICON[item.category] || CATEGORY_ICON.macro;
+  const isPolicy = (item.scope || "").startsWith("policy_");
+  const policyLabel = item.scope === "policy_rbi" ? "RBI" : "POLICY";
 
   return (
     <div
@@ -67,6 +84,7 @@ function NewsRow({ item, onTickerClick, onOpen }) {
       tabIndex={onOpen ? 0 : undefined}
       onClick={onOpen}
       onKeyDown={(e) => { if (onOpen && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onOpen(); } }}
+      className={onOpen ? "living-row" : undefined}
       style={{
         display: "grid",
         gridTemplateColumns: "auto 1fr",
@@ -76,7 +94,7 @@ function NewsRow({ item, onTickerClick, onOpen }) {
         borderRadius: "10px",
         border: "1px solid var(--border-subtle)",
         cursor: onOpen ? "pointer" : "default",
-        transition: "border-color 0.15s, background 0.15s",
+        transition: "transform 0.16s ease, border-color 0.15s, background 0.15s",
       }}
       onMouseEnter={(e) => {
         e.currentTarget.style.background = "rgba(99,102,241,0.04)";
@@ -126,8 +144,30 @@ function NewsRow({ item, onTickerClick, onOpen }) {
             letterSpacing: "0.04em",
           }}
         >
-          <span>{catIcon}</span>
+          <CatGlyph category={item.category} size={12} />
           <span>{dot.label}</span>
+          {isPolicy && (
+            <>
+              <span style={{ opacity: 0.5 }}>·</span>
+              <span
+                title={item.scope === "policy_rbi"
+                  ? "RBI press release / notification"
+                  : "Government press release (PIB)"}
+                style={{
+                  padding: "1px 6px",
+                  borderRadius: "4px",
+                  background: "rgba(245,158,11,0.16)",
+                  color: "var(--color-accent-amber)",
+                  border: "1px solid rgba(245,158,11,0.35)",
+                  fontSize: "9px",
+                  fontWeight: 800,
+                  letterSpacing: "0.06em",
+                }}
+              >
+                {policyLabel}
+              </span>
+            </>
+          )}
           {item.conviction != null && (
             <>
               <span style={{ opacity: 0.5 }}>·</span>
@@ -199,6 +239,31 @@ function NewsRow({ item, onTickerClick, onOpen }) {
           )}
         </div>
 
+        {/* Sector chips for policy items — gives the user immediate context
+            on which slice of the economy a PIB/RBI release touches, even
+            before they parse the headline. */}
+        {item.affected_sectors?.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "4px", marginTop: "6px" }}>
+            {item.affected_sectors.slice(0, 4).map((s) => (
+              <span
+                key={s}
+                style={{
+                  padding: "1px 6px",
+                  borderRadius: "4px",
+                  background: "rgba(6,182,212,0.10)",
+                  color: "var(--color-accent-cyan)",
+                  border: "1px solid rgba(6,182,212,0.22)",
+                  fontSize: "9.5px",
+                  fontWeight: 700,
+                  letterSpacing: "0.02em",
+                }}
+              >
+                {s}
+              </span>
+            ))}
+          </div>
+        )}
+
         {item.technical_context && (
           <p
             style={{
@@ -214,6 +279,15 @@ function NewsRow({ item, onTickerClick, onOpen }) {
             {item.technical_context}
           </p>
         )}
+
+        {/* Your stake — answers "what does this mean for ME?" Sums across all
+            affected tickers the user actually holds. Hidden silently if zero
+            overlap, so non-portfolio sector news doesn't get noisy. */}
+        <YourStake
+          tickers={item.affected_tickers}
+          holdingsToday={holdingsToday}
+          variant="news"
+        />
       </div>
     </div>
   );
@@ -221,44 +295,49 @@ function NewsRow({ item, onTickerClick, onOpen }) {
 
 export default function NewsImpactFeed({ onNavigate }) {
   const { user } = useAuth();
-  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [feed, setFeed] = useState(null);
-  const [error, setError] = useState(null);
   const [filter, setFilter] = useState("all");
   const [activeItem, setActiveItem] = useState(null); // click-through detail modal
 
+  // The actual fetch — supabase reads + POST to news-feed.
+  // `force` is forwarded to the backend so the user-clicked refresh button
+  // bypasses the SWR window and recomputes; localStorage is overwritten either way.
   const fetchFeed = useCallback(async (force = false) => {
-    if (!user?.id) return;
-    if (force) setRefreshing(true); else setLoading(true);
-    setError(null);
-    try {
-      const [{ data: positions }, { data: watchRows }] = await Promise.all([
-        supabase.from("portfolio").select("ticker, quantity, buy_price").eq("user_id", user.id),
-        supabase.from("watchlist").select("ticker").eq("user_id", user.id),
-      ]);
-      const res = await fetch(`${API_BASE}/api/intelligence/news-feed`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          positions: positions || [],
-          watchlist_tickers: (watchRows || []).map((r) => r.ticker),
-          force_refresh: force,
-        }),
-      });
-      if (!res.ok) throw new Error(`Feed request failed (${res.status})`);
-      const data = await res.json();
-      setFeed(data);
-      if (data.error) setError(data.error);
-    } catch (e) {
-      setError(e?.message || "Could not load news feed");
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
+    if (!user?.id) throw new Error("Not signed in");
+    const [{ data: positions }, { data: watchRows }] = await Promise.all([
+      supabase.from("portfolio").select("ticker, quantity, buy_price").eq("user_id", user.id),
+      supabase.from("watchlist").select("ticker").eq("user_id", user.id),
+    ]);
+    const res = await fetch(`${API_BASE}/api/intelligence/news-feed`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        positions: positions || [],
+        watchlist_tickers: (watchRows || []).map((r) => r.ticker),
+        force_refresh: force,
+      }),
+    });
+    if (!res.ok) throw new Error(`Feed request failed (${res.status})`);
+    return await res.json();
   }, [user?.id]);
 
-  useEffect(() => { fetchFeed(false); }, [fetchFeed]);
+  // Cache by user.id with a 30-min local window — second-visit-onwards is instant.
+  // Background refresh keeps it fresh; portfolio changes within the window
+  // surface on the next refresh (manual button or after window expires).
+  // The fetchFn forwards a `force` arg the hook passes through from refresh().
+  const {
+    data: feed,
+    loading,
+    stale,
+    error: fetchError,
+    refresh,
+  } = useCache(`news-feed:${user?.id || "anon"}`, fetchFeed, {
+    enabled: !!user?.id,
+    maxAgeMs: 30 * 60 * 1000,
+  });
+
+  // Surface either a fetch error OR a payload-level error from the backend.
+  const error = fetchError || feed?.error || null;
 
   const items = useMemo(() => {
     const all = feed?.items || [];
@@ -267,6 +346,20 @@ export default function NewsImpactFeed({ onNavigate }) {
   }, [feed, filter]);
 
   const handleTickerClick = (t) => onNavigate?.("company", t);
+
+  const onRefreshClick = async () => {
+    setRefreshing(true);
+    try {
+      // refresh(silent=true, force=true) keeps current items on screen while
+      // the new payload arrives, and forwards force=true to fetchFn so the
+      // backend SWR window is bypassed.
+      await refresh(true, true);
+    } catch {
+      // Errors land in fetchError via useCache.
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   return (
     <div
@@ -299,15 +392,17 @@ export default function NewsImpactFeed({ onNavigate }) {
           <h2
             style={{
               fontSize: "13px",
-              fontWeight: 800,
+              fontWeight: 700,
               color: "var(--color-text-primary)",
-              letterSpacing: "-0.005em",
+              letterSpacing: "-0.01em",
               display: "flex",
               alignItems: "center",
               gap: "8px",
             }}
           >
-            <span style={{ fontSize: "13px" }}>📡</span>
+            <span style={{ display: "flex", color: "var(--color-accent-primary)" }}>
+              <SignalIcon size={15} />
+            </span>
             News hitting your portfolio
           </h2>
           <p style={{ fontSize: "10px", color: "var(--color-text-muted)", marginTop: "3px", letterSpacing: "0.02em" }}>
@@ -355,24 +450,56 @@ export default function NewsImpactFeed({ onNavigate }) {
               </button>
             ))}
           </div>
+          {(stale || refreshing) && (
+            <span
+              title={refreshing ? "Refreshing live data…" : "Showing cached — refreshing"}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "5px",
+                padding: "3px 7px",
+                borderRadius: "9999px",
+                background: "rgba(99,102,241,0.10)",
+                border: "1px solid rgba(99,102,241,0.22)",
+                fontSize: "9px",
+                fontWeight: 700,
+                color: "var(--color-accent-secondary)",
+                letterSpacing: "0.04em",
+                textTransform: "uppercase",
+              }}
+            >
+              <span
+                className="pulse-dot"
+                style={{
+                  width: "5px",
+                  height: "5px",
+                  borderRadius: "50%",
+                  background: "var(--color-accent-secondary)",
+                }}
+              />
+              Live
+            </span>
+          )}
           <button
             type="button"
-            onClick={() => fetchFeed(true)}
+            onClick={onRefreshClick}
             disabled={refreshing}
             aria-label="Refresh"
             style={{
-              padding: "5px 10px",
-              borderRadius: "6px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: "28px",
+              height: "26px",
+              borderRadius: "var(--radius-control)",
               border: "1px solid var(--border-subtle)",
               background: "var(--color-bg-card)",
               color: "var(--color-text-muted)",
-              fontSize: "10px",
-              fontWeight: 700,
               cursor: refreshing ? "wait" : "pointer",
               opacity: refreshing ? 0.6 : 1,
             }}
           >
-            {refreshing ? <Spinner size="sm" /> : "↻"}
+            {refreshing ? <Spinner size="sm" /> : <RefreshIcon size={13} />}
           </button>
         </div>
       </div>
@@ -397,7 +524,7 @@ export default function NewsImpactFeed({ onNavigate }) {
                 <p style={{ marginBottom: "10px" }}>{error}</p>
                 <button
                   type="button"
-                  onClick={() => fetchFeed(true)}
+                  onClick={onRefreshClick}
                   style={{
                     padding: "6px 12px",
                     borderRadius: "6px",
@@ -424,12 +551,14 @@ export default function NewsImpactFeed({ onNavigate }) {
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
             {items.map((item, i) => (
-              <NewsRow
-                key={item.news_id || i}
-                item={item}
-                onTickerClick={handleTickerClick}
-                onOpen={() => setActiveItem(item)}
-              />
+              <Reveal key={item.news_id || i} index={i} step={32}>
+                <NewsRow
+                  item={item}
+                  onTickerClick={handleTickerClick}
+                  onOpen={() => setActiveItem(item)}
+                  holdingsToday={feed?.holdings_today}
+                />
+              </Reveal>
             ))}
           </div>
         )}
@@ -458,7 +587,6 @@ export default function NewsImpactFeed({ onNavigate }) {
 function NewsDetailModal({ item, allItems = [], universeTechnicals, onClose, onOpen, onTickerClick }) {
   const dot = IMPACT[item.impact_level] || IMPACT.low;
   const dir = DIRECTION[item.direction] || DIRECTION.mixed;
-  const catIcon = CATEGORY_ICON[item.category] || CATEGORY_ICON.macro;
   const catLabel = CATEGORY_LABEL[item.category] || item.category;
   const affected = item.affected_tickers || [];
   const isSemantic = item.semantic_similarity != null;
@@ -481,7 +609,7 @@ function NewsDetailModal({ item, allItems = [], universeTechnicals, onClose, onO
         fontSize: "10px", fontWeight: 700, color: "var(--color-text-muted)",
         textTransform: "uppercase", letterSpacing: "0.04em",
       }}>
-        <span style={{ fontSize: "13px" }}>{catIcon}</span>
+        <CatGlyph category={item.category} size={13} />
         <span>{catLabel}</span>
         <span style={{ color: dot.color }}>· {dot.label}</span>
         <span style={{ color: dir.color }}>· {dir.arrow} {item.direction}</span>
