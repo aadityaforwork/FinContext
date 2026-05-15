@@ -126,3 +126,139 @@ select horizon, count(*) from prediction_outcomes group by horizon;
 
 Once any row shows up, refresh `/accuracy` (or the **Track record** tab) — the
 hit-rate will replace the "predictions logged, awaiting score" empty state.
+
+---
+
+## Telegram bot v0
+
+Push a personalized morning brief (P&L + top movers + policy headlines) to
+every linked user every weekday at 8:30 AM IST. No app open required —
+this is the workflow + distribution moat.
+
+### One-time bot creation
+
+1. Open Telegram → search for **@BotFather**.
+2. Send `/newbot` → pick a name (e.g. *FinContext*) → pick a username ending
+   in `bot` (e.g. `FinContextBot` or `FinContextDailyBot`).
+3. BotFather replies with a token like `123456789:ABCdef-very-long-token`.
+   Save it — that's `TELEGRAM_BOT_TOKEN`.
+
+### One-time server setup
+
+On Render → your backend service → **Environment** → add three vars:
+
+| Variable | Value |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | from BotFather |
+| `TELEGRAM_WEBHOOK_SECRET` | a random string (`python -c "import secrets; print(secrets.token_urlsafe(24))"`) |
+| `WEB_APP_URL` | your deployed frontend, e.g. `https://fincontext.app` |
+
+`ADMIN_TOKEN` is shared with the outcomes cron — already set if you've done
+that step.
+
+Then run **migration 006** in Supabase (`supabase/migrations/006_telegram_links.sql`).
+
+### One-time webhook registration
+
+Tell Telegram where to POST incoming messages. Run this once after the env
+vars are set and the backend has redeployed (replace placeholders):
+
+```bash
+curl -X POST "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "url": "https://YOUR-BACKEND.onrender.com/api/telegram/webhook",
+        "secret_token": "<YOUR_TELEGRAM_WEBHOOK_SECRET>",
+        "drop_pending_updates": true
+      }'
+```
+
+Expected response:
+```json
+{"ok":true,"result":true,"description":"Webhook was set"}
+```
+
+Verify:
+```bash
+curl "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getWebhookInfo"
+```
+
+### Frontend env var
+
+In your Vercel project (or `.env.local` for dev), add:
+
+```
+NEXT_PUBLIC_TELEGRAM_BOT_USERNAME=FinContextBot
+```
+
+(without the `@`, just the username). This is the deep-link the Settings page
+uses to open the bot in Telegram.
+
+### Test the link flow end-to-end
+
+1. Sign in to the web app → **Settings** → "Daily brief on Telegram" → click
+   **Generate link code**. Copy the 6-character code.
+2. Open `https://t.me/<your_bot_username>` in a browser or Telegram → press
+   **Start**.
+3. Send `/link CODE` (replace CODE with what you copied). The bot should reply
+   `✅ Linked!`.
+4. Go back to Settings → click **I've sent it — refresh** (or reload). The
+   section should now show `Connected · @yourusername`.
+
+### Daily brief cron
+
+The brief job needs to run **once per trading day at ~8:30 AM IST = 3:00 UTC**.
+
+#### Option A — cron-job.org (free, recommended)
+
+1. Sign in at https://cron-job.org → **Create cronjob**.
+2. Fill in:
+   - **Title:** `FinContext daily brief`
+   - **URL:** `https://YOUR-BACKEND.onrender.com/api/telegram/send-daily-brief`
+   - **Schedule:** Custom cron `0 3 * * 1-5` (3:00 UTC, Mon–Fri)
+   - **Advanced:**
+     - Method: **POST**
+     - Timeout: **300 seconds**
+     - Custom HTTP header: `X-Admin-Token` = `<your ADMIN_TOKEN>`
+3. **Save**, then click **Run now** to test.
+
+Expected response:
+```json
+{
+  "targets": 1,
+  "sent": 1,
+  "skipped_no_holdings": 0,
+  "failed": 0
+}
+```
+
+#### Option B — local script (manual, useful for testing)
+
+```powershell
+$env:FINCONTEXT_API_BASE   = "https://YOUR-BACKEND.onrender.com"
+$env:FINCONTEXT_ADMIN_TOKEN = "<your admin token>"
+python scripts/send_daily_brief.py
+```
+
+### Bot commands users can send
+
+| Command | Effect |
+|---|---|
+| `/start` | Welcome message + how-to |
+| `/link CODE` | Bind this chat to a FinContext account (CODE from Settings) |
+| `/off` | Pause daily briefs |
+| `/on` | Resume daily briefs |
+| `/help` | Command list |
+
+If a user blocks the bot, Telegram returns `403 Forbidden` and the backend
+auto-disables their `daily_brief_enabled` so we don't keep retrying.
+
+### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| Webhook setup says `Wrong response from the webhook` | Backend isn't deployed yet, or `/api/telegram/webhook` returns non-2xx. Check Render logs. |
+| `/link CODE` says "code isn't valid" | Code expired (10-min TTL), or it was generated for a different user. Generate a fresh one. |
+| Settings page shows "Checking link status…" forever | Backend `/api/telegram/link-status` returned non-OK or Supabase JWT verification failed. Check Render logs for the user's session. |
+| Daily brief returns `targets: 0` | No users have linked their Telegram yet. Try the link flow first. |
+| Daily brief returns `failed > 0` with "Forbidden" | The user blocked the bot. Backend auto-disables their brief — no action needed. |
