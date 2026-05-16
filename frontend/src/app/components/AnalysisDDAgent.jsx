@@ -3,6 +3,7 @@ import AnalysisVideoPresenter from "./AnalysisVideoPresenter";
 
 import { API_BASE as _SHARED_API_BASE } from "../lib/api";
 import { claimText, claimSource } from "../lib/claim";
+import { readSSE } from "../lib/sseStream";
 const API_BASE = _SHARED_API_BASE;
 
 export default function AnalysisDDAgent({ ticker, stockName }) {
@@ -35,40 +36,14 @@ export default function AnalysisDDAgent({ ticker, stockName }) {
 
       if (!response.ok) throw new Error("Agent failed to initialize");
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-
-      let done = false;
-      while (!done) {
-        const { value, done: readerDone } = await reader.read();
-        if (value) {
-          const chunk = decoder.decode(value);
-          const lines = chunk.split("\n");
-          for (const line of lines) {
-            if (line.startsWith("data: ")) {
-              const dataStr = line.slice(6).trim();
-              if (dataStr === "[DONE]") {
-                setRunning(false);
-                break;
-              }
-              if (dataStr) {
-                try {
-                  const data = JSON.parse(dataStr);
-                  if (data.type === "step") {
-                    setSteps((prev) => [...prev, data.message]);
-                  } else if (data.type === "result") {
-                    setResult(data);
-                    setRunning(false); // Finished generating result
-                  }
-                } catch (e) {
-                  // handle partial chunks if needed, simple approach for MVP
-                  console.error("Parse error stream:", e);
-                }
-              }
-            }
-          }
+      for await (const data of readSSE(response)) {
+        if (data === "[DONE]") { setRunning(false); break; }
+        if (data.type === "step") {
+          setSteps((prev) => [...prev, data.message]);
+        } else if (data.type === "result") {
+          setResult(data);
+          setRunning(false);
         }
-        done = readerDone;
       }
     } catch (err) {
       setError(err.message);

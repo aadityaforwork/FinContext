@@ -3,10 +3,12 @@
 import { useState, useRef, useEffect } from "react";
 import { API_BASE as _SHARED_API_BASE } from "../lib/api";
 import { claimText, claimSource } from "../lib/claim";
+import { readSSE } from "../lib/sseStream";
 import Modal from "./Modal";
 import { Hint, TECH_TOOLTIPS } from "./Tooltips";
 import { CompassIcon, RefreshIcon } from "./Icons";
 import { AnimatedNumber, Reveal } from "./AnimatedNumber";
+import MissionControlLoader from "./MissionControlLoader";
 import YourStake from "./YourStake";
 
 const API_BASE = _SHARED_API_BASE;
@@ -95,12 +97,7 @@ export default function PortfolioContextCard({ positions }) {
   const [detailTicker, setDetailTicker] = useState(null);     // Today MoverRow modal
   const [watchDetail, setWatchDetail] = useState(null);       // Tomorrow watch item modal
   const [themeDetail, setThemeDetail] = useState(null);       // Tomorrow theme modal
-  const terminalRef = useRef(null);
   const autoRanRef = useRef(false);                           // guard against double-fire
-
-  useEffect(() => {
-    if (terminalRef.current) terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
-  }, [steps]);
 
   const run = async (silent = false) => {
     if (!positions?.length) return;
@@ -116,37 +113,27 @@ export default function PortfolioContextCard({ positions }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ positions }),
       });
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-      let done = false;
-      while (!done) {
-        const { value, done: rd } = await reader.read();
-        if (value) {
-          const chunk = decoder.decode(value);
-          for (const line of chunk.split("\n")) {
-            if (!line.startsWith("data: ")) continue;
-            const s = line.slice(6).trim();
-            if (s === "[DONE]") { setLoading(false); break; }
-            if (!s) continue;
-            try {
-              const msg = JSON.parse(s);
-              if (msg.type === "step") setSteps(prev => [...prev, msg.message]);
-              else if (msg.type === "error") { setError(msg.message); setLoading(false); }
-              else if (msg.type === "result") {
-                setData(msg);
-                setStale(false);
-                setLoading(false);
-                // Persist to localStorage so the next dashboard open is instant.
-                const key = _contextCacheKey(positions);
-                if (key) {
-                  try { localStorage.setItem(key, JSON.stringify({ data: msg, ts: Date.now() })); }
-                  catch { /* quota / private mode — non-fatal */ }
-                }
-              }
-            } catch {}
+      // readSSE buffers across TCP chunks and only yields complete SSE events,
+      // so Render's edge proxy fragmenting our 10-50 KB result payload across
+      // multiple chunks no longer drops the message.
+      for await (const msg of readSSE(res)) {
+        if (msg === "[DONE]") { setLoading(false); break; }
+        if (msg.type === "step") {
+          setSteps(prev => [...prev, msg.message]);
+        } else if (msg.type === "error") {
+          setError(msg.message);
+          setLoading(false);
+        } else if (msg.type === "result") {
+          setData(msg);
+          setStale(false);
+          setLoading(false);
+          // Persist to localStorage so the next dashboard open is instant.
+          const key = _contextCacheKey(positions);
+          if (key) {
+            try { localStorage.setItem(key, JSON.stringify({ data: msg, ts: Date.now() })); }
+            catch { /* quota / private mode — non-fatal */ }
           }
         }
-        done = rd;
       }
     } catch (e) {
       setError(String(e));
@@ -262,19 +249,11 @@ export default function PortfolioContextCard({ positions }) {
       )}
 
       {loading && (
-        <div style={{
-          marginTop: "16px", background: "#0c0a13", border: "1px solid #2a2542", borderRadius: "12px",
-          padding: "14px", fontFamily: "'JetBrains Mono', monospace", fontSize: "12px", color: "#a599e9",
-        }}>
-          <div ref={terminalRef} style={{ display: "flex", flexDirection: "column", gap: "6px", maxHeight: "160px", overflowY: "auto" }}>
-            {steps.map((s, i) => (
-              <div key={i}><span style={{ color: "#34d399", marginRight: "8px" }}>&gt;</span>{s}</div>
-            ))}
-            <div style={{ color: "var(--color-text-muted)" }}>
-              <span style={{ color: "#34d399", marginRight: "8px" }}>&gt;</span> _
-            </div>
-          </div>
-        </div>
+        <MissionControlLoader
+          steps={steps}
+          portfolioSize={positions?.length || 0}
+          variant="context"
+        />
       )}
 
       {data && (

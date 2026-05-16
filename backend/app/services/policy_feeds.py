@@ -210,10 +210,21 @@ def _fetch_feed(url: str, source: str, scope: str, limit: int) -> list[dict]:
     if url in _policy_neg_cache:
         return []
     try:
+        # PIB and RBI both block non-browser User-Agents (PIB returns 403, RBI
+        # returns 418). Send a stock Chrome UA + the headers a real browser
+        # would; without these the feeds 100% fail from a server IP.
         r = requests.get(
             url,
             timeout=_FEED_TIMEOUT_S,
-            headers={"User-Agent": "FinContext/1.0 (+https://fin-context.vercel.app)"},
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "Accept": "application/rss+xml, application/xml, text/xml, */*;q=0.8",
+                "Accept-Language": "en-IN,en;q=0.9",
+            },
         )
         r.raise_for_status()
         feed = feedparser.parse(r.content)

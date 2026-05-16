@@ -5,7 +5,8 @@ import { supabase } from "../lib/supabase";
 import { API_BASE } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { useCache } from "../lib/useCache";
-import { Spinner, Skeleton } from "./Loaders";
+import { Spinner } from "./Loaders";
+import NewsWireLoader from "./NewsWireLoader";
 import Modal from "./Modal";
 import { Hint, TECH_TOOLTIPS } from "./Tooltips";
 import {
@@ -507,9 +508,7 @@ export default function NewsImpactFeed({ onNavigate }) {
       {/* BODY */}
       <div style={{ flex: 1, overflowY: "auto", paddingRight: "4px" }}>
         {loading ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-            {[1, 2, 3, 4, 5].map((i) => <Skeleton key={i} h={88} r={10} />)}
-          </div>
+          <NewsWireLoader slots={4} />
         ) : items.length === 0 ? (
           <div
             style={{

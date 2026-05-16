@@ -5,6 +5,7 @@ import StockChart from "./StockChart";
 
 import { API_BASE as _SHARED_API_BASE } from "../lib/api";
 import { claimText, claimSource } from "../lib/claim";
+import { readSSE } from "../lib/sseStream";
 const API_BASE = _SHARED_API_BASE;
 
 // --- Radial Score Ring ---
@@ -102,30 +103,11 @@ export default function AnalysisView({ initialTicker }) {
         body: JSON.stringify({ ticker: t }),
       });
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-      let done = false;
-      while (!done) {
-        const { value, done: readerDone } = await reader.read();
-        if (value) {
-          const chunk = decoder.decode(value);
-          const lines = chunk.split("\n");
-          for (const line of lines) {
-            if (line.startsWith("data: ")) {
-              const dataStr = line.slice(6).trim();
-              if (dataStr === "[DONE]") { setDdLoading(false); break; }
-              if (dataStr) {
-                try {
-                  const data = JSON.parse(dataStr);
-                  if (data.type === "step") setDdSteps(prev => [...prev, data.message]);
-                  else if (data.type === "error") { setDdError(data.message); setDdLoading(false); }
-                  else if (data.type === "result") { setDeepDive(data); setDdLoading(false); }
-                } catch (e) {}
-              }
-            }
-          }
-        }
-        done = readerDone;
+      for await (const data of readSSE(response)) {
+        if (data === "[DONE]") { setDdLoading(false); break; }
+        if (data.type === "step") setDdSteps(prev => [...prev, data.message]);
+        else if (data.type === "error") { setDdError(data.message); setDdLoading(false); }
+        else if (data.type === "result") { setDeepDive(data); setDdLoading(false); }
       }
     } catch (err) { setDdError(String(err)); setDdLoading(false); }
   };

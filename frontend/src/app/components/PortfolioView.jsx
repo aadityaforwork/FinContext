@@ -7,10 +7,12 @@ import { API_BASE as _SHARED_API_BASE } from "../lib/api";
 import { claimText, claimSource } from "../lib/claim";
 import PortfolioContextCard from "./PortfolioContextCard";
 import RiskMetricsCard from "./RiskMetricsCard";
+import MissionControlLoader from "./MissionControlLoader";
 import { useToast } from "./Toast";
 import { LoaderHeader, Skeleton } from "./Loaders";
 import { useAuth } from "../context/AuthContext";
 import { prewarmIntelligence } from "../lib/prewarm";
+import { readSSE } from "../lib/sseStream";
 const API_BASE = _SHARED_API_BASE;
 
 const COLORS = [
@@ -74,11 +76,6 @@ export default function PortfolioView({ onNavigate }) {
   const [intel, setIntel] = useState(null);
   const [intelLoading, setIntelLoading] = useState(false);
   const [intelSteps, setIntelSteps] = useState([]);
-  const terminalRef = useRef(null);
-
-  useEffect(() => {
-    if (terminalRef.current) terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
-  }, [intelSteps]);
 
   const fetchPortfolio = useCallback(async () => {
     if (!user?.id) return;
@@ -180,27 +177,13 @@ export default function PortfolioView({ onNavigate }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ positions: portfolio.positions.map((p) => ({ ticker: p.ticker, quantity: p.quantity, buy_price: p.buy_price })) }),
       });
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-      let done = false;
-      while (!done) {
-        const { value, done: readerDone } = await reader.read();
-        if (value) {
-          const chunk = decoder.decode(value);
-          for (const line of chunk.split("\n")) {
-            if (!line.startsWith("data: ")) continue;
-            const dataStr = line.slice(6).trim();
-            if (dataStr === "[DONE]") { setIntelLoading(false); break; }
-            if (dataStr) {
-              try {
-                const data = JSON.parse(dataStr);
-                if (data.type === "step") setIntelSteps((prev) => [...prev, data.message]);
-                else if (data.type === "result") { setIntel(data); setIntelLoading(false); }
-              } catch {}
-            }
-          }
-        }
-        done = readerDone;
+      // readSSE handles Render's edge fragmenting the result payload across
+      // multiple TCP chunks — the old chunk.split("\n") parser silently
+      // dropped partial events and the result never arrived.
+      for await (const data of readSSE(response)) {
+        if (data === "[DONE]") { setIntelLoading(false); break; }
+        if (data.type === "step") setIntelSteps((prev) => [...prev, data.message]);
+        else if (data.type === "result") { setIntel(data); setIntelLoading(false); }
       }
     } catch { setIntelLoading(false); }
   };
@@ -341,21 +324,12 @@ export default function PortfolioView({ onNavigate }) {
           )}
 
           {intelLoading && (
-            <div className="glass-card" style={{ marginBottom: "24px", overflow: "hidden" }}>
-              <div style={{ background: "#0c0a13", padding: "16px", fontFamily: "'JetBrains Mono', monospace", fontSize: "13px", color: "#a599e9", borderRadius: "16px" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "12px", paddingBottom: "10px", borderBottom: "1px solid #2a2542" }}>
-                  <div style={{ display: "flex", gap: "6px" }}>
-                    {["#ef4444","#f59e0b","#10b981"].map((c) => <div key={c} style={{ width: "10px", height: "10px", borderRadius: "50%", background: c }} />)}
-                  </div>
-                  <span style={{ fontSize: "11px", color: "#6b61a3", textTransform: "uppercase", letterSpacing: "1px" }}>Portfolio Intelligence Engine</span>
-                </div>
-                <div ref={terminalRef} style={{ display: "flex", flexDirection: "column", gap: "6px", maxHeight: "160px", overflowY: "auto" }}>
-                  {intelSteps.map((step, idx) => (
-                    <div key={idx}><span style={{ color: "#34d399", marginRight: "10px" }}>&gt;</span>{step}</div>
-                  ))}
-                  <div><span style={{ color: "#34d399", marginRight: "10px" }}>&gt;</span> _</div>
-                </div>
-              </div>
+            <div style={{ marginBottom: "24px" }}>
+              <MissionControlLoader
+                steps={intelSteps}
+                portfolioSize={portfolio?.positions?.length || 0}
+                variant="analysis"
+              />
             </div>
           )}
 
