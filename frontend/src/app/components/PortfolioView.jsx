@@ -242,6 +242,7 @@ export default function PortfolioView({ onNavigate }) {
                   <button
                     key={t.id}
                     type="button"
+                    data-tour={t.id === "intel" ? "ai-analysis-tab" : undefined}
                     onClick={() => setAiTab(t.id)}
                     title={t.desc}
                     style={{

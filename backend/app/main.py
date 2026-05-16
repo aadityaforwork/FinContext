@@ -24,6 +24,7 @@ from app.routers import (
     embeddings as embeddings_router,
     outcomes as outcomes_router,
     telegram as telegram_router,
+    onboarding as onboarding_router,
 )
 from app.core.config import settings
 
@@ -73,6 +74,7 @@ app.include_router(risk.router)
 app.include_router(embeddings_router.router)
 app.include_router(outcomes_router.router)
 app.include_router(telegram_router.router)
+app.include_router(onboarding_router.router)
 
 
 @app.get("/health", tags=["system"])

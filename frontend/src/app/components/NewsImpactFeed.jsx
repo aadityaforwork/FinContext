@@ -364,6 +364,7 @@ export default function NewsImpactFeed({ onNavigate }) {
 
   return (
     <div
+      data-tour="news-feed"
       className="dash-news-feed"
       style={{
         background: "var(--color-bg-card)",

@@ -173,7 +173,7 @@ export default function PortfolioContextCard({ positions }) {
     : portReturn >= 0 ? "var(--color-accent-green)" : "var(--color-accent-red)";
 
   return (
-    <div className="glass-card animate-fade-in" style={{ padding: "22px", marginBottom: "18px" }}>
+    <div data-tour="context-engine" className="glass-card animate-fade-in" style={{ padding: "22px", marginBottom: "18px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "16px", flexWrap: "wrap" }}>
         <div>
           <h3 style={{ fontSize: "15px", fontWeight: 700, color: "var(--color-text-primary)", display: "flex", alignItems: "center", gap: "9px", letterSpacing: "-0.01em" }}>

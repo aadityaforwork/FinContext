@@ -227,6 +227,7 @@ export default function PortfolioTodayStrip({ onNavigate }) {
       <div className="dps-cta-group" style={{ display: "flex", gap: "6px", flexShrink: 0 }}>
         <button
           type="button"
+          data-tour="ai-analysis-cta"
           onClick={() => onNavigate?.("analysis")}
           className="dps-cta dps-cta-primary"
           style={{

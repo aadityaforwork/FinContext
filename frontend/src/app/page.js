@@ -18,6 +18,8 @@ import ScreenerDrawer from "./components/ScreenerDrawer";
 import SettingsView from "./components/SettingsView";
 import AccuracyView from "./components/AccuracyView";
 import OnboardingModal, { shouldShowOnboarding } from "./components/OnboardingModal";
+import FirstInsightCard from "./components/FirstInsightCard";
+import OnboardingTour from "./components/OnboardingTour";
 import { useAuth } from "./context/AuthContext";
 import { supabase } from "./lib/supabase";
 import { useToast } from "./components/Toast";
@@ -36,6 +38,13 @@ export default function App() {
   const [drawer, setDrawer] = useState(null); // "watchlist" | "screener" | null
   // First-run onboarding modal (shown to new users with empty universe).
   const [showOnboarding, setShowOnboarding] = useState(false);
+  // Act 2 of onboarding — the FirstInsightCard interstitial. Holds the
+  // tickers the user just picked so the card can fetch a personalized
+  // insight before the user lands on the dashboard.
+  const [firstInsightTickers, setFirstInsightTickers] = useState(null);
+  // Act 3 — bump the OnboardingTour any time onboarding completes so it
+  // re-evaluates its localStorage flag and surfaces the callouts.
+  const [tourTrigger, setTourTrigger] = useState(0);
 
   // Redirect unauthenticated users to /login
   useEffect(() => {
@@ -211,12 +220,38 @@ export default function App() {
         onNavigate={handleNavigate}
       />
 
-      {/* First-run onboarding overlay */}
+      {/* Act 1 — first-run onboarding wizard */}
       <OnboardingModal
         open={showOnboarding}
         onClose={() => setShowOnboarding(false)}
         userName={user?.user_metadata?.name || user?.user_metadata?.full_name || ""}
+        onComplete={(tickers) => {
+          // Hand off to Act 2 (the FirstInsightCard) instead of reloading.
+          // The wizard already wrote to Supabase + warmed the cache before
+          // calling this; we just need to chain the next surface.
+          setShowOnboarding(false);
+          setFirstInsightTickers(tickers || []);
+        }}
       />
+
+      {/* Act 2 — single-insight interstitial right after the wizard. */}
+      <FirstInsightCard
+        open={firstInsightTickers != null}
+        tickers={firstInsightTickers || []}
+        onDismiss={() => {
+          setFirstInsightTickers(null);
+          // Bump tour trigger so OnboardingTour re-evaluates and lights up
+          // the dashboard callouts on the very next render.
+          setTourTrigger((n) => n + 1);
+          // Soft refresh so the dashboard picks up the new watchlist rows
+          // we just inserted. Without this the user lands on the demo
+          // dashboard for 1 frame before the watchlist hook re-runs.
+          setTimeout(() => window.location.reload(), 50);
+        }}
+      />
+
+      {/* Act 3 — dashboard tour callouts on first arrival. */}
+      <OnboardingTour trigger={tourTrigger} />
     </div>
   );
 }

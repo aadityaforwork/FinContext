@@ -9,16 +9,20 @@ import { Spinner } from "./Loaders";
 import { prewarmIntelligence } from "../lib/prewarm";
 
 /**
- * OnboardingModal
- * ---------------
- * One-screen wizard shown to brand-new users (no portfolio + no watchlist).
- * Gets them to "personalized dashboard" in under 60 seconds.
+ * OnboardingModal — Smart Wizard (Act 1 of the "First Five Minutes")
+ * -------------------------------------------------------------------
+ * Gets a brand-new user to a personalized dashboard in <60s. Key upgrade
+ * over the old wizard: as the user adds tickers, the panel below the
+ * search shows LIVE DATA for each pick (price, day change, sector). The
+ * user sees the product working before clicking Continue — the wizard
+ * itself is the first "wow" surface.
  *
- *  - Ticker autocomplete (uses /api/stocks/search)
- *  - One-tap quick-add suggestions (top NIFTY names)
- *  - On submit: bulk-insert into watchlist (no quantity/buy-price friction)
- *  - "Skip for now" → demo dashboard
- *  - Skip / completion both set localStorage flag so the modal doesn't reopen
+ * Visual style matches the editorial-terminal aesthetic used across the
+ * rest of the app: flat monogram (no gradient), hairline borders, solid
+ * accent button, mono labels. No emojis.
+ *
+ * After completion this modal triggers the FirstInsightCard interstitial
+ * (Act 2) via `onComplete(tickers)` instead of the old full page reload.
  */
 
 const STORAGE_KEY = "fincontext_onboarding_v1";
@@ -35,7 +39,7 @@ const QUICK_ADD = [
   { ticker: "LT",         name: "Larsen & Toubro" },
 ];
 
-export default function OnboardingModal({ open, onClose, userName }) {
+export default function OnboardingModal({ open, onClose, onComplete, userName }) {
   const { user } = useAuth();
   const toast = useToast();
   const [query, setQuery] = useState("");
@@ -43,6 +47,8 @@ export default function OnboardingModal({ open, onClose, userName }) {
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
   const [selected, setSelected] = useState([]); // [{ticker, name}]
+  // Live data per ticker: { ticker: {current_price, change_percent, sector, status: "loading"|"ok"|"err"} }
+  const [livePrices, setLivePrices] = useState({});
   const [submitting, setSubmitting] = useState(false);
   const searchInputRef = useRef(null);
 
@@ -82,6 +88,65 @@ export default function OnboardingModal({ open, onClose, userName }) {
     return () => ctrl.abort();
   }, [open, debouncedQuery]);
 
+  // LIVE PREVIEW — fetch /api/watchlist/prices for any selected tickers we
+  // don't have yet. Debounced 350ms so rapid additions don't fire 4 requests
+  // in 2 seconds. Failures fall back to a muted "—" — never blocks Continue.
+  useEffect(() => {
+    if (!open || selected.length === 0) return;
+    const missing = selected
+      .map((s) => s.ticker)
+      .filter((t) => !livePrices[t] || livePrices[t].status === "loading");
+    if (missing.length === 0) return;
+
+    // Mark as loading so the UI shows a spinner immediately.
+    setLivePrices((prev) => {
+      const next = { ...prev };
+      for (const t of missing) next[t] = { ...(next[t] || {}), status: "loading" };
+      return next;
+    });
+
+    const ctrl = new AbortController();
+    const id = setTimeout(() => {
+      fetch(`${API_BASE}/api/watchlist/prices`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tickers: missing }),
+        signal: ctrl.signal,
+      })
+        .then((r) => (r.ok ? r.json() : {}))
+        .then((data) => {
+          setLivePrices((prev) => {
+            const next = { ...prev };
+            for (const t of missing) {
+              const row = data?.[t];
+              if (row) {
+                next[t] = {
+                  current_price: row.current_price,
+                  change_percent: row.change_percent,
+                  sector: row.sector,
+                  name: row.name,
+                  status: "ok",
+                };
+              } else {
+                next[t] = { status: "err" };
+              }
+            }
+            return next;
+          });
+        })
+        .catch((err) => {
+          if (err.name === "AbortError") return;
+          setLivePrices((prev) => {
+            const next = { ...prev };
+            for (const t of missing) next[t] = { status: "err" };
+            return next;
+          });
+        });
+    }, 350);
+    return () => { clearTimeout(id); ctrl.abort(); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, selected]);
+
   const isSelected = (ticker) => selected.some((s) => s.ticker === ticker);
 
   const addStock = (stock) => {
@@ -97,6 +162,11 @@ export default function OnboardingModal({ open, onClose, userName }) {
 
   const removeStock = (ticker) => {
     setSelected((prev) => prev.filter((s) => s.ticker !== ticker));
+    setLivePrices((prev) => {
+      const next = { ...prev };
+      delete next[ticker];
+      return next;
+    });
   };
 
   const handleSkip = useCallback(() => {
@@ -126,10 +196,16 @@ export default function OnboardingModal({ open, onClose, userName }) {
           watchlistTickers: selected.map((s) => s.ticker),
         });
       } catch { /* best-effort */ }
-      toast.success(`Tracking ${selected.length} ${selected.length === 1 ? "stock" : "stocks"}`);
-      onClose?.();
-      // Soft-reload so all components pick up the new universe.
-      setTimeout(() => window.location.reload(), 300);
+      // Hand off to Act 2 — FirstInsightCard interstitial. Falls back to
+      // legacy reload behavior if no onComplete handler is provided.
+      const pickedTickers = selected.map((s) => s.ticker);
+      if (typeof onComplete === "function") {
+        onComplete(pickedTickers);
+      } else {
+        toast.success(`Tracking ${selected.length} ${selected.length === 1 ? "stock" : "stocks"}`);
+        onClose?.();
+        setTimeout(() => window.location.reload(), 300);
+      }
     } catch (e) {
       toast.error(e?.message || "Could not save your watchlist.");
     } finally {
@@ -146,9 +222,9 @@ export default function OnboardingModal({ open, onClose, userName }) {
       style={{
         position: "fixed",
         inset: 0,
-        background: "rgba(10,14,23,0.78)",
-        backdropFilter: "blur(6px)",
-        WebkitBackdropFilter: "blur(6px)",
+        background: "rgba(0,0,0,0.72)",
+        backdropFilter: "blur(8px)",
+        WebkitBackdropFilter: "blur(8px)",
         zIndex: 1000,
         display: "flex",
         alignItems: "center",
@@ -160,65 +236,66 @@ export default function OnboardingModal({ open, onClose, userName }) {
       <style>{`
         @keyframes fc-fade { from { opacity: 0 } to { opacity: 1 } }
         @keyframes fc-rise { from { transform: translateY(12px); opacity: 0 } to { transform: translateY(0); opacity: 1 } }
+        @keyframes fc-flash { 0% { background: rgba(99,102,241,0.18) } 100% { background: var(--color-bg-card) } }
       `}</style>
       <div
         style={{
-          width: "min(560px, 100%)",
+          width: "min(580px, 100%)",
           maxHeight: "calc(100vh - 40px)",
           background: "var(--color-bg-card)",
           border: "1px solid var(--border-subtle)",
-          borderRadius: "16px",
+          borderRadius: "var(--radius-card, 12px)",
           padding: "28px",
-          boxShadow: "0 24px 60px rgba(0,0,0,0.5)",
           display: "flex",
           flexDirection: "column",
-          gap: "18px",
+          gap: "20px",
           animation: "fc-rise 0.24s ease-out",
           overflow: "hidden",
         }}
       >
-        {/* HEADER */}
-        <div>
-          <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "10px" }}>
-            <div
+        {/* HEADER — flat monogram matches Sidebar + AuthCard. Editorial type. */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "12px",
+            paddingBottom: "18px",
+            borderBottom: "1px solid var(--border-subtle)",
+          }}
+        >
+          <div
+            style={{
+              width: "32px",
+              height: "32px",
+              borderRadius: "7px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "var(--color-text-primary)",
+              fontWeight: 700,
+              fontSize: "15px",
+              flexShrink: 0,
+              background: "var(--color-bg-card-hover)",
+              border: "1px solid var(--border-strong)",
+              letterSpacing: "-0.03em",
+            }}
+          >
+            F
+          </div>
+          <div style={{ lineHeight: 1.3 }}>
+            <h2
               style={{
-                width: "40px",
-                height: "40px",
-                borderRadius: "10px",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontSize: "20px",
-                background:
-                  "linear-gradient(135deg, var(--color-accent-primary), var(--color-accent-cyan))",
-                color: "white",
-                fontWeight: 800,
+                fontSize: "16px",
+                fontWeight: 700,
+                color: "var(--color-text-primary)",
+                letterSpacing: "-0.01em",
               }}
             >
-              F
-            </div>
-            <div>
-              <h2
-                className="gradient-text"
-                style={{
-                  fontSize: "18px",
-                  fontWeight: 800,
-                  letterSpacing: "-0.01em",
-                  lineHeight: 1.2,
-                }}
-              >
-                Welcome{userName ? `, ${userName.split(" ")[0]}` : ""}!
-              </h2>
-              <p
-                style={{
-                  fontSize: "12px",
-                  color: "var(--color-text-muted)",
-                  marginTop: "3px",
-                }}
-              >
-                Tell us what to track — we'll personalize your news feed.
-              </p>
-            </div>
+              Welcome{userName ? `, ${userName.split(" ")[0]}` : ""}
+            </h2>
+            <p style={{ fontSize: "12.5px", color: "var(--color-text-muted)", marginTop: "3px" }}>
+              Pick a few stocks — we&apos;ll pull signals as you go.
+            </p>
           </div>
         </div>
 
@@ -227,41 +304,22 @@ export default function OnboardingModal({ open, onClose, userName }) {
           <input
             ref={searchInputRef}
             type="text"
-            placeholder="Search stocks — type RELIANCE, INFY, TATAPOWER…"
+            placeholder="Search RELIANCE, INFY, TATAPOWER…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             style={{
               width: "100%",
-              padding: "11px 14px 11px 38px",
-              borderRadius: "10px",
+              padding: "11px 14px",
+              borderRadius: "var(--radius-control, 8px)",
               border: "1px solid var(--border-subtle)",
               background: "var(--color-bg-secondary)",
               color: "var(--color-text-primary)",
-              fontSize: "14px",
+              fontSize: "13.5px",
               outline: "none",
             }}
           />
-          <span
-            style={{
-              position: "absolute",
-              left: "12px",
-              top: "50%",
-              transform: "translateY(-50%)",
-              fontSize: "14px",
-              color: "var(--color-text-muted)",
-            }}
-          >
-            🔍
-          </span>
           {searching && (
-            <div
-              style={{
-                position: "absolute",
-                right: "12px",
-                top: "50%",
-                transform: "translateY(-50%)",
-              }}
-            >
+            <div style={{ position: "absolute", right: "12px", top: "50%", transform: "translateY(-50%)" }}>
               <Spinner size="sm" />
             </div>
           )}
@@ -276,11 +334,11 @@ export default function OnboardingModal({ open, onClose, userName }) {
                 right: 0,
                 background: "var(--color-bg-card)",
                 border: "1px solid var(--border-subtle)",
-                borderRadius: "10px",
+                borderRadius: "var(--radius-control, 8px)",
                 maxHeight: "260px",
                 overflowY: "auto",
                 zIndex: 10,
-                boxShadow: "0 12px 28px rgba(0,0,0,0.4)",
+                boxShadow: "var(--shadow-pop)",
               }}
             >
               {results.map((s) => {
@@ -306,18 +364,14 @@ export default function OnboardingModal({ open, onClose, userName }) {
                       textAlign: "left",
                       opacity: already ? 0.5 : 1,
                     }}
-                    onMouseEnter={(e) => {
-                      if (!already) e.currentTarget.style.background = "rgba(99,102,241,0.08)";
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.background = "transparent";
-                    }}
+                    onMouseEnter={(e) => { if (!already) e.currentTarget.style.background = "var(--color-bg-card-hover)"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
                   >
                     <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
                       <span
                         style={{
                           fontWeight: 700,
-                          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                          fontFamily: "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)",
                           fontSize: "12.5px",
                         }}
                       >
@@ -329,14 +383,15 @@ export default function OnboardingModal({ open, onClose, userName }) {
                     </div>
                     <span
                       style={{
-                        fontSize: "12px",
+                        fontSize: "11px",
                         fontWeight: 700,
+                        letterSpacing: "0.06em",
                         color: already
                           ? "var(--color-accent-green)"
                           : "var(--color-accent-secondary)",
                       }}
                     >
-                      {already ? "✓" : "+ Add"}
+                      {already ? "ADDED" : "+ ADD"}
                     </span>
                   </button>
                 );
@@ -350,15 +405,16 @@ export default function OnboardingModal({ open, onClose, userName }) {
           <div>
             <p
               style={{
-                fontSize: "10px",
-                fontWeight: 800,
+                fontSize: "9.5px",
+                fontWeight: 700,
                 textTransform: "uppercase",
-                letterSpacing: "0.08em",
+                letterSpacing: "0.16em",
                 color: "var(--color-text-muted)",
-                marginBottom: "8px",
+                marginBottom: "9px",
+                fontFamily: "var(--font-mono, ui-monospace, monospace)",
               }}
             >
-              Quick add — popular NIFTY names
+              Quick add · popular NIFTY
             </p>
             <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
               {QUICK_ADD.map((s) => {
@@ -370,19 +426,20 @@ export default function OnboardingModal({ open, onClose, userName }) {
                     onClick={() => addStock(s)}
                     disabled={already}
                     style={{
-                      padding: "5px 10px",
-                      borderRadius: "9999px",
+                      padding: "5px 11px",
+                      borderRadius: "var(--radius-pill, 6px)",
                       border: already
                         ? "1px solid var(--color-accent-green)"
                         : "1px solid var(--border-subtle)",
-                      background: already ? "rgba(16,185,129,0.10)" : "transparent",
+                      background: already ? "rgba(46,189,107,0.08)" : "transparent",
                       color: already
                         ? "var(--color-accent-green)"
                         : "var(--color-text-secondary)",
                       fontSize: "11px",
                       fontWeight: 700,
+                      letterSpacing: "0.04em",
                       cursor: already ? "default" : "pointer",
-                      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                      fontFamily: "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)",
                     }}
                   >
                     {already ? "✓ " : "+ "}
@@ -394,72 +451,78 @@ export default function OnboardingModal({ open, onClose, userName }) {
           </div>
         )}
 
-        {/* SELECTED */}
+        {/* LIVE PREVIEW — the wizard's "wow" surface. Each picked ticker
+            shows live price + change as soon as it's been added. */}
         {selected.length > 0 && (
-          <div
-            style={{
-              padding: "12px 14px",
-              background: "var(--color-bg-secondary)",
-              borderRadius: "10px",
-              border: "1px solid var(--border-subtle)",
-              maxHeight: "180px",
-              overflowY: "auto",
-            }}
-          >
-            <p
+          <div>
+            <div
               style={{
-                fontSize: "10px",
-                fontWeight: 800,
-                textTransform: "uppercase",
-                letterSpacing: "0.08em",
-                color: "var(--color-text-muted)",
-                marginBottom: "8px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginBottom: "10px",
               }}
             >
-              Tracking ({selected.length})
-            </p>
-            <div style={{ display: "flex", gap: "5px", flexWrap: "wrap" }}>
-              {selected.map((s) => (
+              <p
+                style={{
+                  fontSize: "9.5px",
+                  fontWeight: 700,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.16em",
+                  color: "var(--color-text-muted)",
+                  fontFamily: "var(--font-mono, ui-monospace, monospace)",
+                }}
+              >
+                Your picks ({selected.length})
+              </p>
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "5px",
+                  fontSize: "9.5px",
+                  fontWeight: 700,
+                  letterSpacing: "0.14em",
+                  color: "var(--color-accent-primary)",
+                  fontFamily: "var(--font-mono, ui-monospace, monospace)",
+                }}
+              >
                 <span
-                  key={s.ticker}
+                  className="oc-pulse-dot"
                   style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: "5px",
-                    padding: "3px 6px 3px 10px",
-                    borderRadius: "6px",
-                    background: "rgba(99,102,241,0.12)",
-                    color: "var(--color-accent-secondary)",
-                    border: "1px solid rgba(99,102,241,0.22)",
-                    fontSize: "11px",
-                    fontWeight: 700,
-                    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                    width: "5px",
+                    height: "5px",
+                    borderRadius: "50%",
+                    background: "var(--color-accent-primary)",
                   }}
-                >
-                  {s.ticker}
-                  <button
-                    type="button"
-                    onClick={() => removeStock(s.ticker)}
-                    aria-label={`Remove ${s.ticker}`}
-                    style={{
-                      background: "transparent",
-                      border: "none",
-                      color: "var(--color-text-muted)",
-                      fontSize: "13px",
-                      lineHeight: 1,
-                      cursor: "pointer",
-                      padding: 0,
-                    }}
-                  >
-                    ×
-                  </button>
-                </span>
+                />
+                LIVE
+              </span>
+            </div>
+            <div
+              style={{
+                background: "var(--color-bg-secondary)",
+                border: "1px solid var(--border-subtle)",
+                borderRadius: "var(--radius-control, 8px)",
+                maxHeight: "230px",
+                overflowY: "auto",
+              }}
+            >
+              {selected.map((s, i) => (
+                <LivePreviewRow
+                  key={s.ticker}
+                  ticker={s.ticker}
+                  fallbackName={s.name}
+                  data={livePrices[s.ticker]}
+                  onRemove={() => removeStock(s.ticker)}
+                  isLast={i === selected.length - 1}
+                />
               ))}
             </div>
           </div>
         )}
 
-        {/* FOOTER */}
+        {/* FOOTER — editorial styling: solid accent button, no gradient. */}
         <div
           style={{
             display: "flex",
@@ -475,7 +538,7 @@ export default function OnboardingModal({ open, onClose, userName }) {
             onClick={handleSkip}
             style={{
               padding: "9px 14px",
-              borderRadius: "8px",
+              borderRadius: "var(--radius-control, 8px)",
               border: "none",
               background: "transparent",
               color: "var(--color-text-muted)",
@@ -491,21 +554,27 @@ export default function OnboardingModal({ open, onClose, userName }) {
             onClick={handleContinue}
             disabled={selected.length === 0 || submitting}
             style={{
-              padding: "10px 22px",
-              borderRadius: "10px",
-              border: "none",
+              padding: "11px 22px",
+              borderRadius: "var(--radius-control, 8px)",
+              border: selected.length === 0
+                ? "1px solid var(--border-subtle)"
+                : "1px solid var(--color-accent-primary)",
               background: selected.length === 0
-                ? "var(--color-bg-secondary)"
-                : "linear-gradient(135deg, var(--color-accent-primary), var(--color-accent-cyan))",
-              color: selected.length === 0 ? "var(--color-text-muted)" : "white",
+                ? "var(--color-bg-card-hover)"
+                : "var(--color-accent-primary)",
+              color: selected.length === 0 ? "var(--color-text-muted)" : "#fff",
               fontSize: "13px",
               fontWeight: 700,
+              letterSpacing: "0.02em",
               cursor: selected.length === 0 || submitting ? "not-allowed" : "pointer",
               opacity: submitting ? 0.7 : 1,
               display: "flex",
               alignItems: "center",
               gap: "8px",
+              transition: "filter 0.15s",
             }}
+            onMouseEnter={(e) => { if (selected.length > 0 && !submitting) e.currentTarget.style.filter = "brightness(1.12)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.filter = "none"; }}
           >
             {submitting && <Spinner size="sm" />}
             {submitting
@@ -515,7 +584,129 @@ export default function OnboardingModal({ open, onClose, userName }) {
                 : `Track ${selected.length} ${selected.length === 1 ? "stock" : "stocks"} →`}
           </button>
         </div>
+
+        <style jsx>{`
+          @keyframes oc-pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50%      { opacity: 0.45; transform: scale(1.4); }
+          }
+          :global(.oc-pulse-dot) { animation: oc-pulse 1.6s ease-in-out infinite; }
+        `}</style>
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// LivePreviewRow — one row in the wizard's live preview list. Shows live
+// price + day change once the /api/watchlist/prices fetch resolves; spinner
+// while loading; muted "—" if the fetch failed.
+//
+// Animates a brief indigo flash on first data arrival ("fc-flash" keyframe
+// defined inside the modal) so the user perceives the value LANDING.
+// ---------------------------------------------------------------------------
+function LivePreviewRow({ ticker, fallbackName, data, onRemove, isLast }) {
+  const status = data?.status || "loading";
+  const price = data?.current_price;
+  const chg = data?.change_percent;
+  const sector = data?.sector;
+  const name = data?.name || fallbackName || ticker;
+  const isPos = typeof chg === "number" && chg >= 0;
+  const chgColor =
+    chg == null
+      ? "var(--color-text-muted)"
+      : isPos
+      ? "var(--color-accent-green)"
+      : "var(--color-accent-red)";
+
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "1fr auto auto auto",
+        alignItems: "center",
+        gap: "12px",
+        padding: "10px 14px",
+        borderBottom: isLast ? "none" : "1px solid var(--border-subtle)",
+        animation: status === "ok" ? "fc-flash 0.6s ease-out" : "none",
+      }}
+    >
+      <div style={{ minWidth: 0 }}>
+        <div
+          style={{
+            fontSize: "12.5px",
+            fontWeight: 700,
+            color: "var(--color-text-primary)",
+            fontFamily: "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)",
+          }}
+        >
+          {ticker}
+        </div>
+        <div
+          style={{
+            fontSize: "11px",
+            color: "var(--color-text-muted)",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {name}
+          {sector ? ` · ${sector}` : ""}
+        </div>
+      </div>
+
+      {/* Live price column */}
+      <div
+        style={{
+          fontSize: "12.5px",
+          fontWeight: 700,
+          fontVariantNumeric: "tabular-nums",
+          color: price != null ? "var(--color-text-primary)" : "var(--color-text-muted)",
+          textAlign: "right",
+          minWidth: "78px",
+        }}
+      >
+        {status === "loading"
+          ? <span style={{ opacity: 0.4 }}>fetching…</span>
+          : price != null
+            ? `₹${price.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`
+            : "—"}
+      </div>
+
+      {/* Day change column */}
+      <div
+        style={{
+          fontSize: "11.5px",
+          fontWeight: 700,
+          fontVariantNumeric: "tabular-nums",
+          color: chgColor,
+          textAlign: "right",
+          minWidth: "56px",
+        }}
+      >
+        {chg != null ? `${isPos ? "+" : ""}${chg.toFixed(2)}%` : ""}
+      </div>
+
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label={`Remove ${ticker}`}
+        style={{
+          background: "transparent",
+          border: "none",
+          color: "var(--color-text-muted)",
+          fontSize: "16px",
+          lineHeight: 1,
+          cursor: "pointer",
+          padding: "2px 6px",
+          borderRadius: "4px",
+        }}
+        onMouseEnter={(e) => { e.currentTarget.style.color = "var(--color-accent-red)"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.color = "var(--color-text-muted)"; }}
+      >
+        ×
+      </button>
     </div>
   );
 }
