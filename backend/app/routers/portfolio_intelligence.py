@@ -149,15 +149,17 @@ async def _cached_sse_stream(
 
 
 async def _intelligence_generator(raw_holdings: list[dict]):
+    # Step messages are shorter + more honest now. Old list included "Verifying
+    # claims against portfolio data..." which is gone — the verifier pass was
+    # removed to save 10-20s per analysis (OpenAI JSON mode + grounded prompt
+    # produces strict-schema output; verifier rarely caught real hallucinations).
     for msg in [
         "Fetching live prices for each holding...",
-        "Computing P&L and sector allocation...",
-        "Benchmarking each holding against sector peers...",
+        "Computing P&L, sector allocation, peer benchmarks...",
         "Running grounded AI strategist...",
-        "Verifying claims against portfolio data...",
     ]:
         yield f"data: {json.dumps({'type':'step','message':msg})}\n\n"
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.25)
 
     if not ai_client.is_available():
         yield f"data: {json.dumps({'type':'step','message':'ERROR: AI client not configured.'})}\n\n"
@@ -165,26 +167,83 @@ async def _intelligence_generator(raw_holdings: list[dict]):
         return
 
     try:
-        context = await asyncio.to_thread(grounding.build_portfolio_context, raw_holdings)
+        # Hard wall: context build can call yfinance for 40+ holdings; yf_safe
+        # now bounds each call, but stacking them still warrants a safety net.
+        context = await asyncio.wait_for(
+            asyncio.to_thread(grounding.build_portfolio_context, raw_holdings),
+            timeout=60,
+        )
+    except asyncio.TimeoutError:
+        yield f"data: {json.dumps({'type':'error','message':'Market data is slow right now — please retry.'})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
     except Exception as e:
         yield f"data: {json.dumps({'type':'error','message':f'Context build failed: {e}'})}\n\n"
         yield "data: [DONE]\n\n"
         return
 
+    # PROMPT TIGHTENING (May 2026) — was producing vague generic output like
+    # "consider diversifying" / "monitor closely". The new prompt:
+    #   • bans the specific phrases users flagged as low-signal
+    #   • forces every reason to cite a concrete CONTEXT number
+    #   • adds 1 good/bad few-shot pair so the model has a calibration anchor
+    # Goal: every line a user reads should contain a number or a ticker.
     task = (
-        "Analyze this retail investor's portfolio. All signals must reference a specific "
-        "holding's snapshot, weight_pct, or unrealized_pnl_pct from CONTEXT. Risks must "
-        "cite CONTEXT.aggregate (sector_allocation, top_holding_pct, top_sector_pct, "
-        "concentration_flag). Do NOT recommend specific tickers not in CONTEXT — instead "
-        "return sector or factor suggestions. "
-        "IMPORTANT: Use ONLY assessment language for `signal` — BULLISH/NEUTRAL/CAUTIOUS — "
-        "never action language like buy/sell/hold. We are unregistered (not a SEBI RA) so "
-        "all output must be educational stance, not advice.\n\n"
-        "OUTPUT BUDGET: cap `holdings_verdicts` at the 20 highest-weight or most-extreme "
-        "(by |unrealized_pnl_pct|) holdings. Cap `top_risks` at 4 and `suggested_directions` "
-        "at 3. Reasons must be ONE concise sentence (<140 chars). The user can drill into "
-        "any individual ticker via the company page — this view is portfolio-level synthesis, "
-        "not a per-ticker dump."
+        "You are a portfolio analyst writing for an Indian retail investor. "
+        "Be specific, be brief, and ground every claim in a number that "
+        "already appears in CONTEXT.\n\n"
+        "THIS RUN PRODUCES TWO TIERS:\n"
+        "  TIER 1 — portfolio-level: health score + breakdown + risks + directions\n"
+        "  TIER 2 — `holding_theses`: rich per-position cards on the top 6 holdings "
+        "    by weight_pct OR |unrealized_pnl_pct|. Each card is a decision aid, "
+        "    not a label. See HOLDING-CARD RULES below.\n\n"
+        "HOLDING-CARD RULES (the meat of this output):\n"
+        "  For each of the top 6 holdings, produce a thesis card with:\n"
+        "    • thesis      — ONE sentence on WHY people own this name (e.g. "
+        "      'Largest Indian IT services exporter; USD revenue + buyback yield.'). "
+        "      Universal — independent of today's price.\n"
+        "    • bull_case   — 2-3 concrete reasons SUPPORTING the position. Each "
+        "      bullet must cite a number from CONTEXT (ROE, margin, growth%, "
+        "      PE vs sector, momentum_20d_pct, peer_percentile, FII flow, "
+        "      relevant macro headline). One sentence each, ≤ 120 chars.\n"
+        "    • bear_case   — 2-3 concrete reasons AGAINST. Same grounding rules. "
+        "      Even bullish names must have a bear case — markets are 2-sided.\n"
+        "    • watch       — 1-2 specific catalysts with TRIGGER CONDITIONS in "
+        "      'if X then Y' format (e.g. 'Earnings 14 May; if margin guide < "
+        "      21% the IT-services rerating thesis weakens'). Cite "
+        "      upcoming_earnings or news/sem items if present.\n"
+        "    • signal      — BULLISH / NEUTRAL / CAUTIOUS\n"
+        "    • conviction  — 0-100. Below 60 means the bull and bear cases are "
+        "      closely matched; above 80 means one side overwhelmingly dominates.\n\n"
+        "GROUNDING RULES (apply to ALL text in this response):\n"
+        "  • `source` fields reference the CONTEXT path (e.g. "
+        "    'holdings[INFY].snapshot.roe_pct' or 'aggregate.top_sector_pct').\n"
+        "  • Risks must cite CONTEXT.aggregate (top_holding_pct, top_sector_pct, "
+        "    sector_allocation, concentration_flag) with the SPECIFIC % number.\n"
+        "  • Do NOT mention tickers outside CONTEXT.holdings — directions are "
+        "    sector- or factor-level only.\n\n"
+        "BANNED PHRASES — these say nothing. Do not use:\n"
+        "  • 'consider diversifying' (say WHICH sector is overweight + by how much)\n"
+        "  • 'monitor closely' (say WHAT to monitor — earnings date, RSI, etc.)\n"
+        "  • 'depends on market conditions' (no information content)\n"
+        "  • 'may impact' / 'could affect' (use 'if X then Y' framing instead)\n"
+        "  • 'strong fundamentals' (cite the actual ROE or margin number)\n"
+        "  • 'high growth potential' (cite revenue_growth_pct or earnings_growth_pct)\n\n"
+        "COMPLIANCE: `signal` is BULLISH/NEUTRAL/CAUTIOUS only — never buy/sell/hold. "
+        "We are unregistered (not a SEBI RA), so output is educational assessment, "
+        "not advice.\n\n"
+        "OUTPUT BUDGET:\n"
+        "  • holding_theses: EXACTLY 6 cards (top 6 by weight or |pnl_pct|)\n"
+        "  • holdings_verdicts: top 20 one-liners (for the sortable table)\n"
+        "  • top_risks: exactly 4, ranked by severity\n"
+        "  • suggested_directions: exactly 3 sector/factor-level focuses\n\n"
+        "EXAMPLES — good vs bad bullets:\n"
+        "  BAD:   'Strong fundamentals support a bullish stance.'\n"
+        "  GOOD:  'ROE 31% + rev growth 13% beat sector median; trades at 1.2× peer PE.'\n"
+        "  BAD:   'Consider monitoring this position.'\n"
+        "  GOOD:  'Weight 18% — above your 15% concentration band; PE 42 vs sector 24.'\n"
+        "  BAD:   'Earnings season approaching.'\n"
+        "  GOOD:  'Earnings 14 May (3 days); if margin guide < 21% the rerating thesis flips.'"
     )
     schema = """{
   "portfolio_health_score": int (1-100) | null,
@@ -194,6 +253,17 @@ async def _intelligence_generator(raw_holdings: list[dict]):
     "risk": int (1-100) | null,
     "momentum": int (1-100) | null
   },
+  "holding_theses": [
+    {
+      "ticker": str,
+      "thesis": str,
+      "bull_case": [ { "text": str, "source": str } ],
+      "bear_case": [ { "text": str, "source": str } ],
+      "watch":     [ { "text": str, "source": str } ],
+      "signal": "BULLISH" | "NEUTRAL" | "CAUTIOUS",
+      "conviction": int (0-100)
+    }
+  ],
   "holdings_verdicts": [
     { "ticker": str,
       "signal": "BULLISH" | "NEUTRAL" | "CAUTIOUS",
@@ -210,19 +280,52 @@ async def _intelligence_generator(raw_holdings: list[dict]):
   "data_gaps": [ str, ... ]
 }"""
 
+    # Heartbeat-wrapped LLM call — same pattern as /movers. Sends a step every
+    # 15s so Render's edge proxy doesn't close the SSE connection during the
+    # 30-90s LLM phase, and so the UI doesn't sit on "Running grounded AI
+    # strategist..." for a minute straight.
+    # 6500 tokens — holding_theses are rich (6 cards × ~5 bullets + watch +
+    # thesis line ≈ 2.5K tokens) plus the existing tier-1 output (~2K) plus
+    # JSON-mode overhead. 6500 keeps headroom for verbose ticker names + the
+    # data_gaps tail without truncating mid-array.
+    llm_task = asyncio.ensure_future(
+        asyncio.to_thread(ai_client.generate_grounded_json, task, context, schema, 6500)
+    )
+    heartbeat_msgs = [
+        "Scoring portfolio health across 4 axes...",
+        "Building bull + bear cases for top holdings...",
+        "Identifying catalysts and watch triggers...",
+        "Surfacing concentration + sector risks...",
+        "Still working — rich theses take a bit longer...",
+        "Almost there — finalizing rebalance directions...",
+    ]
+    hb_idx = 0
+    # Bumped to 150s — richer holding_theses output (~2.5K extra tokens) means
+    # the LLM call runs noticeably longer than the old "verdicts only" path.
+    # On Render the round-trip is 2-3× local; 150s prevents premature retries.
+    deadline = asyncio.get_event_loop().time() + 150
     try:
-        # 6000 tokens — large portfolios (40+ holdings) blew past 2048 mid-array
-        # ("Unterminated string..." JSON parse failure). The prompt also caps
-        # holdings_verdicts at 20 to bound the output regardless of portfolio size.
-        # Timeout extended in lockstep — bigger output = longer LLM latency.
-        # 150s on Render: OpenAI from Render is 2-3× slower than local, and a
-        # premature timeout dumps the user into a retry loop that costs more.
-        data = await asyncio.wait_for(
-            asyncio.to_thread(ai_client.generate_grounded_json, task, context, schema, 6000),
-            timeout=150,
-        )
+        while not llm_task.done():
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                llm_task.cancel()
+                raise asyncio.TimeoutError
+            try:
+                await asyncio.wait_for(asyncio.shield(llm_task), timeout=min(15.0, remaining))
+            except asyncio.TimeoutError:
+                msg = heartbeat_msgs[hb_idx] if hb_idx < len(heartbeat_msgs) else "Still working..."
+                hb_idx += 1
+                yield f"data: {json.dumps({'type':'step','message':msg})}\n\n"
+        data = llm_task.result()
     except asyncio.TimeoutError:
-        yield f"data: {json.dumps({'type':'error','message':'Timed out.'})}\n\n"
+        if not llm_task.done():
+            llm_task.cancel()
+        yield f"data: {json.dumps({'type':'error','message':'AI Analysis timed out — please retry.'})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+    except Exception as e:
+        logger.exception("portfolio LLM call failed")
+        yield f"data: {json.dumps({'type':'error','message':f'AI generation failed: {e}'})}\n\n"
         yield "data: [DONE]\n\n"
         return
 
@@ -231,11 +334,13 @@ async def _intelligence_generator(raw_holdings: list[dict]):
         yield "data: [DONE]\n\n"
         return
 
-    # Verifier max_tokens kept in lockstep with the LLM call above. With 20
-    # holdings_verdicts plus risks + suggestions + breakdown the verified output
-    # can run ~5K tokens — anything below truncates the JSON tail.
-    verified = await asyncio.to_thread(ai_client.verify_claims, data, context, 6000)
-    data = verified.get("verified", data)
+    # Verifier pass intentionally removed — was a second 10-20s LLM round-trip
+    # that rarely caught real hallucinations on grounded JSON-mode output. The
+    # prompt's anti-vagueness rules + strict schema cover us. `verified` kept
+    # as an empty dict so the downstream `removed_by_verifier` field still
+    # serializes cleanly for any cached frontend code reading it.
+    verified: dict = {"verified": data, "removed": []}
+    data = verified["verified"]
 
     # Deterministic fallback for health breakdown — computed straight from the
     # grounding context (aggregate + holdings + technicals). The LLM's values
@@ -264,10 +369,24 @@ async def _intelligence_generator(raw_holdings: list[dict]):
         if den > 0:
             health_score = round(num / den)
 
+    # Hold the LLM accountable to its universe: drop any thesis card whose
+    # ticker isn't in CONTEXT.holdings (hallucinated symbol = silently filter,
+    # don't surface). Also cap to 6 in case the LLM over-produced.
+    universe = {(h.get("ticker") or "").upper() for h in (context.get("holdings") or [])}
+    raw_theses = data.get("holding_theses") or []
+    holding_theses: list[dict] = []
+    for t in raw_theses:
+        tk = (t.get("ticker") or "").upper()
+        if tk and tk in universe:
+            holding_theses.append({**t, "ticker": tk})
+        if len(holding_theses) >= 6:
+            break
+
     result = with_disclaimer({
         "type": "result",
         "portfolio_health_score": health_score,
         "health_breakdown": breakdown,
+        "holding_theses": holding_theses,
         "holdings_verdicts": data.get("holdings_verdicts", []),
         "top_risks": data.get("top_risks", []),
         "suggested_directions": data.get("suggested_directions", []),

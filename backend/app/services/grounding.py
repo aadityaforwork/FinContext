@@ -67,18 +67,17 @@ _fast_snap_neg_transient: TTLCache = TTLCache(maxsize=400, ttl=yf_safe.NEG_TTL_T
 
 
 def _fast_snapshot_inner(yf_symbol: str) -> dict | None:
-    """Pure yfinance call; runs in the yf_safe thread pool so the outer
-    caller can enforce a wall-clock timeout. Returns None on no-data so
-    callers can classify it as a permanent (delisted/unknown) failure
-    rather than a transient one — yfinance's own delisted exceptions
-    don't always include matchable text in their .message."""
-    try:
-        fast = yf.Ticker(yf_symbol).fast_info
-        price = float(fast.last_price) if hasattr(fast, "last_price") else None
-        prev = float(fast.previous_close) if hasattr(fast, "previous_close") else None
-    except Exception:
-        # Property-access exception → symbol almost certainly delisted/unknown.
-        return None
+    """Pure yfinance call inside yf_safe pool. Returns None when fast_info
+    returned but had no usable data (signals delisted → permanent 24h cache).
+
+    Critically does NOT catch exceptions: if fast_info access raises (rate
+    limit, network, transient), let it propagate so yf_safe.classify_error
+    can pattern-match the message and use a 60s transient TTL — NOT permanent.
+    Earlier version swallowed the exception and poisoned 41 real tickers as
+    permanent on a single mid-fanout Yahoo rate-limit blip."""
+    fast = yf.Ticker(yf_symbol).fast_info
+    price = float(fast.last_price) if hasattr(fast, "last_price") else None
+    prev = float(fast.previous_close) if hasattr(fast, "previous_close") else None
     if price is None or prev is None or prev == 0:
         return None
     return {

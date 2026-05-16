@@ -47,13 +47,12 @@ _quote_executor = ThreadPoolExecutor(max_workers=16)
 
 
 def _quote_inner(yf_symbol: str) -> tuple[float, float] | None:
-    try:
-        stock = yf.Ticker(yf_symbol)
-        info = stock.fast_info
-        price = float(info.last_price) if hasattr(info, 'last_price') else 0.0
-        prev = float(info.previous_close) if hasattr(info, 'previous_close') else price
-    except Exception:
-        return None
+    """Pure yfinance call. Does NOT catch exceptions — see the matching note
+    in routers/portfolio.py._fetch_price_inner."""
+    stock = yf.Ticker(yf_symbol)
+    info = stock.fast_info
+    price = float(info.last_price) if hasattr(info, 'last_price') else 0.0
+    prev = float(info.previous_close) if hasattr(info, 'previous_close') else price
     if not price:
         return None
     change = ((price - prev) / prev * 100) if prev else 0.0

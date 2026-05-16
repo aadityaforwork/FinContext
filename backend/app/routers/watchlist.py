@@ -27,12 +27,12 @@ class PriceRequest(BaseModel):
 
 
 def _fetch_inner(yf_symbol: str) -> tuple[float | None, float | None] | None:
-    try:
-        info = yf.Ticker(yf_symbol).fast_info
-        price = float(info.last_price) if hasattr(info, "last_price") else None
-        prev = float(info.previous_close) if hasattr(info, "previous_close") else None
-    except Exception:
-        return None
+    """Pure yfinance call. Does NOT catch exceptions — see the matching note
+    in routers/portfolio.py._fetch_price_inner. Swallowing the exception here
+    poisons real tickers as permanent (24h) on transient rate limits."""
+    info = yf.Ticker(yf_symbol).fast_info
+    price = float(info.last_price) if hasattr(info, "last_price") else None
+    prev = float(info.previous_close) if hasattr(info, "previous_close") else None
     if price is None or prev is None or prev == 0:
         return None
     return (round(price, 2), round((price - prev) / prev * 100, 2))

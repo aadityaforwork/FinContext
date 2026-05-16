@@ -508,7 +508,7 @@ export default function NewsImpactFeed({ onNavigate }) {
       {/* BODY */}
       <div style={{ flex: 1, overflowY: "auto", paddingRight: "4px" }}>
         {loading ? (
-          <NewsWireLoader slots={4} />
+          <NewsWireLoader />
         ) : items.length === 0 ? (
           <div
             style={{

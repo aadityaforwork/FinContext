@@ -34,36 +34,6 @@ const SIGNAL_STYLES = {
   SELL:   { bg: "rgba(239,68,68,0.15)", color: "#ef4444", label: "CAUTIOUS" },
 };
 
-function ScoreGauge({ score, size = 120, label }) {
-  const radius = (size - 16) / 2;
-  const circumference = 2 * Math.PI * radius;
-  const offset = circumference - (score / 100) * circumference;
-  const color = score > 70 ? "#10b981" : score > 40 ? "#f59e0b" : "#ef4444";
-  return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "6px" }}>
-      <svg width={size} height={size} style={{ transform: "rotate(-90deg)" }}>
-        <circle cx={size/2} cy={size/2} r={radius} fill="none" stroke="rgba(148,163,184,0.1)" strokeWidth="8" />
-        <circle cx={size/2} cy={size/2} r={radius} fill="none" stroke={color} strokeWidth="8"
-          strokeDasharray={circumference} strokeDashoffset={offset} strokeLinecap="round"
-          style={{ transition: "stroke-dashoffset 1.2s ease-out" }} />
-      </svg>
-      <div style={{ position: "absolute", marginTop: size * 0.3, textAlign: "center" }}>
-        <div style={{ fontSize: size * 0.3, fontWeight: 800, color: "var(--color-text-primary)" }}>{score}</div>
-        <div style={{ fontSize: "10px", color: "var(--color-text-muted)", textTransform: "uppercase", letterSpacing: "1px" }}>/100</div>
-      </div>
-      {label && <span style={{ fontSize: "11px", color: "var(--color-text-muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>{label}</span>}
-    </div>
-  );
-}
-
-function MiniBar({ value, color }) {
-  return (
-    <div style={{ width: "100%", height: "6px", borderRadius: "3px", background: "rgba(148,163,184,0.1)", overflow: "hidden" }}>
-      <div style={{ height: "100%", width: `${value}%`, borderRadius: "3px", background: color, transition: "width 1s ease-out" }} />
-    </div>
-  );
-}
-
 export default function PortfolioView({ onNavigate }) {
   const toast = useToast();
   const { user } = useAuth();
@@ -310,17 +280,7 @@ export default function PortfolioView({ onNavigate }) {
             <div style={{ display: aiTab === "intel" ? "block" : "none" }}>
 
           {!intel && !intelLoading && (
-            <div className="glass-card animate-fade-in" style={{ padding: "28px", marginBottom: "24px", textAlign: "center", background: "linear-gradient(135deg, rgba(99,102,241,0.08), rgba(6,182,212,0.06))", border: "1px solid rgba(99,102,241,0.2)" }}>
-              <span style={{ fontSize: "36px", display: "block", marginBottom: "12px" }}>🧠</span>
-              <h3 style={{ fontSize: "18px", fontWeight: 700, color: "var(--color-text-primary)", marginBottom: "8px" }}>Analyze My Portfolio</h3>
-              <p style={{ fontSize: "13px", color: "var(--color-text-muted)", maxWidth: "500px", margin: "0 auto 20px" }}>
-                Get AI-powered insights: portfolio health score, per-stock signals, risk alerts, and stock recommendations
-              </p>
-              <button onClick={runIntelligence}
-                style={{ padding: "12px 32px", borderRadius: "12px", fontSize: "14px", fontWeight: 700, border: "none", cursor: "pointer", background: "linear-gradient(135deg, var(--color-accent-primary), var(--color-accent-cyan))", color: "white" }}>
-                🚀 Run AI Analysis
-              </button>
-            </div>
+            <AnalysisStandbyCard portfolio={portfolio} onRun={runIntelligence} />
           )}
 
           {intelLoading && (
@@ -334,67 +294,10 @@ export default function PortfolioView({ onNavigate }) {
           )}
 
           {intel && (
-            <div style={{ marginBottom: "24px", display: "flex", flexDirection: "column", gap: "20px" }}>
-              <div className="responsive-grid-intel">
-                <div className="glass-card" style={{ padding: "24px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", position: "relative" }}>
-                  <ScoreGauge score={intel.portfolio_health_score} size={130} label="Portfolio Health" />
-                </div>
-                <div className="glass-card" style={{ padding: "24px", display: "flex", flexDirection: "column", gap: "16px", justifyContent: "center" }}>
-                  <h4 style={{ fontSize: "12px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "var(--color-text-muted)", marginBottom: "4px" }}>Health Breakdown</h4>
-                  {intel.health_breakdown && Object.entries(intel.health_breakdown).map(([key, val]) => (
-                    <div key={key}>
-                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", marginBottom: "4px" }}>
-                        <span style={{ color: "var(--color-text-secondary)", textTransform: "capitalize" }}>{key}</span>
-                        <span style={{ color: "var(--color-text-primary)", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{val}/100</span>
-                      </div>
-                      <MiniBar value={val} color={val > 70 ? "#10b981" : val > 40 ? "#f59e0b" : "#ef4444"} />
-                    </div>
-                  ))}
-                </div>
-                <div className="glass-card" style={{ padding: "24px" }}>
-                  <h4 style={{ fontSize: "12px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "var(--color-accent-red)", marginBottom: "16px" }}>⚠️ Top Risks</h4>
-                  <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                    {intel.top_risks?.map((risk, i) => (
-                      <div key={i} style={{ padding: "10px 12px", background: "rgba(239,68,68,0.06)", borderRadius: "10px", borderLeft: "3px solid var(--color-accent-red)" }}>
-                        <p style={{ fontSize: "13px", fontWeight: 600, color: "var(--color-text-primary)" }}>{risk.title}</p>
-                        <p title={claimSource(risk.description) || ""} style={{ fontSize: "12px", color: "var(--color-text-muted)", marginTop: "3px" }}>{claimText(risk.description)}</p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              {(intel.suggested_directions?.length > 0 || intel.recommendations?.length > 0) && (
-                <div className="glass-card" style={{ padding: "24px" }}>
-                  <h4 style={{ fontSize: "12px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "var(--color-accent-cyan)", marginBottom: "16px" }}>💡 Suggested Directions</h4>
-                  <div className="responsive-grid-3">
-                    {(intel.suggested_directions || intel.recommendations || []).map((rec, i) => {
-                      const focus = rec.focus || rec.ticker || rec.name || "Direction";
-                      const conviction = rec.conviction || "MEDIUM";
-                      const rationale = rec.rationale;
-                      return (
-                        <div key={i} style={{ padding: "16px", background: "rgba(6,182,212,0.05)", border: "1px solid rgba(6,182,212,0.15)", borderRadius: "12px", transition: "all 0.2s" }}
-                          onMouseEnter={(e) => { e.currentTarget.style.borderColor = "rgba(6,182,212,0.4)"; }}
-                          onMouseLeave={(e) => { e.currentTarget.style.borderColor = "rgba(6,182,212,0.15)"; }}>
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px", gap: "8px" }}>
-                            <span style={{ fontSize: "14px", fontWeight: 700, color: "var(--color-text-primary)" }}>{focus}</span>
-                            <span style={{ padding: "3px 8px", borderRadius: "6px", fontSize: "10px", fontWeight: 700, background: conviction === "HIGH" ? "rgba(16,185,129,0.15)" : "rgba(245,158,11,0.15)", color: conviction === "HIGH" ? "#10b981" : "#f59e0b", flexShrink: 0 }}>
-                              {conviction}
-                            </span>
-                          </div>
-                          <p title={claimSource(rationale) || ""} style={{ fontSize: "13px", color: "var(--color-text-secondary)", lineHeight: 1.5 }}>{claimText(rationale)}</p>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              <button onClick={() => { setIntel(null); setIntelSteps([]); }}
-                style={{ alignSelf: "flex-end", padding: "8px 16px", borderRadius: "8px", fontSize: "12px", fontWeight: 500, border: "1px solid var(--border-subtle)", background: "transparent", color: "var(--color-text-muted)", cursor: "pointer" }}>
-                ↻ Re-analyze
-              </button>
-            </div>
+            <AnalysisResultPanel
+              intel={intel}
+              onReanalyze={() => { setIntel(null); setIntelSteps([]); runIntelligence(); }}
+            />
           )}
 
             </div>{/* /intel tab */}
@@ -474,6 +377,1045 @@ export default function PortfolioView({ onNavigate }) {
         </>
       )}
 
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// AnalysisResultPanel — editorial-aesthetic result view for the AI Analysis
+// tab. Replaces the old glass-card grid with emoji headers (🧠 ⚠️ 💡) and
+// gradient backgrounds. Same data, restrained typography:
+//
+//   • Header strip mirrors MissionControlLoader so before/during/after
+//     read as the same instrument changing state
+//   • Big numeric health score on the left + 4 horizontal breakdown bars
+//   • Single-column risk + directions lists, no gradient cards
+//   • One accent color (indigo); semantic green/red used only for scores
+// ---------------------------------------------------------------------------
+function AnalysisResultPanel({ intel, onReanalyze }) {
+  const score = intel?.portfolio_health_score;
+  const breakdown = intel?.health_breakdown || {};
+  const risks = intel?.top_risks || [];
+  const directions = intel?.suggested_directions || intel?.recommendations || [];
+  const theses = intel?.holding_theses || [];
+
+  const scoreColor =
+    score == null
+      ? "var(--color-text-muted)"
+      : score >= 70
+      ? "var(--color-accent-green)"
+      : score >= 40
+      ? "var(--color-accent-amber)"
+      : "var(--color-accent-red)";
+
+  const scoreLabel =
+    score == null ? "—" : score >= 70 ? "STRONG" : score >= 40 ? "BALANCED" : "FRAGILE";
+
+  return (
+    <div
+      style={{
+        marginBottom: "24px",
+        background: "var(--color-bg-secondary)",
+        border: "1px solid var(--border-subtle)",
+        borderRadius: "var(--radius-card)",
+        padding: "22px 24px 26px",
+        fontFamily:
+          "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)",
+      }}
+    >
+      {/* Header strip — matches MissionControl + Standby for visual continuity. */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginBottom: "22px",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <span
+            style={{
+              width: "7px",
+              height: "7px",
+              borderRadius: "50%",
+              background: "var(--color-accent-green)",
+              boxShadow: "0 0 6px rgba(46,189,107,0.55)",
+            }}
+          />
+          <span
+            style={{
+              fontSize: "10.5px",
+              fontWeight: 700,
+              letterSpacing: "0.14em",
+              color: "var(--color-text-secondary)",
+            }}
+          >
+            AI ANALYSIS
+          </span>
+          <span
+            style={{
+              fontSize: "10px",
+              fontWeight: 700,
+              letterSpacing: "0.1em",
+              color: "var(--color-accent-green)",
+            }}
+          >
+            · COMPLETE
+          </span>
+        </div>
+        <button
+          onClick={onReanalyze}
+          style={{
+            padding: "6px 12px",
+            borderRadius: "var(--radius-control)",
+            fontSize: "11px",
+            fontWeight: 600,
+            letterSpacing: "0.06em",
+            border: "1px solid var(--border-subtle)",
+            background: "transparent",
+            color: "var(--color-text-secondary)",
+            cursor: "pointer",
+            fontFamily: "var(--font-inter, 'Inter', system-ui, sans-serif)",
+            transition: "border-color 0.15s, color 0.15s",
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.borderColor = "var(--border-strong)";
+            e.currentTarget.style.color = "var(--color-text-primary)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.borderColor = "var(--border-subtle)";
+            e.currentTarget.style.color = "var(--color-text-secondary)";
+          }}
+        >
+          Re-analyze
+        </button>
+      </div>
+
+      {/* SCORE + BREAKDOWN row. Numbers loudest, single horizontal layout
+          instead of a 3-up glass-card grid. */}
+      <div
+        className="analysis-score-row"
+        style={{
+          display: "grid",
+          gridTemplateColumns: "auto 1fr",
+          gap: "36px",
+          alignItems: "center",
+          paddingBottom: "22px",
+          borderBottom: "1px dashed rgba(255,255,255,0.06)",
+        }}
+      >
+        {/* Score block — no SVG ring; the number IS the visual. */}
+        <div style={{ display: "flex", flexDirection: "column", gap: "4px", minWidth: "130px" }}>
+          <span
+            style={{
+              fontSize: "10px",
+              fontWeight: 700,
+              letterSpacing: "0.14em",
+              color: "var(--color-text-muted)",
+            }}
+          >
+            PORTFOLIO HEALTH
+          </span>
+          <div style={{ display: "flex", alignItems: "baseline", gap: "6px" }}>
+            <span
+              style={{
+                fontFamily:
+                  "var(--font-inter, 'Inter', system-ui, sans-serif)",
+                fontSize: "52px",
+                fontWeight: 700,
+                lineHeight: 1,
+                color: scoreColor,
+                letterSpacing: "-0.04em",
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
+              {score ?? "—"}
+            </span>
+            <span
+              style={{
+                fontSize: "13px",
+                color: "var(--color-text-muted)",
+                fontWeight: 600,
+              }}
+            >
+              /100
+            </span>
+          </div>
+          <span
+            style={{
+              fontSize: "10px",
+              fontWeight: 700,
+              letterSpacing: "0.16em",
+              color: scoreColor,
+              marginTop: "2px",
+            }}
+          >
+            {scoreLabel}
+          </span>
+        </div>
+
+        {/* 4 thin breakdown bars. Each is one row: label, ━━━━━░░░ bar, number. */}
+        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          {["diversification", "quality", "risk", "momentum"].map((key) => {
+            const val = breakdown[key];
+            const num = typeof val === "number" ? val : null;
+            return (
+              <div
+                key={key}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "120px 1fr 48px",
+                  alignItems: "center",
+                  gap: "14px",
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: "10.5px",
+                    fontWeight: 600,
+                    letterSpacing: "0.1em",
+                    color: "var(--color-text-muted)",
+                    textTransform: "uppercase",
+                  }}
+                >
+                  {key}
+                </span>
+                <ThinBar value={num} />
+                <span
+                  style={{
+                    fontSize: "12.5px",
+                    fontWeight: 700,
+                    color: num == null ? "var(--color-text-muted)" : "var(--color-text-primary)",
+                    fontVariantNumeric: "tabular-nums",
+                    textAlign: "right",
+                  }}
+                >
+                  {num ?? "—"}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* RISKS — left-aligned list, no gradient cards, no emoji. */}
+      {risks.length > 0 && (
+        <ResultSection title="Concentration & risks" count={risks.length}>
+          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+            {risks.map((risk, i) => (
+              <div
+                key={i}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "auto 1fr",
+                  gap: "12px",
+                  alignItems: "baseline",
+                }}
+              >
+                <span
+                  style={{
+                    color: "var(--color-accent-red)",
+                    fontWeight: 700,
+                    fontSize: "12px",
+                  }}
+                >
+                  {String(i + 1).padStart(2, "0")}
+                </span>
+                <div
+                  style={{
+                    fontFamily:
+                      "var(--font-inter, 'Inter', system-ui, sans-serif)",
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: "13px",
+                      fontWeight: 700,
+                      color: "var(--color-text-primary)",
+                      marginBottom: "2px",
+                    }}
+                  >
+                    {risk.title}
+                  </div>
+                  <div
+                    title={claimSource(risk.description) || ""}
+                    style={{
+                      fontSize: "12.5px",
+                      color: "var(--color-text-secondary)",
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    {claimText(risk.description)}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </ResultSection>
+      )}
+
+      {/* STRATEGIC DIRECTIONS — same list pattern, conviction tag on the right. */}
+      {directions.length > 0 && (
+        <ResultSection title="Strategic directions" count={directions.length}>
+          <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+            {directions.map((rec, i) => {
+              const focus = rec.focus || rec.ticker || rec.name || "Direction";
+              const conviction = rec.conviction || "MEDIUM";
+              const rationale = rec.rationale;
+              const conColor =
+                conviction === "HIGH"
+                  ? "var(--color-accent-green)"
+                  : "var(--color-accent-amber)";
+              return (
+                <div
+                  key={i}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "auto 1fr auto",
+                    gap: "12px",
+                    alignItems: "baseline",
+                  }}
+                >
+                  <span
+                    style={{
+                      color: "var(--color-accent-primary)",
+                      fontWeight: 700,
+                      fontSize: "12px",
+                    }}
+                  >
+                    {String(i + 1).padStart(2, "0")}
+                  </span>
+                  <div
+                    style={{
+                      fontFamily:
+                        "var(--font-inter, 'Inter', system-ui, sans-serif)",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: "13px",
+                        fontWeight: 700,
+                        color: "var(--color-text-primary)",
+                        marginBottom: "2px",
+                      }}
+                    >
+                      {focus}
+                    </div>
+                    <div
+                      title={claimSource(rationale) || ""}
+                      style={{
+                        fontSize: "12.5px",
+                        color: "var(--color-text-secondary)",
+                        lineHeight: 1.5,
+                      }}
+                    >
+                      {claimText(rationale)}
+                    </div>
+                  </div>
+                  <span
+                    style={{
+                      alignSelf: "center",
+                      padding: "3px 9px",
+                      borderRadius: "var(--radius-pill)",
+                      fontSize: "9.5px",
+                      fontWeight: 700,
+                      letterSpacing: "0.12em",
+                      color: conColor,
+                      border: `1px solid ${conColor}55`,
+                      background: `${conColor}11`,
+                      fontFamily:
+                        "var(--font-mono, ui-monospace, monospace)",
+                    }}
+                  >
+                    {conviction}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </ResultSection>
+      )}
+
+      {/* HOLDING THESES — the meat. One card per top holding, two-column
+          BULL / BEAR layout with WATCH triggers below. This is what turns
+          AI Analysis from a "score report" into a decision aid. */}
+      {theses.length > 0 && (
+        <ResultSection title="Holding theses" count={theses.length}>
+          <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+            {theses.map((t) => (
+              <HoldingThesisCard key={t.ticker} thesis={t} />
+            ))}
+          </div>
+        </ResultSection>
+      )}
+
+      {/* Stack the score block + bars on narrow viewports. */}
+      <style jsx>{`
+        @media (max-width: 640px) {
+          .analysis-score-row {
+            grid-template-columns: 1fr !important;
+            gap: 20px !important;
+          }
+        }
+      `}</style>
+    </div>
+  );
+}
+
+// Thin horizontal bar used in the health breakdown. Single muted track,
+// solid accent fill — no animation gimmick.
+function ThinBar({ value }) {
+  const pct = typeof value === "number" ? Math.max(0, Math.min(100, value)) : 0;
+  const color =
+    value == null
+      ? "var(--color-text-muted)"
+      : value >= 70
+      ? "var(--color-accent-green)"
+      : value >= 40
+      ? "var(--color-accent-amber)"
+      : "var(--color-accent-red)";
+  return (
+    <div
+      style={{
+        height: "4px",
+        borderRadius: "2px",
+        background: "rgba(255,255,255,0.05)",
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          width: `${pct}%`,
+          height: "100%",
+          background: color,
+          transition: "width 0.8s ease-out",
+        }}
+      />
+    </div>
+  );
+}
+
+// Section wrapper used for both Risks and Directions — keeps the dashed
+// divider + ALL-CAPS title-with-count pattern consistent.
+function ResultSection({ title, count, children }) {
+  return (
+    <div
+      style={{
+        paddingTop: "22px",
+        marginTop: "0",
+        borderTop: "1px dashed rgba(255,255,255,0.06)",
+        marginBottom: "0",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "baseline",
+          gap: "8px",
+          marginBottom: "14px",
+        }}
+      >
+        <span
+          style={{
+            fontSize: "10.5px",
+            fontWeight: 700,
+            letterSpacing: "0.14em",
+            textTransform: "uppercase",
+            color: "var(--color-text-muted)",
+          }}
+        >
+          {title}
+        </span>
+        <span
+          style={{
+            fontSize: "10.5px",
+            fontWeight: 700,
+            color: "var(--color-text-muted)",
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          ({count})
+        </span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// HoldingThesisCard — the differentiator. One per top holding. Layout:
+//
+//   ┌────────────────────────────────────────────────────────────┐
+//   │  INFY · Infosys                          BULLISH · 72/100  │
+//   │  weight 14% · P&L +12.4%                                   │
+//   │  ───────────────────────────────────────                   │
+//   │  THESIS  Largest Indian IT services exporter…              │
+//   │                                                            │
+//   │  BULL                          BEAR                        │
+//   │  ▸ ROE 31% + rev growth 13%    ▸ Wage inflation 8%         │
+//   │  ▸ USD/INR tailwind            ▸ BFSI budgets soft         │
+//   │  ▸ AI services up 40% YoY      ▸ PE 22× vs 5y avg 19×      │
+//   │                                                            │
+//   │  WATCH                                                     │
+//   │  ▸ Earnings 14 May; if margin guide < 21% the rerating    │
+//   │    thesis flips.                                           │
+//   └────────────────────────────────────────────────────────────┘
+//
+// No emojis, no gradients, no glass-card. Hairline border, two-column grid
+// for BULL/BEAR on desktop that stacks on mobile.
+// ---------------------------------------------------------------------------
+function HoldingThesisCard({ thesis }) {
+  const sig = thesis?.signal || "NEUTRAL";
+  const conviction = Number(thesis?.conviction ?? 0);
+  const bull = thesis?.bull_case || [];
+  const bear = thesis?.bear_case || [];
+  const watch = thesis?.watch || [];
+
+  const sigColor =
+    sig === "BULLISH"
+      ? "var(--color-accent-green)"
+      : sig === "CAUTIOUS"
+      ? "var(--color-accent-red)"
+      : "var(--color-accent-amber)";
+
+  return (
+    <article
+      className="thesis-card"
+      style={{
+        border: "1px solid var(--border-subtle)",
+        borderRadius: "var(--radius-card)",
+        background: "var(--color-bg-card)",
+        padding: "18px 20px",
+        display: "flex",
+        flexDirection: "column",
+        gap: "16px",
+        fontFamily: "var(--font-inter, 'Inter', system-ui, sans-serif)",
+      }}
+    >
+      {/* Header row — ticker on left, verdict pill + conviction on right. */}
+      <header
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          justifyContent: "space-between",
+          gap: "12px",
+          flexWrap: "wrap",
+        }}
+      >
+        <div>
+          <div
+            style={{
+              fontSize: "15px",
+              fontWeight: 800,
+              color: "var(--color-text-primary)",
+              letterSpacing: "-0.01em",
+              fontFamily:
+                "var(--font-mono, ui-monospace, SFMono-Regular, monospace)",
+            }}
+          >
+            {thesis.ticker}
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <span
+            style={{
+              padding: "3px 9px",
+              borderRadius: "var(--radius-pill)",
+              fontSize: "10px",
+              fontWeight: 700,
+              letterSpacing: "0.14em",
+              color: sigColor,
+              border: `1px solid ${sigColor}55`,
+              background: `${sigColor}11`,
+              fontFamily:
+                "var(--font-mono, ui-monospace, monospace)",
+            }}
+          >
+            {sig}
+          </span>
+          <span
+            title="Conviction — 0-100 scale. Below 60 = bull and bear cases nearly tied."
+            style={{
+              fontSize: "11px",
+              fontWeight: 700,
+              color: "var(--color-text-secondary)",
+              fontVariantNumeric: "tabular-nums",
+              fontFamily: "var(--font-mono, ui-monospace, monospace)",
+              letterSpacing: "0.06em",
+            }}
+          >
+            {conviction}/100
+          </span>
+        </div>
+      </header>
+
+      {/* Thesis line — the universal "what is this for" sentence. */}
+      {thesis.thesis && (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "60px 1fr",
+            alignItems: "baseline",
+            gap: "12px",
+            paddingBottom: "14px",
+            borderBottom: "1px dashed rgba(255,255,255,0.06)",
+          }}
+        >
+          <span
+            style={{
+              fontSize: "9.5px",
+              fontWeight: 700,
+              letterSpacing: "0.16em",
+              color: "var(--color-text-muted)",
+              fontFamily: "var(--font-mono, ui-monospace, monospace)",
+            }}
+          >
+            THESIS
+          </span>
+          <span
+            style={{
+              fontSize: "13px",
+              color: "var(--color-text-primary)",
+              lineHeight: 1.5,
+            }}
+          >
+            {thesis.thesis}
+          </span>
+        </div>
+      )}
+
+      {/* BULL / BEAR — two columns on desktop, stacked on mobile. */}
+      <div
+        className="thesis-bullbear"
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          gap: "22px",
+        }}
+      >
+        <BullBearList kind="bull" items={bull} />
+        <BullBearList kind="bear" items={bear} />
+      </div>
+
+      {/* WATCH — catalyst triggers. Indigo accent, single column. */}
+      {watch.length > 0 && (
+        <div
+          style={{
+            paddingTop: "14px",
+            borderTop: "1px dashed rgba(255,255,255,0.06)",
+            display: "grid",
+            gridTemplateColumns: "60px 1fr",
+            alignItems: "start",
+            gap: "12px",
+          }}
+        >
+          <span
+            style={{
+              fontSize: "9.5px",
+              fontWeight: 700,
+              letterSpacing: "0.16em",
+              color: "var(--color-accent-primary)",
+              fontFamily: "var(--font-mono, ui-monospace, monospace)",
+            }}
+          >
+            WATCH
+          </span>
+          <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "6px" }}>
+            {watch.slice(0, 2).map((w, i) => (
+              <li
+                key={i}
+                title={claimSource(w) || ""}
+                style={{
+                  fontSize: "12.5px",
+                  color: "var(--color-text-secondary)",
+                  lineHeight: 1.55,
+                  paddingLeft: "14px",
+                  position: "relative",
+                }}
+              >
+                <span
+                  style={{
+                    position: "absolute",
+                    left: 0,
+                    top: "0.5em",
+                    width: "6px",
+                    height: "1px",
+                    background: "var(--color-accent-primary)",
+                  }}
+                />
+                {claimText(w)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <style jsx>{`
+        @media (max-width: 640px) {
+          .thesis-bullbear {
+            grid-template-columns: 1fr !important;
+            gap: 16px !important;
+          }
+        }
+      `}</style>
+    </article>
+  );
+}
+
+// Reusable bullet column for the bull / bear halves of a thesis card.
+function BullBearList({ kind, items }) {
+  const color =
+    kind === "bull" ? "var(--color-accent-green)" : "var(--color-accent-red)";
+  const label = kind === "bull" ? "BULL" : "BEAR";
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+      <div
+        style={{
+          fontSize: "9.5px",
+          fontWeight: 700,
+          letterSpacing: "0.16em",
+          color,
+          fontFamily: "var(--font-mono, ui-monospace, monospace)",
+        }}
+      >
+        {label}
+      </div>
+      {items.length === 0 ? (
+        <div
+          style={{
+            fontSize: "12.5px",
+            color: "var(--color-text-muted)",
+            fontStyle: "italic",
+          }}
+        >
+          —
+        </div>
+      ) : (
+        <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "6px" }}>
+          {items.slice(0, 3).map((b, i) => (
+            <li
+              key={i}
+              title={claimSource(b) || ""}
+              style={{
+                fontSize: "12.5px",
+                color: "var(--color-text-secondary)",
+                lineHeight: 1.55,
+                paddingLeft: "14px",
+                position: "relative",
+              }}
+            >
+              <span
+                style={{
+                  position: "absolute",
+                  left: 0,
+                  top: "0.55em",
+                  width: "6px",
+                  height: "1px",
+                  background: color,
+                }}
+              />
+              {claimText(b)}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// AnalysisStandbyCard — empty state for the AI Analysis tab before the user
+// clicks Run. Replaces the old gradient/emoji hero ("🧠 Analyze My Portfolio")
+// with a Mission-Control-style "pre-flight check" panel that:
+//
+//   • shows REAL portfolio stats (holdings, sectors, invested, current value)
+//     so the user sees what the engine will actually chew on
+//   • lists CONCRETE deliverables (health score, N verdicts, N risks, …) so
+//     the value prop isn't "AI insights" handwave
+//   • sets time expectation ("Typical · 30-60s") — same honesty as the loader
+//
+// Matches editorial-terminal design tokens: hairline border, no gradient,
+// solid accent button, mono font for category labels.
+// ---------------------------------------------------------------------------
+function AnalysisStandbyCard({ portfolio, onRun }) {
+  const positions = portfolio?.positions || [];
+  const holdingsCount = positions.length;
+  const sectorsCount = new Set(
+    positions.map((p) => p?.sector).filter((s) => s && s !== "—")
+  ).size;
+  const invested = Number(portfolio?.total_invested || 0);
+  const currentValue = Number(portfolio?.current_value || 0);
+  const pnlPct = Number(portfolio?.total_pnl_percent || 0);
+
+  const fmtINR = (v) => {
+    if (!v) return "—";
+    if (v >= 1e7) return `₹${(v / 1e7).toFixed(2)} Cr`;
+    if (v >= 1e5) return `₹${(v / 1e5).toFixed(2)} L`;
+    return `₹${Math.round(v).toLocaleString("en-IN")}`;
+  };
+
+  const inputs = [
+    { label: "HOLDINGS", value: holdingsCount || "—" },
+    { label: "SECTORS",  value: sectorsCount || "—" },
+    { label: "INVESTED", value: fmtINR(invested) },
+    {
+      label: "CURRENT VALUE",
+      value: fmtINR(currentValue),
+      sub: currentValue
+        ? `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%`
+        : null,
+      subColor:
+        pnlPct >= 0 ? "var(--color-accent-green)" : "var(--color-accent-red)",
+    },
+  ];
+
+  const outputs = [
+    "Portfolio health score + 4-axis breakdown",
+    "Bull / bear / watch thesis on top 6 holdings",
+    "Top 4 concentration & risk flags",
+    "3 strategic rebalance directions",
+  ];
+
+  const ready = holdingsCount > 0;
+
+  return (
+    <div
+      style={{
+        marginBottom: "24px",
+        background: "var(--color-bg-secondary)",
+        border: "1px solid var(--border-subtle)",
+        borderRadius: "var(--radius-card)",
+        padding: "22px 24px",
+        fontFamily:
+          "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)",
+      }}
+    >
+      {/* Header strip — mirrors MissionControlLoader so this feels like the
+          "before" state of the same instrument. */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginBottom: "18px",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <span
+            style={{
+              width: "7px",
+              height: "7px",
+              borderRadius: "50%",
+              background: ready
+                ? "var(--color-accent-primary)"
+                : "var(--color-text-muted)",
+              boxShadow: ready ? "0 0 6px rgba(99,102,241,0.6)" : "none",
+            }}
+          />
+          <span
+            style={{
+              fontSize: "10.5px",
+              fontWeight: 700,
+              letterSpacing: "0.14em",
+              color: "var(--color-text-secondary)",
+            }}
+          >
+            AI ANALYSIS
+          </span>
+          <span
+            style={{
+              fontSize: "10px",
+              fontWeight: 700,
+              letterSpacing: "0.1em",
+              color: ready
+                ? "var(--color-accent-primary)"
+                : "var(--color-text-muted)",
+            }}
+          >
+            · STANDBY
+          </span>
+        </div>
+        <span
+          style={{
+            fontSize: "10px",
+            fontWeight: 700,
+            letterSpacing: "0.12em",
+            color: ready
+              ? "var(--color-accent-green)"
+              : "var(--color-text-muted)",
+          }}
+        >
+          {ready ? "READY" : "NO HOLDINGS"}
+        </span>
+      </div>
+
+      {/* Two-column body — inputs left, outputs right. */}
+      <div
+        className="standby-cols"
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          gap: "32px",
+          paddingBottom: "20px",
+          borderBottom: "1px dashed rgba(255,255,255,0.06)",
+        }}
+      >
+        <div>
+          <div
+            style={{
+              fontSize: "10px",
+              fontWeight: 700,
+              letterSpacing: "0.14em",
+              color: "var(--color-text-muted)",
+              marginBottom: "12px",
+            }}
+          >
+            YOUR PORTFOLIO
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "9px" }}>
+            {inputs.map((row) => (
+              <div
+                key={row.label}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr auto",
+                  alignItems: "baseline",
+                  gap: "10px",
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: "10.5px",
+                    fontWeight: 600,
+                    letterSpacing: "0.1em",
+                    color: "var(--color-text-muted)",
+                  }}
+                >
+                  {row.label}
+                </span>
+                <span
+                  style={{
+                    fontSize: "14px",
+                    fontWeight: 700,
+                    color: "var(--color-text-primary)",
+                    fontVariantNumeric: "tabular-nums",
+                  }}
+                >
+                  {row.value}
+                  {row.sub && (
+                    <span
+                      style={{
+                        marginLeft: "8px",
+                        fontSize: "11px",
+                        fontWeight: 600,
+                        color: row.subColor,
+                      }}
+                    >
+                      {row.sub}
+                    </span>
+                  )}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <div
+            style={{
+              fontSize: "10px",
+              fontWeight: 700,
+              letterSpacing: "0.14em",
+              color: "var(--color-text-muted)",
+              marginBottom: "12px",
+            }}
+          >
+            OUTPUT YOU&apos;LL GET
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "9px" }}>
+            {outputs.map((line) => (
+              <div
+                key={line}
+                style={{
+                  display: "flex",
+                  alignItems: "baseline",
+                  gap: "10px",
+                  fontSize: "12.5px",
+                  color: "var(--color-text-secondary)",
+                  fontFamily:
+                    "var(--font-inter, 'Inter', system-ui, sans-serif)",
+                }}
+              >
+                <span style={{ color: "var(--color-accent-primary)", fontWeight: 700 }}>›</span>
+                <span>{line}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Action row — solid accent button, no emoji, no gradient. */}
+      <div
+        style={{
+          marginTop: "20px",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "16px",
+          flexWrap: "wrap",
+        }}
+      >
+        <button
+          onClick={onRun}
+          disabled={!ready}
+          style={{
+            padding: "11px 22px",
+            borderRadius: "var(--radius-control)",
+            fontSize: "13px",
+            fontWeight: 700,
+            border: ready
+              ? "1px solid var(--color-accent-primary)"
+              : "1px solid var(--border-subtle)",
+            background: ready
+              ? "var(--color-accent-primary)"
+              : "var(--color-bg-card-hover)",
+            color: ready ? "#fff" : "var(--color-text-muted)",
+            cursor: ready ? "pointer" : "not-allowed",
+            letterSpacing: "0.02em",
+            transition: "filter 0.15s",
+            fontFamily:
+              "var(--font-inter, 'Inter', system-ui, sans-serif)",
+          }}
+          onMouseEnter={(e) => {
+            if (ready) e.currentTarget.style.filter = "brightness(1.12)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.filter = "none";
+          }}
+        >
+          Run analysis &nbsp;→
+        </button>
+        <span
+          style={{
+            fontSize: "11px",
+            fontWeight: 600,
+            letterSpacing: "0.08em",
+            color: "var(--color-text-muted)",
+          }}
+        >
+          TYPICAL &nbsp;·&nbsp; 40–80s
+        </span>
+      </div>
+
+      {/* Stack the two columns on narrow viewports so labels don't truncate. */}
+      <style jsx>{`
+        @media (max-width: 560px) {
+          .standby-cols {
+            grid-template-columns: 1fr !important;
+            gap: 22px !important;
+          }
+        }
+      `}</style>
     </div>
   );
 }

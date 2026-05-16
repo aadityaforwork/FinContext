@@ -37,13 +37,20 @@ class EnrichRequest(BaseModel):
 
 
 def _fetch_price_inner(yf_symbol: str) -> tuple[float | None, float | None] | None:
-    """Pure yfinance call inside yf_safe pool. None signals delisted/no-data."""
-    try:
-        info = yf.Ticker(yf_symbol).fast_info
-        price = float(info.last_price) if hasattr(info, "last_price") else None
-        prev = float(info.previous_close) if hasattr(info, "previous_close") else None
-    except Exception:
-        return None
+    """Pure yfinance call inside yf_safe pool. Returns:
+      • (price, change_pct) on success
+      • None when fast_info returned but had no usable data — signals delisted
+        so the outer caller caches as permanent (24h).
+
+    Critically does NOT catch exceptions: if fast_info access raises (rate
+    limit, network), let it propagate so yf_safe.classify_error can pattern-
+    match the message and pick the right cache TTL (transient 60s for rate-
+    limited tickers, NOT permanent 24h — that bug just poisoned every real
+    ticker for an entire day when Yahoo rate-limited once mid-fanout).
+    """
+    info = yf.Ticker(yf_symbol).fast_info
+    price = float(info.last_price) if hasattr(info, "last_price") else None
+    prev = float(info.previous_close) if hasattr(info, "previous_close") else None
     if price is None or prev is None or prev == 0:
         return None
     return (round(price, 2), round((price - prev) / prev * 100, 2))
