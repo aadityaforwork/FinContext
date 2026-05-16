@@ -23,18 +23,22 @@
 import { useEffect, useState } from "react";
 import { API_BASE } from "../lib/api";
 
-const STORAGE_KEY = "fincontext_first_insight_seen_v1";
+// Per-user storage key — see the same fix in OnboardingModal for the
+// reasoning. Without per-user scoping, a second account on the same
+// browser would never see the FirstInsightCard.
+const STORAGE_KEY_BASE = "fincontext_first_insight_seen_v2";
+const keyFor = (userId) => `${STORAGE_KEY_BASE}_${userId || "anon"}`;
 
-export function shouldShowFirstInsight() {
+export function shouldShowFirstInsight(userId) {
   if (typeof window === "undefined") return false;
   try {
-    return !localStorage.getItem(STORAGE_KEY);
+    return !localStorage.getItem(keyFor(userId));
   } catch {
     return true;
   }
 }
 
-export default function FirstInsightCard({ open, tickers = [], onDismiss }) {
+export default function FirstInsightCard({ open, tickers = [], userId, onDismiss }) {
   const [insight, setInsight] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -43,7 +47,7 @@ export default function FirstInsightCard({ open, tickers = [], onDismiss }) {
   // moment doesn't re-show the card forever.
   useEffect(() => {
     if (!open) return;
-    try { localStorage.setItem(STORAGE_KEY, "shown"); } catch {}
+    try { localStorage.setItem(keyFor(userId), "shown"); } catch {}
     setLoading(true);
     setError(false);
     const ctrl = new AbortController();
@@ -61,7 +65,7 @@ export default function FirstInsightCard({ open, tickers = [], onDismiss }) {
         setLoading(false);
       });
     return () => ctrl.abort();
-  }, [open, tickers]);
+  }, [open, tickers, userId]);
 
   // ESC dismisses.
   useEffect(() => {

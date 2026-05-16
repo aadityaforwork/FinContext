@@ -28,7 +28,10 @@
 
 import { useEffect, useLayoutEffect, useState, useCallback } from "react";
 
-const STORAGE_KEY = "fincontext_tour_seen_v1";
+// Per-user storage key — see OnboardingModal for the cross-account bug
+// this fixes.
+const STORAGE_KEY_BASE = "fincontext_tour_seen_v2";
+const keyFor = (userId) => `${STORAGE_KEY_BASE}_${userId || "anon"}`;
 
 // Steps in display order. `target` matches the `data-tour` attribute on
 // the dashboard element we want to highlight; `body` is the callout copy.
@@ -50,20 +53,20 @@ const STEPS = [
   },
 ];
 
-function shouldShow() {
+function shouldShow(userId) {
   if (typeof window === "undefined") return false;
   try {
-    return !localStorage.getItem(STORAGE_KEY);
+    return !localStorage.getItem(keyFor(userId));
   } catch {
     return true;
   }
 }
 
-function markSeen() {
-  try { localStorage.setItem(STORAGE_KEY, "seen"); } catch {}
+function markSeen(userId) {
+  try { localStorage.setItem(keyFor(userId), "seen"); } catch {}
 }
 
-export default function OnboardingTour({ trigger = 0 }) {
+export default function OnboardingTour({ trigger = 0, userId }) {
   const [active, setActive] = useState(false);
   const [stepIdx, setStepIdx] = useState(0);
   // Bounding-rect of the current step's target element so the callout
@@ -71,21 +74,20 @@ export default function OnboardingTour({ trigger = 0 }) {
   const [anchorRect, setAnchorRect] = useState(null);
 
   // Decide whether to mount the tour. Triggered when `trigger` prop bumps
-  // (i.e. immediately after onboarding completes) — also evaluated on
-  // initial mount in case a returning new user lands directly.
+  // (i.e. immediately after the FirstInsightCard dismisses). The dashboard
+  // beneath us has already rendered (we reloaded BEFORE the card opened),
+  // but we still wait 400ms so the user's eye has time to land on the
+  // dashboard before the spotlight pulls focus to one widget.
   useEffect(() => {
-    if (!shouldShow()) return;
-    // Give the dashboard one frame to render its first cards before
-    // we start hunting for [data-tour] anchors. Without this delay the
-    // Context Engine card may not exist yet.
-    const t = setTimeout(() => setActive(true), 600);
+    if (!shouldShow(userId)) return;
+    const t = setTimeout(() => setActive(true), 400);
     return () => clearTimeout(t);
-  }, [trigger]);
+  }, [trigger, userId]);
 
   const dismiss = useCallback(() => {
-    markSeen();
+    markSeen(userId);
     setActive(false);
-  }, []);
+  }, [userId]);
 
   const next = useCallback(() => {
     if (stepIdx + 1 >= STEPS.length) {
@@ -95,11 +97,19 @@ export default function OnboardingTour({ trigger = 0 }) {
     setStepIdx((i) => i + 1);
   }, [stepIdx, dismiss]);
 
-  // Re-measure the current step's anchor whenever step changes, on
-  // resize, and on scroll. Skip the step entirely if the anchor isn't
-  // in the DOM (e.g. user is on a tab where it doesn't render).
+  // Re-measure the current step's anchor whenever step changes, on resize,
+  // on scroll. Two extra concerns from the mobile bug report:
+  //
+  //   1. The anchor element might be below the fold (especially on phones
+  //      where every section is taller). On step change, scroll the anchor
+  //      into view ONCE so the callout has something to pin to.
+  //   2. The mobile sidebar lives at the bottom of the viewport; the tour
+  //      shouldn't pulse on the very last screen pixel under it. The
+  //      callout positioning logic below already prefers above/below the
+  //      anchor with viewport-aware clamping.
   useLayoutEffect(() => {
     if (!active) return;
+    let scrolledThisStep = false;
     const measure = () => {
       const step = STEPS[stepIdx];
       if (!step) { dismiss(); return; }
@@ -114,7 +124,18 @@ export default function OnboardingTour({ trigger = 0 }) {
         }
         return;
       }
-      setAnchorRect(el.getBoundingClientRect());
+      const rect = el.getBoundingClientRect();
+      const vh = window.innerHeight;
+      // If anchor is off-screen (above or below), scroll it gently into
+      // the middle of the viewport — ONCE per step.
+      if (!scrolledThisStep && (rect.top < 60 || rect.bottom > vh - 60)) {
+        scrolledThisStep = true;
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        // Re-measure after the scroll animation roughly settles.
+        setTimeout(measure, 360);
+        return;
+      }
+      setAnchorRect(rect);
     };
     measure();
     window.addEventListener("resize", measure);
@@ -136,18 +157,31 @@ export default function OnboardingTour({ trigger = 0 }) {
   if (!active || !anchorRect) return null;
 
   const step = STEPS[stepIdx];
-  // Position the callout: prefer below the anchor, fall back to above
-  // if there isn't enough viewport room below.
-  const calloutWidth = 320;
   const viewportW = typeof window !== "undefined" ? window.innerWidth : 1200;
   const viewportH = typeof window !== "undefined" ? window.innerHeight : 800;
-  const spaceBelow = viewportH - anchorRect.bottom;
-  const placeBelow = spaceBelow > 220 || anchorRect.top < 200;
-  const top = placeBelow ? anchorRect.bottom + 12 : anchorRect.top - 12;
-  let left = anchorRect.left + anchorRect.width / 2 - calloutWidth / 2;
-  // Keep callout inside viewport gutters.
+  // Mobile bottom navbar is 60px high on phones (see Sidebar.jsx). Reserve
+  // a 76px safe-zone at the bottom of the viewport so the callout never
+  // overlaps the nav — that's a major mobile usability papercut.
+  const bottomReserved = viewportW < 768 ? 76 : 16;
+  // Responsive callout width: shrink to fit phones, cap at 320 on desktop.
+  // 32px total horizontal margin (16px each side).
+  const calloutWidth = Math.min(320, viewportW - 32);
   const margin = 16;
+  const spaceBelow = viewportH - bottomReserved - anchorRect.bottom;
+  // Estimate callout height ~ 200 (3 short paragraphs + buttons). If we
+  // can't fit it below AND can't fit it above, prefer above and let the
+  // scrollIntoView in the measure effect handle anchor placement.
+  const placeBelow = spaceBelow > 220 || anchorRect.top < 220;
+  let top = placeBelow ? anchorRect.bottom + 12 : anchorRect.top - 12;
+  let left = anchorRect.left + anchorRect.width / 2 - calloutWidth / 2;
+  // Clamp horizontally so the callout never escapes the viewport gutters.
   left = Math.max(margin, Math.min(viewportW - calloutWidth - margin, left));
+  // Clamp vertically too — don't run under the mobile bottom navbar.
+  if (placeBelow) {
+    top = Math.min(top, viewportH - bottomReserved - 220);
+  } else {
+    top = Math.max(margin, top);
+  }
 
   return (
     <>

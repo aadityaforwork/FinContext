@@ -17,7 +17,11 @@ import WatchlistDrawer from "./components/WatchlistDrawer";
 import ScreenerDrawer from "./components/ScreenerDrawer";
 import SettingsView from "./components/SettingsView";
 import AccuracyView from "./components/AccuracyView";
-import OnboardingModal, { shouldShowOnboarding } from "./components/OnboardingModal";
+import OnboardingModal, {
+  shouldShowOnboarding,
+  consumePendingFirstInsight,
+  consumePendingTour,
+} from "./components/OnboardingModal";
 import FirstInsightCard from "./components/FirstInsightCard";
 import OnboardingTour from "./components/OnboardingTour";
 import { useAuth } from "./context/AuthContext";
@@ -54,9 +58,23 @@ export default function App() {
   // First-run detection: brand-new users (empty portfolio + empty watchlist,
   // no localStorage flag) get the onboarding modal. Don't block render — let
   // the dashboard load with demo data, then overlay the modal.
+  //
+  // Storage is per-user (see OnboardingModal.shouldShowOnboarding) so a
+  // second account on the same browser still sees onboarding. This was the
+  // "nothing happens on signup" bug.
   useEffect(() => {
     if (!user?.id) return;
     let cancelled = false;
+
+    // Consume the post-wizard sessionStorage flags FIRST. If we just
+    // reloaded out of the wizard, open the FirstInsightCard immediately so
+    // the dashboard underneath is the freshly-loaded one with new data.
+    const pendingTickers = consumePendingFirstInsight();
+    if (pendingTickers && pendingTickers.length > 0) {
+      setFirstInsightTickers(pendingTickers);
+      return;   // skip the empty-portfolio check — they just onboarded
+    }
+
     (async () => {
       try {
         const [{ data: portfolio }, { data: watch }] = await Promise.all([
@@ -68,6 +86,7 @@ export default function App() {
           shouldShowOnboarding({
             hasPortfolio: (portfolio?.length || 0) > 0,
             hasWatchlist: (watch?.length || 0) > 0,
+            userId: user.id,
           })
         ) {
           setShowOnboarding(true);
@@ -220,38 +239,39 @@ export default function App() {
         onNavigate={handleNavigate}
       />
 
-      {/* Act 1 — first-run onboarding wizard */}
+      {/* Act 1 — first-run onboarding wizard.
+          On complete, the wizard writes sessionStorage flags + reloads.
+          We DON'T chain via onComplete here — the next mount picks up the
+          flags via consumePendingFirstInsight(). This eliminates the chop
+          where the FirstInsightCard appeared over a still-empty dashboard. */}
       <OnboardingModal
         open={showOnboarding}
         onClose={() => setShowOnboarding(false)}
         userName={user?.user_metadata?.name || user?.user_metadata?.full_name || ""}
-        onComplete={(tickers) => {
-          // Hand off to Act 2 (the FirstInsightCard) instead of reloading.
-          // The wizard already wrote to Supabase + warmed the cache before
-          // calling this; we just need to chain the next surface.
-          setShowOnboarding(false);
-          setFirstInsightTickers(tickers || []);
-        }}
       />
 
-      {/* Act 2 — single-insight interstitial right after the wizard. */}
+      {/* Act 2 — single-insight interstitial. Fires either right after a
+          fresh reload from the wizard (via sessionStorage handoff above)
+          or via direct setFirstInsightTickers in dev/test. */}
       <FirstInsightCard
         open={firstInsightTickers != null}
         tickers={firstInsightTickers || []}
+        userId={user?.id}
         onDismiss={() => {
           setFirstInsightTickers(null);
-          // Bump tour trigger so OnboardingTour re-evaluates and lights up
-          // the dashboard callouts on the very next render.
-          setTourTrigger((n) => n + 1);
-          // Soft refresh so the dashboard picks up the new watchlist rows
-          // we just inserted. Without this the user lands on the demo
-          // dashboard for 1 frame before the watchlist hook re-runs.
-          setTimeout(() => window.location.reload(), 50);
+          // Tour only fires if the post-wizard sessionStorage flag was set
+          // (i.e. they came in via real onboarding) — not if they hit the
+          // card via a dev URL.
+          if (consumePendingTour()) {
+            setTourTrigger((n) => n + 1);
+          }
         }}
       />
 
-      {/* Act 3 — dashboard tour callouts on first arrival. */}
-      <OnboardingTour trigger={tourTrigger} />
+      {/* Act 3 — dashboard tour callouts. Anchors to [data-tour=...] on
+          the live dashboard. No reload needed — by this point the dashboard
+          has been fully loaded since before the FirstInsightCard opened. */}
+      <OnboardingTour trigger={tourTrigger} userId={user?.id} />
     </div>
   );
 }

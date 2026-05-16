@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "./Toast";
 import { API_BASE } from "../lib/api";
+import { resetOnboarding } from "./OnboardingModal";
 
 // Bot username so we can deep-link to https://t.me/<bot_username>. Set
 // NEXT_PUBLIC_TELEGRAM_BOT_USERNAME in your Vercel/local .env to your bot's
@@ -353,6 +354,48 @@ export default function SettingsView() {
           security. Markets carry risk — please consult a qualified, registered
           adviser before making investment decisions.
         </p>
+      </Section>
+
+      {/* TOUR — replay the dashboard guided tour. Useful if the user
+          dismissed it on first run, or just wants to see it again. */}
+      <Section title="Guided tour">
+        <p style={{ fontSize: "12.5px", color: "var(--color-text-muted)", marginBottom: "12px", lineHeight: 1.55 }}>
+          Replay the first-run dashboard tour — highlights Context Engine, News Feed,
+          and AI Analysis with their actual data.
+        </p>
+        <button
+          type="button"
+          onClick={() => {
+            resetOnboarding(user?.id);
+            toast.success("Tour will replay on the dashboard.");
+            // Send them back to dashboard and refresh so the tour fires.
+            setTimeout(() => {
+              window.location.href = "/?nav=dashboard";
+            }, 600);
+          }}
+          style={{
+            padding: "8px 16px",
+            borderRadius: "var(--radius-control, 8px)",
+            border: "1px solid var(--border-subtle)",
+            background: "transparent",
+            color: "var(--color-text-secondary)",
+            fontSize: "12px",
+            fontWeight: 600,
+            letterSpacing: "0.02em",
+            cursor: "pointer",
+            transition: "border-color 0.15s, color 0.15s",
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.borderColor = "var(--border-strong)";
+            e.currentTarget.style.color = "var(--color-text-primary)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.borderColor = "var(--border-subtle)";
+            e.currentTarget.style.color = "var(--color-text-secondary)";
+          }}
+        >
+          Replay tour →
+        </button>
       </Section>
 
       {/* DANGER ZONE */}

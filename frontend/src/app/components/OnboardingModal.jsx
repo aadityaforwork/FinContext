@@ -25,7 +25,16 @@ import { prewarmIntelligence } from "../lib/prewarm";
  * (Act 2) via `onComplete(tickers)` instead of the old full page reload.
  */
 
-const STORAGE_KEY = "fincontext_onboarding_v1";
+// Storage keys are scoped per-user — two different accounts on the same
+// browser must not share onboarding state, or the second user's first-run
+// will be silently suppressed because the first user already completed it.
+const STORAGE_KEY_BASE = "fincontext_onboarding_v2";
+const keyFor = (userId) => `${STORAGE_KEY_BASE}_${userId || "anon"}`;
+
+// SessionStorage keys used to carry the post-wizard state across the
+// dashboard reload — they're consumed (and removed) on the next page load.
+const SS_PENDING_INSIGHT = "fincontext_pending_insight_tickers";
+const SS_PENDING_TOUR    = "fincontext_pending_tour";
 
 // Pre-curated quick-add chips — covers ~70% of typical Indian retail interest.
 const QUICK_ADD = [
@@ -170,9 +179,9 @@ export default function OnboardingModal({ open, onClose, onComplete, userName })
   };
 
   const handleSkip = useCallback(() => {
-    try { localStorage.setItem(STORAGE_KEY, "skipped"); } catch {}
+    try { localStorage.setItem(keyFor(user?.id), "skipped"); } catch {}
     onClose?.();
-  }, [onClose]);
+  }, [onClose, user?.id]);
 
   const handleContinue = async () => {
     if (!user?.id || selected.length === 0) return;
@@ -187,7 +196,7 @@ export default function OnboardingModal({ open, onClose, onComplete, userName })
 
       if (error) throw error;
 
-      try { localStorage.setItem(STORAGE_KEY, "completed"); } catch {}
+      try { localStorage.setItem(keyFor(user?.id), "completed"); } catch {}
       // Warm the news-feed cache for the new universe before the page reloads
       // so the dashboard paint after reload is sub-second.
       try {
@@ -196,19 +205,28 @@ export default function OnboardingModal({ open, onClose, onComplete, userName })
           watchlistTickers: selected.map((s) => s.ticker),
         });
       } catch { /* best-effort */ }
-      // Hand off to Act 2 — FirstInsightCard interstitial. Falls back to
-      // legacy reload behavior if no onComplete handler is provided.
+
+      // KEY FLOW FIX (was choppy): we used to call onComplete → open the
+      // FirstInsightCard over an empty dashboard → user dismisses → reload
+      // → dashboard re-renders empty for a moment → tour fires. That's the
+      // chop the user reported.
+      //
+      // New flow: stash the post-wizard state in sessionStorage and reload
+      // RIGHT NOW. The next page load picks up the flag, opens the
+      // FirstInsightCard over a freshly-loaded dashboard, then on dismiss
+      // fires the tour. No mid-flow reload, no flicker.
       const pickedTickers = selected.map((s) => s.ticker);
-      if (typeof onComplete === "function") {
-        onComplete(pickedTickers);
-      } else {
-        toast.success(`Tracking ${selected.length} ${selected.length === 1 ? "stock" : "stocks"}`);
-        onClose?.();
-        setTimeout(() => window.location.reload(), 300);
-      }
+      try {
+        sessionStorage.setItem(SS_PENDING_INSIGHT, JSON.stringify(pickedTickers));
+        sessionStorage.setItem(SS_PENDING_TOUR, "1");
+      } catch { /* best-effort */ }
+      // The onComplete prop is still supported (e.g. for tests/storybook).
+      if (typeof onComplete === "function") onComplete(pickedTickers);
+      // Hard reload — destroys this React tree, the next mount reads the
+      // sessionStorage flag and continues the flow.
+      window.location.reload();
     } catch (e) {
       toast.error(e?.message || "Could not save your watchlist.");
-    } finally {
       setSubmitting(false);
     }
   };
@@ -711,13 +729,56 @@ function LivePreviewRow({ ticker, fallbackName, data, onRemove, isLast }) {
   );
 }
 
-/** Helper for callers: should the onboarding modal show on this load? */
-export function shouldShowOnboarding({ hasPortfolio, hasWatchlist }) {
+/** Helper for callers: should the onboarding modal show on this load?
+ *
+ * Storage is scoped by user.id so two accounts on the same browser don't
+ * step on each other — the old `fincontext_onboarding_v1` flag was a
+ * single browser-wide string, which silently suppressed onboarding for
+ * any second user on the same machine. That's why "nothing happened on
+ * signup" — the flag was already set from a prior session.
+ */
+export function shouldShowOnboarding({ hasPortfolio, hasWatchlist, userId }) {
   if (typeof window === "undefined") return false;
   if (hasPortfolio || hasWatchlist) return false;
   try {
-    return !localStorage.getItem(STORAGE_KEY);
+    return !localStorage.getItem(keyFor(userId));
   } catch {
     return true;
   }
+}
+
+/** Used by Settings → "Replay onboarding" to wipe all 3 flags for this user. */
+export function resetOnboarding(userId) {
+  if (typeof window === "undefined") return;
+  try { localStorage.removeItem(keyFor(userId)); } catch {}
+  try { localStorage.removeItem(`fincontext_first_insight_seen_v2_${userId || "anon"}`); } catch {}
+  try { localStorage.removeItem(`fincontext_tour_seen_v2_${userId || "anon"}`); } catch {}
+  try { sessionStorage.removeItem(SS_PENDING_INSIGHT); } catch {}
+  try { sessionStorage.removeItem(SS_PENDING_TOUR); } catch {}
+}
+
+/** Read + consume the post-wizard sessionStorage. Returns the ticker
+ * list the wizard just inserted, or null. */
+export function consumePendingFirstInsight() {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = sessionStorage.getItem(SS_PENDING_INSIGHT);
+    if (!raw) return null;
+    sessionStorage.removeItem(SS_PENDING_INSIGHT);
+    return JSON.parse(raw);
+  } catch { return null; }
+}
+
+/** Read + consume the post-insight tour flag. Returns true if the tour
+ * should fire after the FirstInsightCard dismisses. */
+export function consumePendingTour() {
+  if (typeof window === "undefined") return false;
+  try {
+    const v = sessionStorage.getItem(SS_PENDING_TOUR);
+    if (v) {
+      sessionStorage.removeItem(SS_PENDING_TOUR);
+      return true;
+    }
+  } catch {}
+  return false;
 }
