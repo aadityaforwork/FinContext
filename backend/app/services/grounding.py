@@ -599,14 +599,23 @@ def _fetch_index_change(symbol: str) -> dict | None:
 
 def _fetch_rss_headlines(query: str, hl: str = "en-IN", gl: str = "IN",
                         ceid: str = "IN:en", n: int = 6) -> list[dict]:
-    """Lightweight Google News RSS fetcher with locale params. 15-min cache."""
+    """Lightweight Google News RSS fetcher with locale params. 15-min cache.
+
+    Uses requests.get with a hard timeout — feedparser.parse(url) has no
+    timeout of its own and on a slow Google News response it would hang the
+    whole Context Engine SSE stream.
+    """
     key = f"{query}|{hl}|{gl}|{ceid}"
     if key in _news_query_cache:
         return _news_query_cache[key][:n]
     try:
         url = (f"https://news.google.com/rss/search?q={quote(query)}"
                f"&hl={hl}&gl={gl}&ceid={ceid}")
-        feed = feedparser.parse(url)
+        import requests as _rq
+        r = _rq.get(url, timeout=6.0,
+                    headers={"User-Agent": "FinContext/1.0"})
+        r.raise_for_status()
+        feed = feedparser.parse(r.content)
         out = []
         for entry in feed.entries[:n]:
             parts = entry.title.rsplit(" - ", 1)

@@ -27,12 +27,23 @@ from datetime import datetime, timezone
 from typing import Any
 
 import feedparser
+import requests
 from cachetools import TTLCache
 
 logger = logging.getLogger(__name__)
 
 # 1-hour cache. PIB / RBI publish in bursts; intra-hour refetches are wasteful.
 _policy_cache: TTLCache = TTLCache(maxsize=8, ttl=60 * 60)
+
+# When a feed fails (timeout, 5xx) we still want to bypass it for a while so a
+# downed PIB/RBI server can't stall every Context Engine run. Short TTL — if
+# the upstream recovers in 10 min we pick it back up automatically.
+_policy_neg_cache: TTLCache = TTLCache(maxsize=32, ttl=10 * 60)
+
+# Hard cap on a single feed fetch. PIB/RBI are slow Indian gov servers; on a
+# bad day they hang the TCP connect indefinitely. feedparser.parse() ignores
+# timeouts entirely, so we MUST fetch bytes ourselves and hand them in.
+_FEED_TIMEOUT_S = 6.0
 
 
 # ---------------------------------------------------------------------------
@@ -190,11 +201,25 @@ def _normalize_entry(entry: Any, source: str, scope: str) -> dict | None:
 
 def _fetch_feed(url: str, source: str, scope: str, limit: int) -> list[dict]:
     """Fetch one feed defensively. Returns empty list on any failure — the
-    outer pipeline falls back to whatever items succeeded."""
+    outer pipeline falls back to whatever items succeeded.
+
+    Uses requests with a hard timeout to fetch bytes, then hands them to
+    feedparser. feedparser.parse(url) ignores socket timeouts and on PIB/RBI
+    server hiccups would hang the calling SSE stream indefinitely.
+    """
+    if url in _policy_neg_cache:
+        return []
     try:
-        feed = feedparser.parse(url)
+        r = requests.get(
+            url,
+            timeout=_FEED_TIMEOUT_S,
+            headers={"User-Agent": "FinContext/1.0 (+https://fin-context.vercel.app)"},
+        )
+        r.raise_for_status()
+        feed = feedparser.parse(r.content)
     except Exception as e:
-        logger.warning("policy feed parse failed %s: %s", url, e)
+        logger.warning("policy feed fetch failed %s: %s", url, e)
+        _policy_neg_cache[url] = True
         return []
     out: list[dict] = []
     for entry in (feed.entries or [])[:limit]:

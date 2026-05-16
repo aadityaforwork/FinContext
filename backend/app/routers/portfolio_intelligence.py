@@ -511,8 +511,23 @@ async def _movers_generator(raw_holdings: list[dict]):
         return
 
     try:
-        market_ctx = await asyncio.to_thread(grounding.build_market_context)
-        movers_ctx = await asyncio.to_thread(grounding.build_movers_context, raw_holdings, market_ctx)
+        # Hard ceiling: every blocking dep (yfinance, RSS, RBI/PIB feeds, pgvector)
+        # now has its own timeout, but stacking 41 holdings × 4 calls means we
+        # still want a wall-clock safety net so a partial network brown-out
+        # surfaces as a clean error instead of a frozen browser tab.
+        market_ctx = await asyncio.wait_for(
+            asyncio.to_thread(grounding.build_market_context),
+            timeout=45,
+        )
+        movers_ctx = await asyncio.wait_for(
+            asyncio.to_thread(grounding.build_movers_context, raw_holdings, market_ctx),
+            timeout=60,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("movers context build exceeded ceiling")
+        yield f"data: {json.dumps({'type':'error','message':'Market data is slow right now — please retry.'})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
     except Exception as e:
         logger.exception("movers context build failed")
         yield f"data: {json.dumps({'type':'error','message':f'Context build failed: {e}'})}\n\n"
@@ -802,21 +817,50 @@ async def _movers_generator(raw_holdings: list[dict]):
             ai_client.generate_grounded_json, today_task, today_input, today_schema, 2200
         )
 
-    try:
-        today_data, tomorrow_data = await asyncio.wait_for(
-            asyncio.gather(
-                _run_today(),
-                # 2200 tokens: ≤15 holdings × per_holding watch item + 1-3 macro themes.
-                asyncio.to_thread(ai_client.generate_grounded_json, tomorrow_task, tomorrow_input, tomorrow_schema, 2200),
-            ),
-            # 130s on Render — today + tomorrow run in parallel so the
-            # bottleneck is whichever is slower. With verifier removed and
-            # context tightened the typical wall time is 30-60s but we leave
-            # generous headroom for Render's slower OpenAI round-trips.
-            timeout=130,
+    # Heartbeat: emit progress messages while the LLMs grind so the SSE
+    # connection has bytes flowing (Render's proxy closes idle streams) and
+    # so the UI doesn't look frozen on the last step for a minute straight.
+    llm_task = asyncio.create_task(
+        asyncio.gather(
+            _run_today(),
+            # 2200 tokens: ≤15 holdings × per_holding watch item + 1-3 macro themes.
+            asyncio.to_thread(ai_client.generate_grounded_json, tomorrow_task, tomorrow_input, tomorrow_schema, 2200),
         )
+    )
+    heartbeat_msgs = [
+        "Cross-checking holdings against today's news + technicals...",
+        "Ranking catalysts by conviction (multi-signal ensemble)...",
+        "Still working — large portfolios take a bit longer...",
+        "Almost there — finalizing tomorrow's watch list...",
+    ]
+    hb_idx = 0
+    deadline = asyncio.get_event_loop().time() + 130
+    try:
+        while not llm_task.done():
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                llm_task.cancel()
+                raise asyncio.TimeoutError
+            try:
+                await asyncio.wait_for(asyncio.shield(llm_task), timeout=min(15.0, remaining))
+            except asyncio.TimeoutError:
+                # 15s tick without completion — send a heartbeat step + loop.
+                if hb_idx < len(heartbeat_msgs):
+                    msg = heartbeat_msgs[hb_idx]
+                    hb_idx += 1
+                else:
+                    msg = "Still working..."
+                yield f"data: {json.dumps({'type':'step','message':msg})}\n\n"
+        today_data, tomorrow_data = llm_task.result()
     except asyncio.TimeoutError:
-        yield f"data: {json.dumps({'type':'error','message':'Context Engine timed out.'})}\n\n"
+        if not llm_task.done():
+            llm_task.cancel()
+        yield f"data: {json.dumps({'type':'error','message':'Context Engine timed out — please retry.'})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+    except Exception as e:
+        logger.exception("movers LLM call failed")
+        yield f"data: {json.dumps({'type':'error','message':f'AI generation failed: {e}'})}\n\n"
         yield "data: [DONE]\n\n"
         return
 

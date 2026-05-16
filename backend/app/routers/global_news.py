@@ -97,7 +97,12 @@ def _fetch_news(country_code: str, num_results: int = 8) -> list[dict]:
             f"https://news.google.com/rss/search?q={encoded}"
             f"&hl={cfg['hl']}&gl={cfg['gl']}&ceid={cfg['ceid']}"
         )
-        feed = feedparser.parse(url)
+        # feedparser.parse(url) has no socket timeout — fetch with requests
+        # so a slow Google News response can't hang the request.
+        import requests as _rq
+        r = _rq.get(url, timeout=5.0, headers={"User-Agent": "FinContext/1.0"})
+        r.raise_for_status()
+        feed = feedparser.parse(r.content)
 
         results = []
         for entry in feed.entries[:num_results]:

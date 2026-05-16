@@ -47,8 +47,14 @@ def _fetch_google_news(query: str, num_results: int = 8) -> list[dict]:
     try:
         encoded_query = quote(query)
         url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-IN&gl=IN&ceid=IN:en"
-        
-        feed = feedparser.parse(url)
+
+        # feedparser.parse(url) has no timeout — on a slow Google News response
+        # this would hang the calling thread indefinitely and stall the whole
+        # Context Engine SSE. Fetch bytes with a hard timeout instead.
+        import requests as _rq
+        r = _rq.get(url, timeout=5.0, headers={"User-Agent": "FinContext/1.0"})
+        r.raise_for_status()
+        feed = feedparser.parse(r.content)
         
         results = []
         for entry in feed.entries[:num_results]:
