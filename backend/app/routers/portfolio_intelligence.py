@@ -827,12 +827,13 @@ async def _movers_generator(raw_holdings: list[dict]):
     # Heartbeat: emit progress messages while the LLMs grind so the SSE
     # connection has bytes flowing (Render's proxy closes idle streams) and
     # so the UI doesn't look frozen on the last step for a minute straight.
-    llm_task = asyncio.create_task(
-        asyncio.gather(
-            _run_today(),
-            # 2200 tokens: ≤15 holdings × per_holding watch item + 1-3 macro themes.
-            asyncio.to_thread(ai_client.generate_grounded_json, tomorrow_task, tomorrow_input, tomorrow_schema, 2200),
-        )
+    # asyncio.gather() already returns a Future — wrapping it in create_task()
+    # was a bug (create_task needs a coroutine). The gather Future supports
+    # .done() / .result() / .cancel() / asyncio.shield natively.
+    llm_task = asyncio.gather(
+        _run_today(),
+        # 2200 tokens: ≤15 holdings × per_holding watch item + 1-3 macro themes.
+        asyncio.to_thread(ai_client.generate_grounded_json, tomorrow_task, tomorrow_input, tomorrow_schema, 2200),
     )
     heartbeat_msgs = [
         "Cross-checking holdings against today's news + technicals...",
