@@ -63,13 +63,22 @@ export function AuthProvider({ children }) {
     if (error) throw new Error(error.message);
   }, []);
 
-  // Google login temporarily disabled — kept here for easy re-enable.
+  // Google OAuth via Supabase. The browser client uses PKCE by default; on
+  // return Supabase appends `?code=...` to redirectTo and `detectSessionInUrl`
+  // on this same client exchanges it for a session — onAuthStateChange then
+  // fires SIGNED_IN and AuthProvider sets the user, redirecting via the
+  // login/signup useEffect guards.
   const googleLogin = useCallback(async () => {
-    // await supabase.auth.signInWithOAuth({
-    //   provider: "google",
-    //   options: { redirectTo: window.location.origin },
-    // });
-    throw new Error("Google sign-in is currently disabled.");
+    const redirectTo =
+      typeof window !== "undefined" ? `${window.location.origin}/` : undefined;
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo,
+        queryParams: { access_type: "offline", prompt: "consent" },
+      },
+    });
+    if (error) throw new Error(error.message);
   }, []);
 
   // Expose a display name from user metadata
@@ -87,7 +96,7 @@ export function AuthProvider({ children }) {
     resetPassword,
     updatePassword,
     // providers stub kept for compat with login/signup pages
-    providers: { password: true, google: false },
+    providers: { password: true, google: true },
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -7,13 +7,13 @@ import { useAuth } from "../context/AuthContext";
 import AuthCard, {
   authInputStyle,
   authButtonStyle,
-  // authGoogleButtonStyle,
-  // GoogleIcon,
+  authGoogleButtonStyle,
+  GoogleIcon,
 } from "../components/AuthCard";
 
 function LoginForm() {
-  // Google login temporarily disabled — re-add `googleLogin` from useAuth() to restore.
-  const { user, loading, login } = useAuth();
+  const { user, loading, login, googleLogin } = useAuth();
+  const [googleSubmitting, setGoogleSubmitting] = useState(false);
   const router = useRouter();
   const search = useSearchParams();
 
@@ -73,13 +73,27 @@ function LoginForm() {
         </button>
       </form>
 
-      {/* Google login temporarily disabled
       <Divider label="or" />
-      <button type="button" onClick={googleLogin} style={authGoogleButtonStyle} aria-label="Continue with Google">
+      <button
+        type="button"
+        onClick={async () => {
+          setError("");
+          setGoogleSubmitting(true);
+          try {
+            await googleLogin();
+            // signInWithOAuth navigates the browser away — nothing to do here.
+          } catch (err) {
+            setError(err.message || "Google sign-in failed");
+            setGoogleSubmitting(false);
+          }
+        }}
+        disabled={googleSubmitting}
+        style={{ ...authGoogleButtonStyle, opacity: googleSubmitting ? 0.6 : 1 }}
+        aria-label="Continue with Google"
+      >
         <GoogleIcon />
-        <span>Continue with Google</span>
+        <span>{googleSubmitting ? "Redirecting…" : "Continue with Google"}</span>
       </button>
-      */}
 
       <p style={{ textAlign: "center", marginTop: "20px", fontSize: "13px", color: "var(--color-text-secondary)" }}>
         Don&apos;t have an account?{" "}

@@ -7,13 +7,13 @@ import { useAuth } from "../context/AuthContext";
 import AuthCard, {
   authInputStyle,
   authButtonStyle,
-  // authGoogleButtonStyle,
-  // GoogleIcon,
+  authGoogleButtonStyle,
+  GoogleIcon,
 } from "../components/AuthCard";
 
 export default function SignupPage() {
-  // Google login temporarily disabled — re-add `googleLogin` from useAuth() to restore.
-  const { user, loading, signup } = useAuth();
+  const { user, loading, signup, googleLogin } = useAuth();
+  const [googleSubmitting, setGoogleSubmitting] = useState(false);
   const router = useRouter();
 
   const [name, setName] = useState("");
@@ -85,17 +85,31 @@ export default function SignupPage() {
         </button>
       </form>
 
-      {/* Google login temporarily disabled
       <div style={{ display: "flex", alignItems: "center", gap: "12px", margin: "18px 0" }}>
         <div style={{ flex: 1, height: "1px", background: "var(--border-subtle)" }} />
         <span style={{ fontSize: "11px", color: "var(--color-text-muted)", textTransform: "uppercase" }}>or</span>
         <div style={{ flex: 1, height: "1px", background: "var(--border-subtle)" }} />
       </div>
-      <button type="button" onClick={googleLogin} style={authGoogleButtonStyle} aria-label="Continue with Google">
+      <button
+        type="button"
+        onClick={async () => {
+          setError("");
+          setInfo("");
+          setGoogleSubmitting(true);
+          try {
+            await googleLogin();
+          } catch (err) {
+            setError(err.message || "Google sign-in failed");
+            setGoogleSubmitting(false);
+          }
+        }}
+        disabled={googleSubmitting}
+        style={{ ...authGoogleButtonStyle, opacity: googleSubmitting ? 0.6 : 1 }}
+        aria-label="Continue with Google"
+      >
         <GoogleIcon />
-        <span>Continue with Google</span>
+        <span>{googleSubmitting ? "Redirecting…" : "Continue with Google"}</span>
       </button>
-      */}
 
       <p style={{ textAlign: "center", marginTop: "20px", fontSize: "13px", color: "var(--color-text-secondary)" }}>
         Already have an account?{" "}
