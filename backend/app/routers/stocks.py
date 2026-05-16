@@ -26,6 +26,7 @@ from app.nse_universe import (
 )
 from app.services.data_ingestion import retrieve_context
 from app.services.llm_engine import generate_analysis
+from app.services import yf_safe
 
 import asyncio
 import yfinance as yf
@@ -37,58 +38,107 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/stocks", tags=["stocks"])
 
 # Cache for browse/search prices (10 min TTL — list views don't need tick-level freshness)
-_browse_cache = TTLCache(maxsize=2000, ttl=600)
-_quote_executor = ThreadPoolExecutor(max_workers=24)
+_browse_cache: TTLCache = TTLCache(maxsize=1000, ttl=600)
+_browse_neg_perm: TTLCache = TTLCache(maxsize=500, ttl=yf_safe.NEG_TTL_PERMANENT_S)
+_browse_neg_transient: TTLCache = TTLCache(maxsize=300, ttl=yf_safe.NEG_TTL_TRANSIENT_S)
+_history_neg_perm: TTLCache = TTLCache(maxsize=200, ttl=yf_safe.NEG_TTL_PERMANENT_S)
+_history_neg_transient: TTLCache = TTLCache(maxsize=100, ttl=yf_safe.NEG_TTL_TRANSIENT_S)
+_quote_executor = ThreadPoolExecutor(max_workers=16)
 
 
-def _get_quote(ticker: str) -> tuple[float, float]:
-    """Get (price, change_pct) for any NSE universe ticker."""
-    cache_key = f"browse_{ticker}"
-    if cache_key in _browse_cache:
-        return _browse_cache[cache_key]
-
-    yf_symbol = resolve_yf_symbol(ticker)
-    if not yf_symbol:
-        return (0.0, 0.0)
-
+def _quote_inner(yf_symbol: str) -> tuple[float, float] | None:
     try:
         stock = yf.Ticker(yf_symbol)
         info = stock.fast_info
         price = float(info.last_price) if hasattr(info, 'last_price') else 0.0
         prev = float(info.previous_close) if hasattr(info, 'previous_close') else price
-        change = ((price - prev) / prev * 100) if prev else 0.0
-        result = (round(price, 2), round(change, 2))
-        _browse_cache[cache_key] = result
-        return result
-    except Exception as e:
-        logger.warning(f"Quote fetch failed for {ticker}: {e}")
+    except Exception:
+        return None
+    if not price:
+        return None
+    change = ((price - prev) / prev * 100) if prev else 0.0
+    return (round(price, 2), round(change, 2))
+
+
+def _get_quote(ticker: str) -> tuple[float, float]:
+    """Get (price, change_pct) for any NSE universe ticker.
+
+    Hardened with yf_safe — 5s wall timeout, 24h cache for delisted symbols.
+    Returns (0.0, 0.0) on failure so callers don't need to None-check.
+    """
+    cache_key = f"browse_{ticker}"
+    if cache_key in _browse_cache:
+        return _browse_cache[cache_key]
+    if cache_key in _browse_neg_perm or cache_key in _browse_neg_transient:
         return (0.0, 0.0)
+
+    yf_symbol = resolve_yf_symbol(ticker)
+    if not yf_symbol:
+        _browse_neg_perm[cache_key] = True
+        return (0.0, 0.0)
+
+    result, ok = yf_safe.run_with_timeout(_quote_inner, yf_symbol, timeout_s=5.0)
+    if not ok:
+        exc = result if isinstance(result, Exception) else None
+        kind = yf_safe.classify_error(exc, None if exc is None else "__sentinel__")
+        if kind == "permanent":
+            _browse_neg_perm[cache_key] = True
+        else:
+            _browse_neg_transient[cache_key] = True
+        if exc is not None:
+            logger.warning(f"Quote fetch failed for {ticker}: {exc}")
+        return (0.0, 0.0)
+    if result is None:
+        _browse_neg_perm[cache_key] = True
+        return (0.0, 0.0)
+    _browse_cache[cache_key] = result
+    return result
+
+
+def _history_inner(yf_symbol: str, period: str) -> list[dict] | None:
+    stock = yf.Ticker(yf_symbol)
+    hist = stock.history(period=period)
+    if hist is None or hist.empty:
+        return None
+    data = []
+    for idx, row in hist.iterrows():
+        data.append({
+            "date": idx.strftime("%Y-%m-%d"),
+            "open": round(float(row["Open"]), 2),
+            "high": round(float(row["High"]), 2),
+            "low": round(float(row["Low"]), 2),
+            "close": round(float(row["Close"]), 2),
+            "volume": int(row["Volume"]),
+        })
+    return data
 
 
 def _get_history(ticker: str, period: str = "1mo") -> list[dict]:
     """Get historical OHLCV for any NSE universe ticker."""
+    cache_key = f"hist_{ticker}_{period}"
+    if cache_key in _history_neg_perm or cache_key in _history_neg_transient:
+        return []
     yf_symbol = resolve_yf_symbol(ticker)
     if not yf_symbol:
+        _history_neg_perm[cache_key] = True
         return []
-    try:
-        stock = yf.Ticker(yf_symbol)
-        hist = stock.history(period=period)
-        if hist.empty:
-            return []
-        data = []
-        for idx, row in hist.iterrows():
-            data.append({
-                "date": idx.strftime("%Y-%m-%d"),
-                "open": round(float(row["Open"]), 2),
-                "high": round(float(row["High"]), 2),
-                "low": round(float(row["Low"]), 2),
-                "close": round(float(row["Close"]), 2),
-                "volume": int(row["Volume"]),
-            })
-        return data
-    except Exception as e:
-        logger.warning(f"History fetch failed for {ticker}: {e}")
+
+    # 8s budget — history is heavier than fast_info.
+    result, ok = yf_safe.run_with_timeout(_history_inner, yf_symbol, period, timeout_s=8.0)
+    if not ok:
+        exc = result if isinstance(result, Exception) else None
+        kind = yf_safe.classify_error(exc, None if exc is None else "__sentinel__")
+        if kind == "permanent":
+            _history_neg_perm[cache_key] = True
+        else:
+            _history_neg_transient[cache_key] = True
+        if exc is not None:
+            logger.warning(f"History fetch failed for {ticker}: {exc}")
         return []
+    if result is None:
+        _history_neg_perm[cache_key] = True
+        return []
+    return result
 
 
 # -----------------------------------------------------------------------

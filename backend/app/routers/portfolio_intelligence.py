@@ -7,6 +7,7 @@ High-stakes output goes through a verifier pass.
 """
 
 import asyncio
+import gc
 import json
 import logging
 import os
@@ -278,6 +279,12 @@ async def _intelligence_generator(raw_holdings: list[dict]):
     })
     yield f"data: {json.dumps(result)}\n\n"
     yield "data: [DONE]\n\n"
+
+    # Same memory-hygiene pattern as the /movers path: drop request-scoped
+    # context dicts before the next SSE call lands. Helps Render Starter
+    # (512 MB) survive back-to-back analyses without tripping OOM.
+    del context, data, verified
+    gc.collect()
 
 
 @router.post("/portfolio")
@@ -953,6 +960,14 @@ async def _movers_generator(raw_holdings: list[dict]):
     })
     yield f"data: {json.dumps(result)}\n\n"
     yield "data: [DONE]\n\n"
+
+    # Free the large per-request DataFrames + LLM-response dicts before the
+    # next SSE request lands. Render Starter is 512 MB; without this, idle
+    # pandas memory from yfinance.history() calls accumulates across requests
+    # and trips the OOM killer after a few back-to-back runs.
+    del movers_ctx, market_ctx, today_data, tomorrow_data, today_input, tomorrow_input
+    del mover_holdings, tomorrow_holdings, holdings_detail, holdings_today
+    gc.collect()
 
 
 @router.post("/movers")

@@ -28,7 +28,7 @@ import yfinance as yf
 from cachetools import TTLCache
 
 from app.nse_universe import TICKER_TO_META, TICKER_TO_YF, NSE_STOCKS, resolve_yf_symbol
-from app.services import data_ingestion, market_flows, policy_feeds, technicals, vector_store
+from app.services import data_ingestion, market_flows, policy_feeds, technicals, vector_store, yf_safe
 
 logger = logging.getLogger(__name__)
 
@@ -37,13 +37,19 @@ _context_cache: TTLCache = TTLCache(maxsize=200, ttl=600)   # 10 min
 # negative cache (failed pulls) holds only 60 s so a transient 429 doesn't lock
 # the ticker out for half an hour after Yahoo recovers.
 _snapshot_cache: TTLCache = TTLCache(maxsize=300, ttl=1800)  # 30 min positive
-_snapshot_neg_cache: TTLCache = TTLCache(maxsize=300, ttl=60)  # 60 s negative
+# Two-tier negative cache: permanent (delisted/unknown) hold 24h so we don't
+# keep paying the yfinance retry tax on the same dead symbol all day.
+# Transient (rate-limit, network blip) hold 60s so we recover quickly.
+_snapshot_neg_perm:     TTLCache = TTLCache(maxsize=500, ttl=yf_safe.NEG_TTL_PERMANENT_S)
+_snapshot_neg_transient: TTLCache = TTLCache(maxsize=300, ttl=yf_safe.NEG_TTL_TRANSIENT_S)
 _index_cache: TTLCache = TTLCache(maxsize=50, ttl=900)        # 15 min positive
-_index_neg_cache: TTLCache = TTLCache(maxsize=50, ttl=60)     # 60 s negative
+_index_neg_perm:     TTLCache = TTLCache(maxsize=50, ttl=yf_safe.NEG_TTL_PERMANENT_S)
+_index_neg_transient: TTLCache = TTLCache(maxsize=50, ttl=yf_safe.NEG_TTL_TRANSIENT_S)
 _market_ctx_cache: TTLCache = TTLCache(maxsize=4, ttl=900)    # 15 min full market ctx
 _news_query_cache: TTLCache = TTLCache(maxsize=40, ttl=1800)  # 30 min per news query
 _earnings_cache: TTLCache = TTLCache(maxsize=300, ttl=43200)   # 12 h positive
-_earnings_neg_cache: TTLCache = TTLCache(maxsize=300, ttl=300) # 5 min negative
+_earnings_neg_perm:     TTLCache = TTLCache(maxsize=500, ttl=yf_safe.NEG_TTL_PERMANENT_S)
+_earnings_neg_transient: TTLCache = TTLCache(maxsize=300, ttl=yf_safe.NEG_TTL_TRANSIENT_S)
 
 # Thread pool for parallelizing per-holding enrichment in build_movers_context.
 # 12 workers covers the typical 30-50 holding portfolio while staying gentle on
@@ -56,40 +62,71 @@ _movers_pool = _Pool(max_workers=12, thread_name_prefix="movers-enrich")
 # fundamentals) and the light build_movers_context flow (which only needs
 # price + change) don't fight over the same TTL.
 _fast_snap_cache: TTLCache = TTLCache(maxsize=400, ttl=900)   # 15 min positive
-_fast_snap_neg:   TTLCache = TTLCache(maxsize=400, ttl=60)    # 60 s negative
+_fast_snap_neg_perm:     TTLCache = TTLCache(maxsize=500, ttl=yf_safe.NEG_TTL_PERMANENT_S)
+_fast_snap_neg_transient: TTLCache = TTLCache(maxsize=400, ttl=yf_safe.NEG_TTL_TRANSIENT_S)
+
+
+def _fast_snapshot_inner(yf_symbol: str) -> dict | None:
+    """Pure yfinance call; runs in the yf_safe thread pool so the outer
+    caller can enforce a wall-clock timeout. Returns None on no-data so
+    callers can classify it as a permanent (delisted/unknown) failure
+    rather than a transient one — yfinance's own delisted exceptions
+    don't always include matchable text in their .message."""
+    try:
+        fast = yf.Ticker(yf_symbol).fast_info
+        price = float(fast.last_price) if hasattr(fast, "last_price") else None
+        prev = float(fast.previous_close) if hasattr(fast, "previous_close") else None
+    except Exception:
+        # Property-access exception → symbol almost certainly delisted/unknown.
+        return None
+    if price is None or prev is None or prev == 0:
+        return None
+    return {
+        "current_price": round(price, 2),
+        "change_percent": round((price - prev) / prev * 100, 2),
+    }
 
 
 def _fetch_fast_snapshot(ticker: str) -> dict:
     """fast_info-only snapshot — returns {current_price, change_percent}.
     Used by build_movers_context which doesn't need the full PE/ROE bundle.
     ~5-10× faster than _fetch_snapshot because it skips the slow .info JSON.
+
+    Hardened: wrapped in yf_safe.run_with_timeout so a hanging Yahoo response
+    or a delisted-symbol retry storm can't stall the calling worker thread
+    for more than TIMEOUT_S (~4s). Permanent failures (delisted, unknown)
+    cache for 24h so the same dead symbol doesn't keep paying the cost.
     Returns {} on failure; caller falls back to buy_price.
     """
     if ticker in _fast_snap_cache:
         return _fast_snap_cache[ticker]
-    if ticker in _fast_snap_neg:
+    if ticker in _fast_snap_neg_perm or ticker in _fast_snap_neg_transient:
         return {}
     yf_symbol = resolve_yf_symbol(ticker)
     if not yf_symbol:
-        _fast_snap_neg[ticker] = True
+        _fast_snap_neg_perm[ticker] = True
         return {}
-    try:
-        fast = yf.Ticker(yf_symbol).fast_info
-        price = float(fast.last_price) if hasattr(fast, "last_price") else None
-        prev = float(fast.previous_close) if hasattr(fast, "previous_close") else None
-        if price is None or prev is None or prev == 0:
-            _fast_snap_neg[ticker] = True
-            return {}
-        out = {
-            "current_price": round(price, 2),
-            "change_percent": round((price - prev) / prev * 100, 2),
-        }
-        _fast_snap_cache[ticker] = out
-        return out
-    except Exception as e:
-        logger.debug("fast snapshot failed for %s: %s", ticker, e)
-        _fast_snap_neg[ticker] = True
+
+    # 6s budget: fast_info is normally <1s, but cold yfinance calls + the
+    # occasional rate-limit retry can push it to 3-4s on healthy symbols.
+    result, ok = yf_safe.run_with_timeout(_fast_snapshot_inner, yf_symbol, timeout_s=6.0)
+    if not ok:
+        # Timeout OR exception. result is None (timeout) or the exception.
+        exc = result if isinstance(result, Exception) else None
+        kind = yf_safe.classify_error(exc, None if exc is None else "__sentinel__")
+        if kind == "permanent":
+            _fast_snap_neg_perm[ticker] = True
+        else:
+            _fast_snap_neg_transient[ticker] = True
+        if exc is not None:
+            logger.debug("fast snapshot failed for %s: %s", ticker, exc)
         return {}
+    if result is None:
+        # Yahoo returned but with no data — almost always delisted/unknown.
+        _fast_snap_neg_perm[ticker] = True
+        return {}
+    _fast_snap_cache[ticker] = result
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -179,58 +216,77 @@ def _fetch_snapshot(ticker: str) -> dict:
     """
     if ticker in _snapshot_cache:
         return _snapshot_cache[ticker]
-    if ticker in _snapshot_neg_cache:
+    if ticker in _snapshot_neg_perm or ticker in _snapshot_neg_transient:
         return {}
     yf_symbol = resolve_yf_symbol(ticker)
     if not yf_symbol:
-        _snapshot_neg_cache[ticker] = True
+        _snapshot_neg_perm[ticker] = True
         return {}
 
-    last_err: Exception | None = None
-    for attempt in (0, 1):
+    def _inner() -> dict | None:
+        t = yf.Ticker(yf_symbol)
+        info = t.info or {}
         try:
-            t = yf.Ticker(yf_symbol)
-            info = t.info or {}
-            try:
-                fast = t.fast_info
-                price = float(fast.last_price) if hasattr(fast, "last_price") else 0.0
-                prev = float(fast.previous_close) if hasattr(fast, "previous_close") else 0.0
-                mcap = float(fast.market_cap) if hasattr(fast, "market_cap") and fast.market_cap else None
-            except Exception:
-                price, prev, mcap = 0.0, 0.0, None
+            fast = t.fast_info
+            price = float(fast.last_price) if hasattr(fast, "last_price") else 0.0
+            prev = float(fast.previous_close) if hasattr(fast, "previous_close") else 0.0
+            mcap = float(fast.market_cap) if hasattr(fast, "market_cap") and fast.market_cap else None
+        except Exception:
+            price, prev, mcap = 0.0, 0.0, None
+        # Yahoo returns partial metadata for delisted symbols (name, exchange)
+        # via quote_summary even when price data is gone. Don't trust `info`
+        # being non-empty as a signal. The real test: did we get a price AND
+        # at least one fundamental field? Otherwise treat as delisted.
+        has_real_data = (
+            price > 0 or info.get("trailingPE") is not None
+            or info.get("returnOnEquity") is not None
+            or info.get("marketCap") is not None
+        )
+        if not has_real_data:
+            return None
+        return {
+            "current_price": _safe(price),
+            "previous_close": _safe(prev),
+            "change_percent": _safe(((price - prev) / prev * 100) if prev else 0),
+            "market_cap": mcap,
+            "pe_ratio": _safe(info.get("trailingPE")),
+            "forward_pe": _safe(info.get("forwardPE")),
+            "pb_ratio": _safe(info.get("priceToBook")),
+            "ev_ebitda": _safe(info.get("enterpriseToEbitda")),
+            "roe_pct": _pct(info.get("returnOnEquity")),
+            "roa_pct": _pct(info.get("returnOnAssets")),
+            "profit_margin_pct": _pct(info.get("profitMargins")),
+            "operating_margin_pct": _pct(info.get("operatingMargins")),
+            "revenue_growth_pct": _pct(info.get("revenueGrowth")),
+            "earnings_growth_pct": _pct(info.get("earningsGrowth")),
+            "debt_to_equity": _safe(info.get("debtToEquity")),
+            "current_ratio": _safe(info.get("currentRatio")),
+            "dividend_yield_pct": _pct(info.get("dividendYield")),
+            "52w_high": _safe(info.get("fiftyTwoWeekHigh")),
+            "52w_low": _safe(info.get("fiftyTwoWeekLow")),
+            "business_summary": (info.get("longBusinessSummary") or "")[:400],
+        }
 
-            snap = {
-                "current_price": _safe(price),
-                "previous_close": _safe(prev),
-                "change_percent": _safe(((price - prev) / prev * 100) if prev else 0),
-                "market_cap": mcap,
-                "pe_ratio": _safe(info.get("trailingPE")),
-                "forward_pe": _safe(info.get("forwardPE")),
-                "pb_ratio": _safe(info.get("priceToBook")),
-                "ev_ebitda": _safe(info.get("enterpriseToEbitda")),
-                "roe_pct": _pct(info.get("returnOnEquity")),
-                "roa_pct": _pct(info.get("returnOnAssets")),
-                "profit_margin_pct": _pct(info.get("profitMargins")),
-                "operating_margin_pct": _pct(info.get("operatingMargins")),
-                "revenue_growth_pct": _pct(info.get("revenueGrowth")),
-                "earnings_growth_pct": _pct(info.get("earningsGrowth")),
-                "debt_to_equity": _safe(info.get("debtToEquity")),
-                "current_ratio": _safe(info.get("currentRatio")),
-                "dividend_yield_pct": _pct(info.get("dividendYield")),
-                "52w_high": _safe(info.get("fiftyTwoWeekHigh")),
-                "52w_low": _safe(info.get("fiftyTwoWeekLow")),
-                "business_summary": (info.get("longBusinessSummary") or "")[:400],
-            }
-            _snapshot_cache[ticker] = snap
-            return snap
-        except Exception as e:
-            last_err = e
-            if attempt == 0:
-                _time.sleep(0.4)
-
-    logger.warning("snapshot failed for %s after retry: %s", ticker, last_err)
-    _snapshot_neg_cache[ticker] = True
-    return {}
+    # 8s budget — heavier path (t.info hits Yahoo quote_summary which is slow
+    # even for healthy symbols). Single attempt: the wall timeout + 24h
+    # delisted cache + 30 min positive cache cover the cases that the old
+    # 2-attempt + 0.4s sleep retry loop was protecting against.
+    result, ok = yf_safe.run_with_timeout(_inner, timeout_s=8.0)
+    if not ok:
+        exc = result if isinstance(result, Exception) else None
+        kind = yf_safe.classify_error(exc, None if exc is None else "__sentinel__")
+        if kind == "permanent":
+            _snapshot_neg_perm[ticker] = True
+        else:
+            _snapshot_neg_transient[ticker] = True
+        if exc is not None:
+            logger.warning("snapshot failed for %s: %s", ticker, exc)
+        return {}
+    if result is None:
+        _snapshot_neg_perm[ticker] = True
+        return {}
+    _snapshot_cache[ticker] = result
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -557,44 +613,46 @@ def _fetch_index_change(symbol: str) -> dict | None:
     """
     if symbol in _index_cache:
         return _index_cache[symbol]
-    if symbol in _index_neg_cache:
+    if symbol in _index_neg_perm or symbol in _index_neg_transient:
         return None
 
-    last_err: Exception | None = None
-    for attempt in (0, 1):
+    def _inner() -> dict | None:
+        tk = yf.Ticker(symbol)
+        price = prev = 0.0
         try:
-            tk = yf.Ticker(symbol)
-            price = prev = 0.0
-            try:
-                fi = tk.fast_info
-                price = float(getattr(fi, "last_price", 0) or 0)
-                prev = float(getattr(fi, "previous_close", 0) or 0)
-            except Exception:
-                pass
-            if not price:
-                hist = tk.history(period="5d")
-                if not hist.empty:
-                    price = float(hist["Close"].iloc[-1])
-                    prev = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else price
-            if not price:
-                # Cache as miss but only briefly; treat as failure for retry purposes.
-                last_err = RuntimeError("no price data returned")
-                if attempt == 0:
-                    _time.sleep(0.4)
-                    continue
-                break
-            change_pct = round(((price - prev) / prev * 100) if prev else 0.0, 2)
-            out = {"symbol": symbol, "value": round(price, 2), "change_percent": change_pct}
-            _index_cache[symbol] = out
-            return out
-        except Exception as e:
-            last_err = e
-            if attempt == 0:
-                _time.sleep(0.4)
+            fi = tk.fast_info
+            price = float(getattr(fi, "last_price", 0) or 0)
+            prev = float(getattr(fi, "previous_close", 0) or 0)
+        except Exception:
+            pass
+        if not price:
+            hist = tk.history(period="5d")
+            if hist is not None and not hist.empty:
+                price = float(hist["Close"].iloc[-1])
+                prev = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else price
+        if not price:
+            return None
+        change_pct = round(((price - prev) / prev * 100) if prev else 0.0, 2)
+        return {"symbol": symbol, "value": round(price, 2), "change_percent": change_pct}
 
-    logger.warning("index fetch failed for %s after retry: %s", symbol, last_err)
-    _index_neg_cache[symbol] = True
-    return None
+    # 5s budget — index symbols are usually fast (fast_info is enough), but
+    # the history fallback can be slow if Yahoo is rate-limiting.
+    result, ok = yf_safe.run_with_timeout(_inner, timeout_s=5.0)
+    if not ok:
+        exc = result if isinstance(result, Exception) else None
+        kind = yf_safe.classify_error(exc, None if exc is None else "__sentinel__")
+        if kind == "permanent":
+            _index_neg_perm[symbol] = True
+        else:
+            _index_neg_transient[symbol] = True
+        if exc is not None:
+            logger.warning("index fetch failed for %s: %s", symbol, exc)
+        return None
+    if result is None:
+        _index_neg_perm[symbol] = True
+        return None
+    _index_cache[symbol] = result
+    return result
 
 
 def _fetch_rss_headlines(query: str, hl: str = "en-IN", gl: str = "IN",
@@ -732,18 +790,19 @@ def _upcoming_earnings(ticker: str, max_days: int = 14) -> dict | None:
     """
     if ticker in _earnings_cache:
         return _earnings_cache[ticker]
-    if ticker in _earnings_neg_cache:
+    if ticker in _earnings_neg_perm or ticker in _earnings_neg_transient:
         return None
     yf_symbol = resolve_yf_symbol(ticker)
     if not yf_symbol:
-        _earnings_neg_cache[ticker] = True
+        _earnings_neg_perm[ticker] = True
         return None
 
     from datetime import datetime, timezone, date
 
     today = datetime.now(timezone.utc).date()
-    ed: date | None = None
-    try:
+
+    def _inner() -> date | None:
+        ed: date | None = None
         tk = yf.Ticker(yf_symbol)
         cal = getattr(tk, "calendar", None)
         if isinstance(cal, dict):
@@ -758,7 +817,6 @@ def _upcoming_earnings(ticker: str, max_days: int = 14) -> dict | None:
             try:
                 df = tk.get_earnings_dates(limit=4)
                 if df is not None and not df.empty:
-                    # index is a DatetimeIndex of upcoming + recent earnings
                     for ts in df.index:
                         d = ts.date() if hasattr(ts, "date") else None
                         if d and d >= today:
@@ -766,17 +824,30 @@ def _upcoming_earnings(ticker: str, max_days: int = 14) -> dict | None:
                             break
             except Exception:
                 pass
-    except Exception as e:
-        logger.debug("earnings lookup failed for %s: %s", ticker, e)
-        _earnings_neg_cache[ticker] = True
-        return None
+        return ed
 
+    # 5s budget — earnings_dates endpoint can be slow for some tickers.
+    result, ok = yf_safe.run_with_timeout(_inner, timeout_s=5.0)
+    if not ok:
+        exc = result if isinstance(result, Exception) else None
+        kind = yf_safe.classify_error(exc, None if exc is None else "__sentinel__")
+        if kind == "permanent":
+            _earnings_neg_perm[ticker] = True
+        else:
+            _earnings_neg_transient[ticker] = True
+        if exc is not None:
+            logger.debug("earnings lookup failed for %s: %s", ticker, exc)
+        return None
+    ed = result
     if ed is None:
-        _earnings_neg_cache[ticker] = True
+        # No exception, just no scheduled earnings — treat as "permanent for
+        # today" (12h positive miss equivalent). The 24h cache is fine because
+        # earnings dates don't pop in mid-day.
+        _earnings_neg_perm[ticker] = True
         return None
     delta = (ed - today).days
     if delta < 0 or delta > max_days:
-        _earnings_neg_cache[ticker] = True
+        _earnings_neg_perm[ticker] = True
         return None
     out = {"date": ed.isoformat(), "days_ahead": delta}
     _earnings_cache[ticker] = out

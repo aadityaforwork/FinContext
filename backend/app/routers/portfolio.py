@@ -13,11 +13,17 @@ from pydantic import BaseModel
 from cachetools import TTLCache
 import yfinance as yf
 from app.nse_universe import TICKER_TO_YF, TICKER_TO_META, resolve_yf_symbol
+from app.services import yf_safe
 
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
 
-_price_cache = TTLCache(maxsize=500, ttl=180)
-_price_executor = ThreadPoolExecutor(max_workers=16)
+# Positive cache 3 min; negative caches split between permanent (delisted —
+# 24h so we don't re-pay yfinance retry tax) and transient (network hiccup,
+# 60s so we recover promptly).
+_price_cache: TTLCache = TTLCache(maxsize=300, ttl=180)
+_price_neg_perm: TTLCache = TTLCache(maxsize=500, ttl=yf_safe.NEG_TTL_PERMANENT_S)
+_price_neg_transient: TTLCache = TTLCache(maxsize=300, ttl=yf_safe.NEG_TTL_TRANSIENT_S)
+_price_executor = ThreadPoolExecutor(max_workers=12)
 
 
 class PositionIn(BaseModel):
@@ -30,30 +36,48 @@ class EnrichRequest(BaseModel):
     positions: list[PositionIn]
 
 
-def _get_live_price(ticker: str) -> tuple[float | None, float | None]:
-    """Returns (price, change_percent). None values mean we couldn't get live data —
-    UI distinguishes "no data" (renders as "—") from a real zero.
-    """
-    if ticker in _price_cache:
-        return _price_cache[ticker]
-    # Resolver falls back to `{TICKER}.NS` for tickers outside our curated
-    # universe — covers the long tail of NSE stocks that real users hold.
-    yf_symbol = resolve_yf_symbol(ticker)
-    if not yf_symbol:
-        _price_cache[ticker] = (None, None)
-        return (None, None)
+def _fetch_price_inner(yf_symbol: str) -> tuple[float | None, float | None] | None:
+    """Pure yfinance call inside yf_safe pool. None signals delisted/no-data."""
     try:
         info = yf.Ticker(yf_symbol).fast_info
         price = float(info.last_price) if hasattr(info, "last_price") else None
         prev = float(info.previous_close) if hasattr(info, "previous_close") else None
-        if price is None or prev is None or prev == 0:
-            return (None, None)
-        change_pct = (price - prev) / prev * 100
-        result = (round(price, 2), round(change_pct, 2))
-        _price_cache[ticker] = result
-        return result
     except Exception:
+        return None
+    if price is None or prev is None or prev == 0:
+        return None
+    return (round(price, 2), round((price - prev) / prev * 100, 2))
+
+
+def _get_live_price(ticker: str) -> tuple[float | None, float | None]:
+    """Returns (price, change_percent). None values mean we couldn't get live data —
+    UI distinguishes "no data" (renders as "—") from a real zero.
+
+    Hardened with yf_safe — 5s wall timeout, 24h cache for delisted symbols.
+    """
+    if ticker in _price_cache:
+        return _price_cache[ticker]
+    if ticker in _price_neg_perm or ticker in _price_neg_transient:
         return (None, None)
+    yf_symbol = resolve_yf_symbol(ticker)
+    if not yf_symbol:
+        _price_neg_perm[ticker] = True
+        return (None, None)
+
+    result, ok = yf_safe.run_with_timeout(_fetch_price_inner, yf_symbol, timeout_s=5.0)
+    if not ok:
+        exc = result if isinstance(result, Exception) else None
+        kind = yf_safe.classify_error(exc, None if exc is None else "__sentinel__")
+        if kind == "permanent":
+            _price_neg_perm[ticker] = True
+        else:
+            _price_neg_transient[ticker] = True
+        return (None, None)
+    if result is None:
+        _price_neg_perm[ticker] = True
+        return (None, None)
+    _price_cache[ticker] = result
+    return result
 
 
 @router.post("/enrich")
