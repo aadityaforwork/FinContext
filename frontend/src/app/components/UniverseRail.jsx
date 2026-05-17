@@ -197,6 +197,7 @@ export default function UniverseRail({
 
   return (
     <aside
+      data-tour="universe-rail"
       className="dash-universe-rail"
       style={{
         background: "var(--color-bg-card)",

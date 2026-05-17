@@ -104,6 +104,16 @@ export default function App() {
     const nav = params.get("nav");
     if (nav) setActiveNav(nav);
 
+    // ?tour=1 in the URL means Settings → Replay tour just navigated us
+    // here. Bump trigger so the (otherwise-dormant) tour fires once.
+    if (params.get("tour") === "1") {
+      setTourTrigger((n) => n + 1);
+      // Clean the URL so a manual refresh doesn't re-trigger.
+      const cleaned = new URL(window.location.href);
+      cleaned.searchParams.delete("tour");
+      window.history.replaceState({}, "", cleaned.toString());
+    }
+
     const error = params.get("error");
     if (error) setTimeout(() => toast.error(decodeURIComponent(error.replace(/_/g, " "))), 500);
 

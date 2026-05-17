@@ -143,6 +143,7 @@ export default function PortfolioTodayStrip({ onNavigate }) {
 
   return (
     <div
+      data-tour="portfolio-today"
       className="dash-strip dash-portfolio-strip"
       style={{
         padding: "14px 20px",

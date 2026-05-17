@@ -33,25 +33,42 @@ import { useEffect, useLayoutEffect, useState, useCallback } from "react";
 const STORAGE_KEY_BASE = "fincontext_tour_seen_v2";
 const keyFor = (userId) => `${STORAGE_KEY_BASE}_${userId || "anon"}`;
 
-// Steps in display order. `target` matches the `data-tour` attribute on
-// the dashboard element we want to highlight; `body` is the callout copy.
+// Steps in display order. Each step has a list of `targets` matched
+// against [data-tour] attributes — the FIRST one that exists in the DOM
+// wins. That matters because a freshly-onboarded user only has a
+// watchlist (no portfolio) → PortfolioTodayStrip returns null → we fall
+// back to UniverseRail. A user who already has a portfolio sees the
+// stronger anchor. Either way they always get 3 steps, not 2.
+//
+// The old single-`target` design caused "step 1 never shows, jumps to
+// step 2" — the target (`context-engine`) lived on a screen the user
+// wasn't on, so auto-skip swallowed step 1 silently.
 const STEPS = [
   {
-    target: "context-engine",
-    title: "Context Engine",
-    body: "Why your stocks moved today — and what to watch tomorrow. Run this every morning before market open.",
+    targets: ["portfolio-today", "universe-rail"],
+    title: "Your picks, live",
+    body: "Every stock you added is tracked here in real time — P&L if you set buy prices, day change otherwise.",
   },
   {
-    target: "news-feed",
-    title: "News Impact Feed",
-    body: "Every headline tagged with your stake. We tell you which of YOUR holdings each story touches and in which direction.",
+    targets: ["news-feed"],
+    title: "News tagged with your stake",
+    body: "Every headline shows which of YOUR picks it touches and in which direction. The personalization no other Indian app does.",
   },
   {
-    target: "ai-analysis-cta",
-    title: "AI Analysis",
-    body: "Click Run AI Analysis for bull/bear/watch thesis on your top holdings — the decision aid no other Indian retail app has.",
+    targets: ["ai-analysis-cta", "universe-rail"],
+    title: "Run AI Analysis when ready",
+    body: "Click Run AI Analysis on the strip above for bull / bear / watch thesis on your top holdings. Powered by your portfolio's actual data.",
   },
 ];
+
+/** Find the first data-tour anchor that exists for this step's targets. */
+function resolveAnchor(step) {
+  for (const t of step.targets || []) {
+    const el = document.querySelector(`[data-tour="${t}"]`);
+    if (el) return el;
+  }
+  return null;
+}
 
 function shouldShow(userId) {
   if (typeof window === "undefined") return false;
@@ -73,14 +90,24 @@ export default function OnboardingTour({ trigger = 0, userId }) {
   // can position itself near (but not over) the actual feature.
   const [anchorRect, setAnchorRect] = useState(null);
 
-  // Decide whether to mount the tour. Triggered when `trigger` prop bumps
-  // (i.e. immediately after the FirstInsightCard dismisses). The dashboard
-  // beneath us has already rendered (we reloaded BEFORE the card opened),
-  // but we still wait 400ms so the user's eye has time to land on the
-  // dashboard before the spotlight pulls focus to one widget.
+  // The tour fires ONLY when `trigger` bumps to a non-zero value. Previously
+  // it also fired on plain mount whenever shouldShow() was true — which is
+  // ALWAYS true for a brand-new user, so the tour started while the wizard
+  // modal was still open (overlapping the spotlight ring with the modal
+  // backdrop). This was the "tour appears over the wizard" bug in the
+  // screenshot.
+  //
+  // Now: page.js bumps trigger when (a) FirstInsightCard dismisses, or
+  // (b) URL has ?tour=1 (Settings → Replay tour). On plain page load with
+  // no trigger, the tour stays dormant.
+  //
+  // Delay is 800ms (was 400) — gives the dashboard a generous render
+  // window so anchor elements like UniverseRail are mounted by the time
+  // measure() runs querySelector.
   useEffect(() => {
+    if (trigger === 0) return;
     if (!shouldShow(userId)) return;
-    const t = setTimeout(() => setActive(true), 400);
+    const t = setTimeout(() => setActive(true), 800);
     return () => clearTimeout(t);
   }, [trigger, userId]);
 
@@ -113,10 +140,11 @@ export default function OnboardingTour({ trigger = 0, userId }) {
     const measure = () => {
       const step = STEPS[stepIdx];
       if (!step) { dismiss(); return; }
-      const el = document.querySelector(`[data-tour="${step.target}"]`);
+      const el = resolveAnchor(step);
       if (!el) {
-        // Auto-skip steps whose anchor isn't visible — don't block the
-        // tour just because the user navigated away from the dashboard.
+        // Tried every fallback target for this step and none are in the
+        // DOM. Skip rather than block — but with the new fallbacks this
+        // should be extremely rare (universe-rail is always rendered).
         if (stepIdx + 1 < STEPS.length) {
           setStepIdx((i) => i + 1);
         } else {
@@ -159,28 +187,50 @@ export default function OnboardingTour({ trigger = 0, userId }) {
   const step = STEPS[stepIdx];
   const viewportW = typeof window !== "undefined" ? window.innerWidth : 1200;
   const viewportH = typeof window !== "undefined" ? window.innerHeight : 800;
-  // Mobile bottom navbar is 60px high on phones (see Sidebar.jsx). Reserve
-  // a 76px safe-zone at the bottom of the viewport so the callout never
-  // overlaps the nav — that's a major mobile usability papercut.
-  const bottomReserved = viewportW < 768 ? 76 : 16;
-  // Responsive callout width: shrink to fit phones, cap at 320 on desktop.
-  // 32px total horizontal margin (16px each side).
-  const calloutWidth = Math.min(320, viewportW - 32);
+  const isMobile = viewportW < 768;
+
+  // MOBILE: position via `bottom` + `left` + `right` directly. That bypasses
+  // every mobile-browser-chrome edge case (address bar resizing the visible
+  // viewport, soft keyboard pushing things up, viewportH lying about visible
+  // area). No `top`, no `translateY` arithmetic — just "stick to the bottom,
+  // span the width, leave room for the bottom nav."
+  //
+  // DESKTOP: anchor-relative positioning so the callout feels tightly
+  // connected to what it's pointing at.
   const margin = 16;
-  const spaceBelow = viewportH - bottomReserved - anchorRect.bottom;
-  // Estimate callout height ~ 200 (3 short paragraphs + buttons). If we
-  // can't fit it below AND can't fit it above, prefer above and let the
-  // scrollIntoView in the measure effect handle anchor placement.
-  const placeBelow = spaceBelow > 220 || anchorRect.top < 220;
-  let top = placeBelow ? anchorRect.bottom + 12 : anchorRect.top - 12;
-  let left = anchorRect.left + anchorRect.width / 2 - calloutWidth / 2;
-  // Clamp horizontally so the callout never escapes the viewport gutters.
-  left = Math.max(margin, Math.min(viewportW - calloutWidth - margin, left));
-  // Clamp vertically too — don't run under the mobile bottom navbar.
-  if (placeBelow) {
-    top = Math.min(top, viewportH - bottomReserved - 220);
+  let calloutStyle;
+  if (isMobile) {
+    // Mobile bottom navbar is 60px (Sidebar.jsx) + 16 of breathing room = 76.
+    calloutStyle = {
+      position: "fixed",
+      bottom: 76,
+      left: margin,
+      right: margin,
+      // `maxHeight + overflow` so a long step body can scroll inside the
+      // callout rather than escape the viewport. Keeps the action row
+      // (Next button) reachable even with the smallest screens.
+      maxHeight: Math.min(360, viewportH - 76 - 32),
+      overflowY: "auto",
+    };
   } else {
-    top = Math.max(margin, top);
+    const calloutWidth = 320;
+    const spaceBelow = viewportH - 16 - anchorRect.bottom;
+    const placeBelow = spaceBelow > 220 || anchorRect.top < 220;
+    let calloutTop = placeBelow ? anchorRect.bottom + 12 : anchorRect.top - 12;
+    let calloutLeft = anchorRect.left + anchorRect.width / 2 - calloutWidth / 2;
+    calloutLeft = Math.max(margin, Math.min(viewportW - calloutWidth - margin, calloutLeft));
+    if (placeBelow) {
+      calloutTop = Math.min(calloutTop, viewportH - 16 - 220);
+    } else {
+      calloutTop = Math.max(margin, calloutTop);
+    }
+    calloutStyle = {
+      position: "fixed",
+      top: calloutTop,
+      left: calloutLeft,
+      width: calloutWidth,
+      transform: placeBelow ? "translateY(0)" : "translateY(-100%)",
+    };
   }
 
   return (
@@ -212,10 +262,7 @@ export default function OnboardingTour({ trigger = 0, userId }) {
         role="dialog"
         aria-modal="false"
         style={{
-          position: "fixed",
-          top,
-          left,
-          width: calloutWidth,
+          ...calloutStyle,
           background: "var(--color-bg-card)",
           border: "1px solid var(--border-strong)",
           borderRadius: "var(--radius-card, 12px)",
@@ -224,7 +271,6 @@ export default function OnboardingTour({ trigger = 0, userId }) {
           zIndex: 1201,
           fontFamily: "var(--font-inter, 'Inter', system-ui, sans-serif)",
           animation: "tour-rise 0.28s cubic-bezier(0.16, 1, 0.3, 1) both",
-          transform: placeBelow ? "translateY(0)" : "translateY(-100%)",
         }}
       >
         {/* Step indicator */}

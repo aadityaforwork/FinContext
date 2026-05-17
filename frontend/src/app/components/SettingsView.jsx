@@ -368,10 +368,11 @@ export default function SettingsView() {
           onClick={() => {
             resetOnboarding(user?.id);
             toast.success("Tour will replay on the dashboard.");
-            // Send them back to dashboard and refresh so the tour fires.
+            // Send to dashboard with ?tour=1 — page.js consumes the param,
+            // bumps trigger, then strips it from the URL.
             setTimeout(() => {
-              window.location.href = "/?nav=dashboard";
-            }, 600);
+              window.location.href = "/?nav=dashboard&tour=1";
+            }, 500);
           }}
           style={{
             padding: "8px 16px",
