@@ -213,7 +213,7 @@ function NewsRow({ item, onTickerClick, onOpen, holdingsToday }) {
                   color: "var(--color-accent-secondary)",
                   border: "1px solid rgba(99,102,241,0.20)",
                   fontSize: "10px",
-                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                  fontFamily: "var(--font-mono)",
                   fontWeight: 700,
                   cursor: "pointer",
                   letterSpacing: "0.02em",
@@ -272,7 +272,7 @@ function NewsRow({ item, onTickerClick, onOpen, holdingsToday }) {
               color: "var(--color-text-muted)",
               lineHeight: 1.35,
               margin: "6px 0 0 0",
-              fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+              fontFamily: "var(--font-mono)",
               letterSpacing: "0.01em",
             }}
           >
@@ -762,7 +762,7 @@ function RelatedNewsRow({ item, onClick }) {
             padding: "1px 6px", borderRadius: "4px",
             background: "rgba(99,102,241,0.10)", color: "var(--color-accent-secondary)",
             fontSize: "10px", fontWeight: 700,
-            fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+            fontFamily: "var(--font-mono)",
           }}>{t}</span>
         ))}
       </div>
@@ -816,7 +816,7 @@ function TickerTechCard({ ticker, tech, onClick }) {
       <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
         <span style={{
           fontSize: "13px", fontWeight: 800, color: "var(--color-text-primary)",
-          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+          fontFamily: "var(--font-mono)",
         }}>
           {ticker}
         </span>

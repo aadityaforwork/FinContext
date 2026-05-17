@@ -269,7 +269,7 @@ export default function OnboardingTour({ trigger = 0, userId }) {
           padding: "18px 20px 16px",
           boxShadow: "var(--shadow-pop)",
           zIndex: 1201,
-          fontFamily: "var(--font-inter, 'Inter', system-ui, sans-serif)",
+          fontFamily: "var(--font-sans)",
           animation: "tour-rise 0.28s cubic-bezier(0.16, 1, 0.3, 1) both",
         }}
       >
@@ -288,7 +288,7 @@ export default function OnboardingTour({ trigger = 0, userId }) {
               fontWeight: 700,
               letterSpacing: "0.18em",
               color: "var(--color-accent-primary)",
-              fontFamily: "var(--font-mono, ui-monospace, monospace)",
+              fontFamily: "var(--font-mono)",
             }}
           >
             STEP {stepIdx + 1} / {STEPS.length}
@@ -305,7 +305,7 @@ export default function OnboardingTour({ trigger = 0, userId }) {
               background: "transparent",
               color: "var(--color-text-muted)",
               cursor: "pointer",
-              fontFamily: "var(--font-mono, ui-monospace, monospace)",
+              fontFamily: "var(--font-mono)",
             }}
           >
             SKIP TOUR

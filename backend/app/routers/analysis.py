@@ -19,7 +19,7 @@ from app.nse_universe import TICKER_TO_META
 from app.agents import base as agents_base
 from app.agents.crews import narrative as narrative_crew
 from app.core.compliance import with_disclaimer
-from app.services import ai_client, grounding
+from app.services import ai_client, grounding, technicals
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,10 @@ class DDAgentRequest(BaseModel):
 
 class DeepDiveRequest(BaseModel):
     ticker: str
+    # "long_term" (default) → existing moat / bull / bear / valuation brief.
+    # "swing"               → 1-3 month horizon: setup, momentum, key levels,
+    #                         near-term catalysts. Different prompt + schema.
+    horizon: str = "long_term"
 
 
 # ---------------------------------------------------------------------------
@@ -476,9 +480,229 @@ async def deep_dive_generator(ticker: str):
     yield "data: [DONE]\n\n"
 
 
+# ---------------------------------------------------------------------------
+# 5. Swing-trade brief — 1-3 month horizon
+# ---------------------------------------------------------------------------
+# Different lens entirely from the long-term deep-dive:
+#   - Moat / DCF / years-of-growth are noise at this horizon.
+#   - What matters: current technical phase, momentum strength, where the key
+#     support/resistance levels sit, what catalyst could move it in 4-12 weeks.
+#
+# Compliance note: this is the closest we get to "trading content" and the
+# fence is strict — we communicate STANCE and KEY LEVELS but never entry
+# prices, stops, or position sizes. Education, not advice. The disclaimer
+# wrapper enforces this at the response envelope.
+# ---------------------------------------------------------------------------
+def _derive_key_levels(snap: dict, tech: dict | None) -> dict | None:
+    """Compute concrete support/resistance levels from snapshot + technicals.
+    Returns None if we don't have enough data. Deterministic — no LLM.
+
+    Levels:
+      immediate_support:    20-day low (short-term floor from recent action)
+      key_support:          52-week low (worst-case floor)
+      immediate_resistance: 20-day high
+      key_resistance:       52-week high
+    """
+    if not snap or not snap.get("current_price"):
+        return None
+    cp = snap["current_price"]
+    hi_52 = snap.get("52w_high")
+    lo_52 = snap.get("52w_low")
+    # Reconstruct 20d high/low from technicals if available (pct distance from close).
+    imm_hi = imm_lo = None
+    if tech:
+        pfh = tech.get("pct_from_20d_high")  # negative number if below high
+        pfl = tech.get("pct_from_20d_low")   # positive number if above low
+        if pfh is not None:
+            imm_hi = round(cp / (1 + pfh / 100), 2)
+        if pfl is not None:
+            imm_lo = round(cp / (1 + pfl / 100), 2)
+    return {
+        "current_price": cp,
+        "immediate_support": imm_lo,
+        "immediate_resistance": imm_hi,
+        "key_support": lo_52,
+        "key_resistance": hi_52,
+        # Distance summary the UI uses for the level chart:
+        "distance_to_imm_support_pct":    round((cp - imm_lo) / cp * 100, 2) if imm_lo else None,
+        "distance_to_imm_resistance_pct": round((imm_hi - cp) / cp * 100, 2) if imm_hi else None,
+        "distance_to_key_support_pct":    round((cp - lo_52) / cp * 100, 2) if lo_52 else None,
+        "distance_to_key_resistance_pct": round((hi_52 - cp) / cp * 100, 2) if hi_52 else None,
+    }
+
+
+async def swing_dive_generator(ticker: str):
+    meta = TICKER_TO_META.get(ticker, {"name": ticker, "sector": "General"})
+
+    for msg in [
+        f"Swing read on {meta['name']} ({ticker})...",
+        "Pulling intraday + 3-month price history...",
+        "Computing RSI, momentum, volume profile...",
+        "Mapping support and resistance levels...",
+        "Cross-checking news catalysts for next 4-12 weeks...",
+        "Drafting setup brief...",
+    ]:
+        yield f"data: {json.dumps({'type': 'step', 'message': msg})}\n\n"
+        await asyncio.sleep(0.25)
+
+    if not ai_client.is_available():
+        yield f"data: {json.dumps({'type':'step','message':'ERROR: AI client not configured.'})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
+    try:
+        context = await asyncio.to_thread(grounding.build_stock_context, ticker)
+    except Exception as e:
+        yield f"data: {json.dumps({'type':'error','message':f'Context build failed: {e}'})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
+    # Augment context with technicals — same payload the per-holding card uses.
+    tech = await asyncio.to_thread(technicals.compute_signals, ticker)
+    if tech:
+        context["technicals"] = tech
+    snap = context.get("snapshot") or {}
+    levels = _derive_key_levels(snap, tech)
+    if levels:
+        context["key_levels"] = levels
+
+    task = (
+        f"Produce a SWING-TRADE BRIEF for {meta['name']} ({ticker}) on a 1 to 3 "
+        f"month horizon. Different lens than a long-term investment brief — "
+        f"moat / DCF / 5-year growth do NOT matter here. What matters is the "
+        f"current technical phase, momentum strength, key levels, and whether "
+        f"a catalyst is likely in the next 4-12 weeks.\n\n"
+        f"GROUNDING RULES (HARD):\n"
+        f"• Every momentum claim must cite CONTEXT.technicals (RSI, vol, SMA, "
+        f"momentum_5d_pct / 20d_pct).\n"
+        f"• Every level must reference CONTEXT.key_levels or CONTEXT.snapshot.\n"
+        f"• Catalyst items must cite specific CONTEXT.news[i] items or be omitted.\n"
+        f"• If a field cannot be derived from CONTEXT, return null + add to data_gaps.\n\n"
+        f"BANNED:\n"
+        f"• Entry prices, stop losses, position sizing, target prices — these "
+        f"are advice-tier. We communicate STANCE and KEY LEVELS only.\n"
+        f"• Action verbs: buy / sell / enter / exit / book.\n"
+        f"• Vague filler: 'strong momentum', 'looks good', 'breakout candidate' "
+        f"without specific numbers.\n\n"
+        f"STYLE:\n"
+        f"• Every sentence has a specific number from CONTEXT.\n"
+        f"• Bull/bear cases are SHORT-TERM (4-12 weeks), not long-term.\n"
+        f"• what_to_watch are observable triggers like 'RSI cross above 60' or "
+        f"'volume above 1.5x avg on a green day' — not vague monitoring.\n"
+        f"• one_liner frames the current SETUP, e.g. 'Tight consolidation above "
+        f"the 50-DMA, awaiting a volume confirmation.'\n\n"
+        f"COMPLIANCE (HARD): We are unregistered (not a SEBI RA). stance must "
+        f"be BULLISH/NEUTRAL/CAUTIOUS — assessment, not trade advice."
+    )
+    schema = """{
+  "one_liner": str,                       // 1-sentence setup framing (max 22 words)
+  "setup": {
+    "stance": "BULLISH" | "NEUTRAL" | "CAUTIOUS",
+    "phase": "TRENDING_UP" | "CONSOLIDATING" | "TRENDING_DOWN" | "REVERSAL_UP" | "REVERSAL_DOWN",
+    "phase_basis": { "text": str, "source": str }
+  },
+  "momentum": {
+    "rsi_read":    str,                   // "RSI 62 — strong, room before overbought"
+    "trend_read":  str,                   // "Above SMA50, 5d +2.4%, 20d +9.1%"
+    "volume_read": str,                   // "Volume 1.8× 20d avg — accumulation"
+    "score_0_100": int                    // composite momentum score
+  },
+  "bull_case": [                          // EXACTLY 3, SHORT-TERM only
+    { "text": str, "source": str },
+    { "text": str, "source": str },
+    { "text": str, "source": str }
+  ],
+  "bear_case": [                          // EXACTLY 3, SHORT-TERM only
+    { "text": str, "source": str },
+    { "text": str, "source": str },
+    { "text": str, "source": str }
+  ],
+  "what_to_watch": [                      // EXACTLY 3 observable triggers
+    { "trigger": str, "why": str }
+  ],
+  "key_risks": [                          // 2-3 short-term, stock-specific risks
+    { "text": str, "source": str }
+  ],
+  "horizon_note": str,                    // 1 line: when to re-evaluate (e.g. "Re-check at earnings or break of 1820 support")
+  "confidence": "low" | "medium" | "high",
+  "data_gaps": [ str, ... ]
+}"""
+
+    try:
+        data = await asyncio.wait_for(
+            asyncio.to_thread(ai_client.generate_grounded_json, task, context, schema, 3000),
+            timeout=80,
+        )
+    except asyncio.TimeoutError:
+        yield f"data: {json.dumps({'type':'error','message':'Timed out.'})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
+    if not data:
+        yield f"data: {json.dumps({'type':'error','message':'AI returned unparseable response.'})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
+    # Deterministic confidence — same rubric as long-term, plus a hard penalty
+    # if we don't even have technicals (the whole point of swing).
+    score = 100
+    if not tech:
+        score -= 35
+    if not (context.get("news") or []):
+        score -= 10
+    gaps_penalty = min(20, len(data.get("data_gaps") or []) * 4)
+    score -= gaps_penalty
+    if not levels:
+        score -= 15
+    score = max(5, min(95, score))
+    conf_label = "high" if score >= 70 else "medium" if score >= 40 else "low"
+
+    setup = data.get("setup") or {}
+    setup["confidence"] = score
+    setup["confidence_label"] = conf_label
+    setup["confidence_basis"] = {
+        "has_technicals": bool(tech),
+        "has_key_levels": bool(levels),
+        "news_count": len(context.get("news") or []),
+        "data_gaps": len(data.get("data_gaps") or []),
+    }
+
+    result = with_disclaimer({
+        "type": "result",
+        "horizon": "swing",
+        "company": meta["name"],
+        "ticker": ticker,
+        "sector": meta["sector"],
+        "one_liner": data.get("one_liner", ""),
+        "setup": setup,
+        "momentum": data.get("momentum", {}),
+        "bull_case": data.get("bull_case", []),
+        "bear_case": data.get("bear_case", []),
+        "what_to_watch": data.get("what_to_watch", []),
+        "key_risks": data.get("key_risks", []),
+        "horizon_note": data.get("horizon_note", ""),
+        "key_levels": levels,
+        "technicals": tech,
+        "confidence": conf_label,
+        "data_gaps": data.get("data_gaps", []),
+        "context_snapshot_at": context.get("generated_at"),
+        "snapshot": {
+            "current_price":   snap.get("current_price"),
+            "change_percent":  snap.get("change_percent"),
+            "52w_high":        snap.get("52w_high"),
+            "52w_low":         snap.get("52w_low"),
+            "market_cap":      snap.get("market_cap"),
+        },
+    })
+    yield f"data: {json.dumps(result)}\n\n"
+    yield "data: [DONE]\n\n"
+
+
 @router.post("/deep-dive")
 async def deep_dive_analysis(req: DeepDiveRequest):
+    horizon = (req.horizon or "long_term").lower()
+    gen = swing_dive_generator if horizon == "swing" else deep_dive_generator
     return StreamingResponse(
-        deep_dive_generator(req.ticker.upper()),
+        gen(req.ticker.upper()),
         media_type="text/event-stream",
     )

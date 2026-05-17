@@ -389,7 +389,7 @@ export default function OnboardingModal({ open, onClose, onComplete, userName })
                       <span
                         style={{
                           fontWeight: 700,
-                          fontFamily: "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)",
+                          fontFamily: "var(--font-mono)",
                           fontSize: "12.5px",
                         }}
                       >
@@ -429,7 +429,7 @@ export default function OnboardingModal({ open, onClose, onComplete, userName })
                 letterSpacing: "0.16em",
                 color: "var(--color-text-muted)",
                 marginBottom: "9px",
-                fontFamily: "var(--font-mono, ui-monospace, monospace)",
+                fontFamily: "var(--font-mono)",
               }}
             >
               Quick add · popular NIFTY
@@ -457,7 +457,7 @@ export default function OnboardingModal({ open, onClose, onComplete, userName })
                       fontWeight: 700,
                       letterSpacing: "0.04em",
                       cursor: already ? "default" : "pointer",
-                      fontFamily: "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)",
+                      fontFamily: "var(--font-mono)",
                     }}
                   >
                     {already ? "✓ " : "+ "}
@@ -488,7 +488,7 @@ export default function OnboardingModal({ open, onClose, onComplete, userName })
                   textTransform: "uppercase",
                   letterSpacing: "0.16em",
                   color: "var(--color-text-muted)",
-                  fontFamily: "var(--font-mono, ui-monospace, monospace)",
+                  fontFamily: "var(--font-mono)",
                 }}
               >
                 Your picks ({selected.length})
@@ -502,7 +502,7 @@ export default function OnboardingModal({ open, onClose, onComplete, userName })
                   fontWeight: 700,
                   letterSpacing: "0.14em",
                   color: "var(--color-accent-primary)",
-                  fontFamily: "var(--font-mono, ui-monospace, monospace)",
+                  fontFamily: "var(--font-mono)",
                 }}
               >
                 <span
@@ -655,7 +655,7 @@ function LivePreviewRow({ ticker, fallbackName, data, onRemove, isLast }) {
             fontSize: "12.5px",
             fontWeight: 700,
             color: "var(--color-text-primary)",
-            fontFamily: "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)",
+            fontFamily: "var(--font-mono)",
           }}
         >
           {ticker}

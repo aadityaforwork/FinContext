@@ -505,12 +505,12 @@ function RecentRow({ it }) {
       borderBottom: "1px solid var(--border-subtle)",
       alignItems: "center",
     }}>
-      <span style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "11px" }}>
+      <span style={{ fontFamily: "var(--font-mono)", fontSize: "11px" }}>
         {it.prediction_date}
       </span>
       <span style={{
         color: "var(--color-text-primary)", fontWeight: 700,
-        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "11px",
+        fontFamily: "var(--font-mono)", fontSize: "11px",
       }}>
         {it.ticker}
       </span>

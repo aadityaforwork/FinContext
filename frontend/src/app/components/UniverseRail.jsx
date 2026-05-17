@@ -30,7 +30,7 @@ const DEMO_WATCHLIST = [
 function ChangeCell({ pct }) {
   if (pct == null) {
     return (
-      <span style={{ fontSize: "11px", color: "var(--color-text-muted)", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
+      <span style={{ fontSize: "11px", color: "var(--color-text-muted)", fontFamily: "var(--font-mono)" }}>
         —
       </span>
     );
@@ -42,7 +42,7 @@ function ChangeCell({ pct }) {
         fontSize: "11px",
         fontWeight: 600,
         color: isUp ? "var(--color-accent-green)" : "var(--color-accent-red)",
-        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+        fontFamily: "var(--font-mono)",
         fontVariantNumeric: "tabular-nums",
       }}
     >
@@ -79,7 +79,7 @@ function Row({ ticker, change_percent, onClick }) {
         style={{
           fontSize: "11.5px",
           fontWeight: 600,
-          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+          fontFamily: "var(--font-mono)",
           letterSpacing: "0.01em",
           lineHeight: 1.2,
         }}

@@ -46,7 +46,7 @@ function Mover({ position, type }) {
         alignItems: "center",
         gap: "6px",
         fontSize: "12px",
-        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+        fontFamily: "var(--font-mono)",
       }}
     >
       <span style={{ color, fontSize: "9px" }}>{arrow}</span>
@@ -181,7 +181,7 @@ export default function PortfolioTodayStrip({ onNavigate }) {
                 fontSize: "22px",
                 fontWeight: 700,
                 color: accent,
-                fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                fontFamily: "var(--font-mono)",
                 letterSpacing: "-0.01em",
               }}
             />

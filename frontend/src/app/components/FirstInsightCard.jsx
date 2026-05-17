@@ -146,7 +146,7 @@ export default function FirstInsightCard({ open, tickers = [], userId, onDismiss
                 fontWeight: 700,
                 letterSpacing: "0.18em",
                 color: kindBadge.color,
-                fontFamily: "var(--font-mono, ui-monospace, monospace)",
+                fontFamily: "var(--font-mono)",
               }}
             >
               {loading ? "READING YOUR PICKS…" : kindBadge.label}
@@ -158,7 +158,7 @@ export default function FirstInsightCard({ open, tickers = [], userId, onDismiss
               fontWeight: 700,
               letterSpacing: "0.14em",
               color: "var(--color-text-muted)",
-              fontFamily: "var(--font-mono, ui-monospace, monospace)",
+              fontFamily: "var(--font-mono)",
             }}
           >
             YOUR FIRST INSIGHT
@@ -182,7 +182,7 @@ export default function FirstInsightCard({ open, tickers = [], userId, onDismiss
             <>
               <h2
                 style={{
-                  fontFamily: "'Georgia', 'Iowan Old Style', 'Times New Roman', serif",
+                  fontFamily: "var(--font-serif)",
                   fontSize: "26px",
                   fontWeight: 400,
                   fontStyle: "italic",
@@ -202,7 +202,7 @@ export default function FirstInsightCard({ open, tickers = [], userId, onDismiss
             <>
               <h2
                 style={{
-                  fontFamily: "'Georgia', 'Iowan Old Style', 'Times New Roman', serif",
+                  fontFamily: "var(--font-serif)",
                   fontSize: "28px",
                   fontWeight: 400,
                   color: "var(--color-text-primary)",
@@ -215,7 +215,7 @@ export default function FirstInsightCard({ open, tickers = [], userId, onDismiss
                   <>
                     <span
                       style={{
-                        fontFamily: "var(--font-mono, ui-monospace, monospace)",
+                        fontFamily: "var(--font-mono)",
                         fontSize: "20px",
                         fontWeight: 700,
                         background: "var(--color-bg-card-hover)",

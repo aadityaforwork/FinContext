@@ -35,11 +35,11 @@ function CustomTooltip({ active, payload, label }) {
           color: "var(--color-text-secondary)",
         }}
       >
-        <span>Open</span><span style={{ textAlign: "right", fontFamily: "monospace" }}>₹{d.open?.toFixed(2)}</span>
-        <span>High</span><span style={{ textAlign: "right", fontFamily: "monospace", color: "var(--color-accent-green)" }}>₹{d.high?.toFixed(2)}</span>
-        <span>Low</span><span style={{ textAlign: "right", fontFamily: "monospace", color: "var(--color-accent-red)" }}>₹{d.low?.toFixed(2)}</span>
-        <span>Close</span><span style={{ textAlign: "right", fontFamily: "monospace", fontWeight: 600, color: "var(--color-accent-secondary)" }}>₹{d.close?.toFixed(2)}</span>
-        <span>Volume</span><span style={{ textAlign: "right", fontFamily: "monospace" }}>{(d.volume / 1_000_000).toFixed(1)}M</span>
+        <span>Open</span><span style={{ textAlign: "right", fontFamily: "var(--font-mono)" }}>₹{d.open?.toFixed(2)}</span>
+        <span>High</span><span style={{ textAlign: "right", fontFamily: "var(--font-mono)", color: "var(--color-accent-green)" }}>₹{d.high?.toFixed(2)}</span>
+        <span>Low</span><span style={{ textAlign: "right", fontFamily: "var(--font-mono)", color: "var(--color-accent-red)" }}>₹{d.low?.toFixed(2)}</span>
+        <span>Close</span><span style={{ textAlign: "right", fontFamily: "var(--font-mono)", fontWeight: 600, color: "var(--color-accent-secondary)" }}>₹{d.close?.toFixed(2)}</span>
+        <span>Volume</span><span style={{ textAlign: "right", fontFamily: "var(--font-mono)" }}>{(d.volume / 1_000_000).toFixed(1)}M</span>
       </div>
     </div>
   );

@@ -91,7 +91,7 @@ export default function MissionControlLoader({
           style={{
             margin: 0,
             fontFamily:
-              "'Georgia', 'Iowan Old Style', 'Apple Garamond', 'Times New Roman', serif",
+              "var(--font-serif)",
             fontStyle: "italic",
             fontWeight: 400,
             fontSize: compact ? "17px" : "19px",
@@ -104,7 +104,7 @@ export default function MissionControlLoader({
         </blockquote>
         <figcaption
           style={{
-            fontFamily: "var(--font-inter, 'Inter', system-ui, sans-serif)",
+            fontFamily: "var(--font-sans)",
             fontSize: "10.5px",
             fontWeight: 600,
             letterSpacing: "0.22em",
@@ -133,7 +133,7 @@ export default function MissionControlLoader({
         <div
           style={{
             fontFamily:
-              "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)",
+              "var(--font-mono)",
             fontSize: "10.5px",
             fontWeight: 600,
             letterSpacing: "0.16em",
@@ -151,7 +151,7 @@ export default function MissionControlLoader({
           style={{
             maxWidth: "460px",
             fontFamily:
-              "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)",
+              "var(--font-mono)",
             fontSize: "11.5px",
             color: "var(--color-text-secondary)",
             letterSpacing: "0.01em",

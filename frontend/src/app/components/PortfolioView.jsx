@@ -421,7 +421,7 @@ function AnalysisResultPanel({ intel, onReanalyze }) {
         borderRadius: "var(--radius-card)",
         padding: "22px 24px 26px",
         fontFamily:
-          "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)",
+          "var(--font-mono)",
       }}
     >
       {/* Header strip — matches MissionControl + Standby for visual continuity. */}
@@ -476,7 +476,7 @@ function AnalysisResultPanel({ intel, onReanalyze }) {
             background: "transparent",
             color: "var(--color-text-secondary)",
             cursor: "pointer",
-            fontFamily: "var(--font-inter, 'Inter', system-ui, sans-serif)",
+            fontFamily: "var(--font-sans)",
             transition: "border-color 0.15s, color 0.15s",
           }}
           onMouseEnter={(e) => {
@@ -521,7 +521,7 @@ function AnalysisResultPanel({ intel, onReanalyze }) {
             <span
               style={{
                 fontFamily:
-                  "var(--font-inter, 'Inter', system-ui, sans-serif)",
+                  "var(--font-sans)",
                 fontSize: "52px",
                 fontWeight: 700,
                 lineHeight: 1,
@@ -625,7 +625,7 @@ function AnalysisResultPanel({ intel, onReanalyze }) {
                 <div
                   style={{
                     fontFamily:
-                      "var(--font-inter, 'Inter', system-ui, sans-serif)",
+                      "var(--font-sans)",
                   }}
                 >
                   <div
@@ -689,7 +689,7 @@ function AnalysisResultPanel({ intel, onReanalyze }) {
                   <div
                     style={{
                       fontFamily:
-                        "var(--font-inter, 'Inter', system-ui, sans-serif)",
+                        "var(--font-sans)",
                     }}
                   >
                     <div
@@ -725,7 +725,7 @@ function AnalysisResultPanel({ intel, onReanalyze }) {
                       border: `1px solid ${conColor}55`,
                       background: `${conColor}11`,
                       fontFamily:
-                        "var(--font-mono, ui-monospace, monospace)",
+                        "var(--font-mono)",
                     }}
                   >
                     {conviction}
@@ -890,7 +890,7 @@ function HoldingThesisCard({ thesis }) {
         display: "flex",
         flexDirection: "column",
         gap: "16px",
-        fontFamily: "var(--font-inter, 'Inter', system-ui, sans-serif)",
+        fontFamily: "var(--font-sans)",
       }}
     >
       {/* Header row — ticker on left, verdict pill + conviction on right. */}
@@ -911,7 +911,7 @@ function HoldingThesisCard({ thesis }) {
               color: "var(--color-text-primary)",
               letterSpacing: "-0.01em",
               fontFamily:
-                "var(--font-mono, ui-monospace, SFMono-Regular, monospace)",
+                "var(--font-mono)",
             }}
           >
             {thesis.ticker}
@@ -929,7 +929,7 @@ function HoldingThesisCard({ thesis }) {
               border: `1px solid ${sigColor}55`,
               background: `${sigColor}11`,
               fontFamily:
-                "var(--font-mono, ui-monospace, monospace)",
+                "var(--font-mono)",
             }}
           >
             {sig}
@@ -941,7 +941,7 @@ function HoldingThesisCard({ thesis }) {
               fontWeight: 700,
               color: "var(--color-text-secondary)",
               fontVariantNumeric: "tabular-nums",
-              fontFamily: "var(--font-mono, ui-monospace, monospace)",
+              fontFamily: "var(--font-mono)",
               letterSpacing: "0.06em",
             }}
           >
@@ -968,7 +968,7 @@ function HoldingThesisCard({ thesis }) {
               fontWeight: 700,
               letterSpacing: "0.16em",
               color: "var(--color-text-muted)",
-              fontFamily: "var(--font-mono, ui-monospace, monospace)",
+              fontFamily: "var(--font-mono)",
             }}
           >
             THESIS
@@ -1016,7 +1016,7 @@ function HoldingThesisCard({ thesis }) {
               fontWeight: 700,
               letterSpacing: "0.16em",
               color: "var(--color-accent-primary)",
-              fontFamily: "var(--font-mono, ui-monospace, monospace)",
+              fontFamily: "var(--font-mono)",
             }}
           >
             WATCH
@@ -1076,7 +1076,7 @@ function BullBearList({ kind, items }) {
           fontWeight: 700,
           letterSpacing: "0.16em",
           color,
-          fontFamily: "var(--font-mono, ui-monospace, monospace)",
+          fontFamily: "var(--font-mono)",
         }}
       >
         {label}
@@ -1188,7 +1188,7 @@ function AnalysisStandbyCard({ portfolio, onRun }) {
         borderRadius: "var(--radius-card)",
         padding: "22px 24px",
         fontFamily:
-          "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)",
+          "var(--font-mono)",
       }}
     >
       {/* Header strip — mirrors MissionControlLoader so this feels like the
@@ -1344,7 +1344,7 @@ function AnalysisStandbyCard({ portfolio, onRun }) {
                   fontSize: "12.5px",
                   color: "var(--color-text-secondary)",
                   fontFamily:
-                    "var(--font-inter, 'Inter', system-ui, sans-serif)",
+                    "var(--font-sans)",
                 }}
               >
                 <span style={{ color: "var(--color-accent-primary)", fontWeight: 700 }}>›</span>
@@ -1385,7 +1385,7 @@ function AnalysisStandbyCard({ portfolio, onRun }) {
             letterSpacing: "0.02em",
             transition: "filter 0.15s",
             fontFamily:
-              "var(--font-inter, 'Inter', system-ui, sans-serif)",
+              "var(--font-sans)",
           }}
           onMouseEnter={(e) => {
             if (ready) e.currentTarget.style.filter = "brightness(1.12)";

@@ -129,7 +129,7 @@ export default function AnalysisSimulator({ ticker, stockName }) {
                      <span style={{ color: "var(--color-accent-primary)" }}>•</span>
                      <span>
                        {claimText(line)}
-                       {src && <span style={{ fontSize: "11px", color: "var(--color-text-muted)", marginLeft: "6px", fontFamily: "monospace" }}>[{src}]</span>}
+                       {src && <span style={{ fontSize: "11px", color: "var(--color-text-muted)", marginLeft: "6px", fontFamily: "var(--font-mono)" }}>[{src}]</span>}
                      </span>
                    </li>
                  );

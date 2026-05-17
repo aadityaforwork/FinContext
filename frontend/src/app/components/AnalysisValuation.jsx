@@ -113,19 +113,19 @@ export default function AnalysisValuation({ ticker }) {
             <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", borderBottom: "1px dashed var(--border-subtle)", paddingBottom: "8px" }}>
                 <span style={{ fontSize: "14px", color: "var(--color-text-secondary)" }}>Est. Price Impact (Immediate)</span>
-                <span style={{ fontSize: "16px", fontWeight: 700, fontFamily: "monospace", color: result.extraction.estimated_price_impact_percent > 0 ? "var(--color-accent-green)" : result.extraction.estimated_price_impact_percent < 0 ? "var(--color-accent-red)" : "var(--color-text-primary)" }}>
+                <span style={{ fontSize: "16px", fontWeight: 700, fontFamily: "var(--font-mono)", color: result.extraction.estimated_price_impact_percent > 0 ? "var(--color-accent-green)" : result.extraction.estimated_price_impact_percent < 0 ? "var(--color-accent-red)" : "var(--color-text-primary)" }}>
                   {result.extraction.estimated_price_impact_percent > 0 ? "+" : ""}{result.extraction.estimated_price_impact_percent}%
                 </span>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", borderBottom: "1px dashed var(--border-subtle)", paddingBottom: "8px" }}>
                 <span style={{ fontSize: "14px", color: "var(--color-text-secondary)" }}>EBITDA Shock</span>
-                <span style={{ fontSize: "16px", fontWeight: 700, fontFamily: "monospace", color: "var(--color-text-primary)" }}>
+                <span style={{ fontSize: "16px", fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--color-text-primary)" }}>
                   {result.model_adjustments.ebitda}
                 </span>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
                 <span style={{ fontSize: "14px", color: "var(--color-text-secondary)" }}>Revenue Adjustment</span>
-                <span style={{ fontSize: "16px", fontWeight: 700, fontFamily: "monospace", color: "var(--color-text-primary)" }}>
+                <span style={{ fontSize: "16px", fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--color-text-primary)" }}>
                   {result.model_adjustments.revenue}
                 </span>
               </div>

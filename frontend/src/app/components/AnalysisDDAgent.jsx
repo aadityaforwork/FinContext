@@ -84,7 +84,7 @@ export default function AnalysisDDAgent({ ticker, stockName }) {
       {(running || (steps.length > 0 && !result)) && (
         <div style={{ 
           background: "#0c0a13", border: "1px solid #2a2542", borderRadius: "12px", 
-          padding: "16px", fontFamily: "'JetBrains Mono', monospace", fontSize: "13px", color: "#a599e9",
+          padding: "16px", fontFamily: "var(--font-mono)", fontSize: "13px", color: "#a599e9",
           minHeight: "150px", overflowY: "auto", marginBottom: "20px"
         }}>
           <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "16px", paddingBottom: "12px", borderBottom: "1px solid #2a2542" }}>

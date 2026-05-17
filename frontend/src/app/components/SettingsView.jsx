@@ -266,7 +266,7 @@ export default function SettingsView() {
               }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
                   <span style={{
-                    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                    fontFamily: "var(--font-mono)",
                     fontSize: "22px", fontWeight: 800, color: "var(--color-text-primary)",
                     letterSpacing: "0.12em",
                   }}>
@@ -470,7 +470,7 @@ function Row({ label, value, mono }) {
           fontSize: "12.5px",
           color: "var(--color-text-primary)",
           fontFamily: mono
-            ? "ui-monospace, SFMono-Regular, Menlo, monospace"
+            ? "var(--font-mono)"
             : "inherit",
           textAlign: "right",
           wordBreak: "break-all",

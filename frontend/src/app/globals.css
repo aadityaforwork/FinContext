@@ -35,6 +35,16 @@
   --color-text-primary: #ededee;
   --color-text-secondary: #9a9aa3;
   --color-text-muted: #66666e;
+
+  /* Typography — single source of truth for the whole product.
+     • sans  → all body text, headings, UI chrome (Inter)
+     • serif → editorial prose, quotes, headlines (Georgia stack)
+     • mono  → labels, tickers, numbers, code-like data
+     Components should reference these via var(...) instead of inlining
+     font stacks so a future font swap is one edit. */
+  --font-sans:  var(--font-inter, 'Inter', system-ui, -apple-system, sans-serif);
+  --font-serif: 'Georgia', 'Iowan Old Style', 'Apple Garamond', 'Times New Roman', serif;
+  --font-mono:  ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 /* ---------------------------------------------------------
@@ -71,13 +81,20 @@
   body {
     background: var(--color-bg-primary);
     color: var(--color-text-primary);
-    font-family: var(--font-inter, 'Inter', system-ui, -apple-system, sans-serif);
+    font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     min-height: 100vh;
     /* Tabular numerals everywhere by default — this is a numbers product. */
     font-variant-numeric: tabular-nums;
     letter-spacing: -0.006em;
+  }
+
+  /* Form controls don't inherit font-family by default in some browsers.
+     Force them to so labels, buttons, inputs and selects all read in the
+     product's voice instead of the user-agent fallback. */
+  button, input, select, textarea {
+    font-family: inherit;
   }
 
   /* Scrollbar — thin, neutral, unobtrusive. */

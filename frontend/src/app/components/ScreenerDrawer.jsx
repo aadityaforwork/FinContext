@@ -158,7 +158,7 @@ export default function ScreenerDrawer({ open, onClose, onNavigate }) {
                       fontSize: "12px",
                       fontWeight: 700,
                       color: "var(--color-text-primary)",
-                      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                      fontFamily: "var(--font-mono)",
                     }}
                   >
                     {s.ticker}
@@ -180,7 +180,7 @@ export default function ScreenerDrawer({ open, onClose, onNavigate }) {
                   style={{
                     fontSize: "11px",
                     fontWeight: 600,
-                    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                    fontFamily: "var(--font-mono)",
                     color: pct == null
                       ? "var(--color-text-muted)"
                       : isUp

@@ -164,7 +164,7 @@ export default function WatchlistDrawer({ open, onClose, onNavigate, onOpenScree
                       fontSize: "12.5px",
                       fontWeight: 700,
                       color: "var(--color-text-primary)",
-                      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                      fontFamily: "var(--font-mono)",
                     }}
                   >
                     {it.ticker}
@@ -186,7 +186,7 @@ export default function WatchlistDrawer({ open, onClose, onNavigate, onOpenScree
                   style={{
                     fontSize: "12px",
                     fontWeight: 700,
-                    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                    fontFamily: "var(--font-mono)",
                     color: pct == null
                       ? "var(--color-text-muted)"
                       : isUp

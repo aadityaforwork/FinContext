@@ -424,7 +424,7 @@ function MoverRow({ mover, onClick, holdingsToday }) {
         transition: "transform 0.16s ease, background 0.15s, border-color 0.15s",
       }}>
       <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "10px", flexWrap: "wrap" }}>
-        <span style={{ fontSize: "14px", fontWeight: 700, color: "var(--color-text-primary)", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>{mover.ticker}</span>
+        <span style={{ fontSize: "14px", fontWeight: 700, color: "var(--color-text-primary)", fontFamily: "var(--font-mono)" }}>{mover.ticker}</span>
         <span style={{
           fontSize: "15px", fontWeight: 800, fontVariantNumeric: "tabular-nums",
           color: pos ? "var(--color-accent-green)" : "var(--color-accent-red)",
@@ -440,7 +440,7 @@ function MoverRow({ mover, onClick, holdingsToday }) {
           color: "var(--color-text-muted)",
           border: "1px solid var(--border-subtle)",
           textTransform: "uppercase", letterSpacing: "0.12em",
-          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+          fontFamily: "var(--font-mono)",
         }}>
           {DRIVER_LABELS[mover.primary_driver] || mover.primary_driver}
         </span>
@@ -529,7 +529,7 @@ function Pill({ color, label, tooltip }) {
       padding: "3px 8px", borderRadius: "5px", fontSize: "10px", fontWeight: 700,
       background: bg, color, border: `1px solid ${border}`,
       textTransform: "uppercase", letterSpacing: "0.08em",
-      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+      fontFamily: "var(--font-mono)",
       cursor: tooltip ? "help" : "default",
     }}>
       {label}
@@ -1263,7 +1263,7 @@ function ThemeDetailModal({ theme, holdingsDetail, sectorReturns, onClose }) {
                   <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
                     <span style={{
                       fontSize: "13px", fontWeight: 800, color: "var(--color-text-primary)",
-                      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                      fontFamily: "var(--font-mono)",
                     }}>{t}</span>
                     {d?.sector && (
                       <span style={{ fontSize: "10px", color: "var(--color-text-muted)" }}>{d.sector}</span>

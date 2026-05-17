@@ -25,8 +25,8 @@ import { Skeleton } from "./Loaders";
 import { API_BASE as _SHARED_API_BASE } from "../lib/api";
 const API_BASE = _SHARED_API_BASE;
 
-const SERIF = "'Georgia', 'Iowan Old Style', 'Apple Garamond', 'Times New Roman', serif";
-const MONO  = "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)";
+const SERIF = "var(--font-serif)";
+const MONO  = "var(--font-mono)";
 
 // ---------------------------------------------------------------------------
 // Atoms

@@ -452,7 +452,7 @@ export default function GlobeNewsSection() {
                     <text
                       textAnchor="middle" y={isSel ? -14 : -10}
                       style={{
-                        fontFamily: "system-ui, sans-serif",
+                        fontFamily: "var(--font-sans)",
                         fontSize: isSel ? "9px" : "7px",
                         fontWeight: 700,
                         fill: isSel ? "#e0e7ff" : isHov ? "#94a3b8" : "rgba(148,163,184,0.5)",

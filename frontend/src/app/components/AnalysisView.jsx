@@ -28,9 +28,11 @@ import { useState, useEffect } from "react";
 import StockChart from "./StockChart";
 import MissionControlLoader from "./MissionControlLoader";
 
+import { useAuth } from "../context/AuthContext";
 import { API_BASE as _SHARED_API_BASE } from "../lib/api";
 import { claimText, claimSource } from "../lib/claim";
 import { readSSE } from "../lib/sseStream";
+import { getHorizonPref, setHorizonPref } from "../lib/horizonPref";
 const API_BASE = _SHARED_API_BASE;
 
 // Compliance — assessment language only. Legacy buy/sell/hold aliased so any
@@ -63,8 +65,8 @@ const IMPACT_COLORS = {
   NEUTRAL: "var(--color-text-muted)",
 };
 
-const SERIF = "'Georgia', 'Iowan Old Style', 'Apple Garamond', 'Times New Roman', serif";
-const MONO = "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)";
+const SERIF = "var(--font-serif)";
+const MONO = "var(--font-mono)";
 
 // ---------------------------------------------------------------------------
 // Small reusable atoms — kept inside the file so the component is self-contained
@@ -375,9 +377,533 @@ function formatCompact(n) {
 }
 
 // ---------------------------------------------------------------------------
+// HorizonToggle — segmented control on the hero strip.
+// LONG-TERM and SWING are mutually exclusive; flipping triggers a re-run.
+// ---------------------------------------------------------------------------
+const HORIZON_OPTIONS = [
+  { id: "long_term", label: "Long-term" },
+  { id: "swing",     label: "Swing" },
+];
+
+function HorizonToggle({ value, onChange, disabled }) {
+  return (
+    <div
+      role="tablist"
+      aria-label="Analysis horizon"
+      style={{
+        display: "inline-flex",
+        gap: "2px",
+        padding: "2px",
+        border: "1px solid var(--border-subtle)",
+        borderRadius: "var(--radius-control)",
+        background: "var(--color-bg-secondary, transparent)",
+      }}
+    >
+      {HORIZON_OPTIONS.map((opt) => {
+        const active = value === opt.id;
+        return (
+          <button
+            key={opt.id}
+            role="tab"
+            aria-selected={active}
+            disabled={disabled}
+            onClick={() => onChange(opt.id)}
+            style={{
+              padding: "5px 11px",
+              borderRadius: "4px",
+              border: "none",
+              background: active ? "var(--color-accent-primary)" : "transparent",
+              color: active ? "#fff" : "var(--color-text-muted)",
+              fontSize: "10.5px",
+              fontWeight: 700,
+              letterSpacing: "0.1em",
+              textTransform: "uppercase",
+              fontFamily: MONO,
+              cursor: disabled ? "not-allowed" : "pointer",
+              opacity: disabled ? 0.5 : 1,
+              transition: "background 0.15s, color 0.15s",
+            }}
+          >
+            {opt.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// SwingResultPanel — the swing brief's full render. Separate from long-term.
+// Sections (top → bottom):
+//   - One-liner setup framing (serif italic)
+//   - Stance + phase + confidence (mono)
+//   - Momentum read (RSI / trend / volume + composite bar)
+//   - Key levels chart (support ⟷ current ⟷ resistance)
+//   - Bull / Bear short-term cases (side-by-side, falsifiable)
+//   - What to watch (concrete triggers)
+//   - Key risks (short-term)
+//   - Horizon note ("re-evaluate at …")
+//   - Data gaps (quiet footnote)
+// ---------------------------------------------------------------------------
+const PHASE_LABELS = {
+  TRENDING_UP:    "Trending up",
+  CONSOLIDATING:  "Consolidating",
+  TRENDING_DOWN:  "Trending down",
+  REVERSAL_UP:    "Reversing up",
+  REVERSAL_DOWN:  "Reversing down",
+};
+
+function SwingResultPanel({ data }) {
+  const setup    = data.setup    || {};
+  const momentum = data.momentum || {};
+  const levels   = data.key_levels || null;
+  const stance   = setup.stance || "NEUTRAL";
+  const stanceColor = STANCE_COLORS[stance] || "var(--color-text-secondary)";
+
+  return (
+    <>
+      {/* One-liner — setup framing */}
+      {data.one_liner && (
+        <Card style={{ padding: "26px 28px" }}>
+          <div
+            style={{
+              fontFamily: MONO,
+              fontSize: "10.5px",
+              fontWeight: 700,
+              letterSpacing: "0.18em",
+              textTransform: "uppercase",
+              color: "var(--color-text-muted)",
+              marginBottom: "12px",
+            }}
+          >
+            The setup
+          </div>
+          <p
+            style={{
+              fontFamily: SERIF,
+              fontSize: "20px",
+              lineHeight: 1.5,
+              color: "var(--color-text-primary)",
+              letterSpacing: "-0.005em",
+              margin: 0,
+            }}
+          >
+            {data.one_liner}
+          </p>
+        </Card>
+      )}
+
+      {/* Stance + phase + confidence */}
+      <Card>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "auto auto 1fr",
+            gap: "24px",
+            alignItems: "center",
+          }}
+        >
+          <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.15 }}>
+            <span
+              style={{
+                fontFamily: MONO, fontSize: "9.5px", fontWeight: 700,
+                letterSpacing: "0.16em", textTransform: "uppercase",
+                color: "var(--color-text-muted)", marginBottom: "4px",
+              }}
+            >
+              Stance · 4–12 weeks
+            </span>
+            <span
+              style={{
+                fontFamily: MONO, fontSize: "18px", fontWeight: 800,
+                letterSpacing: "0.04em",
+                color: stanceColor,
+              }}
+            >
+              {STANCE_LABELS[stance] || stance}
+            </span>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.15 }}>
+            <span
+              style={{
+                fontFamily: MONO, fontSize: "9.5px", fontWeight: 700,
+                letterSpacing: "0.16em", textTransform: "uppercase",
+                color: "var(--color-text-muted)", marginBottom: "4px",
+              }}
+            >
+              Phase
+            </span>
+            <span
+              style={{
+                fontFamily: MONO, fontSize: "14px", fontWeight: 700,
+                color: "var(--color-text-primary)", letterSpacing: "0.04em",
+              }}
+            >
+              {PHASE_LABELS[setup.phase] || setup.phase || "—"}
+            </span>
+          </div>
+
+          {setup.confidence != null && (
+            <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.15 }}>
+              <span
+                style={{
+                  fontFamily: MONO, fontSize: "9.5px", fontWeight: 700,
+                  letterSpacing: "0.16em", textTransform: "uppercase",
+                  color: "var(--color-text-muted)", marginBottom: "4px",
+                }}
+              >
+                Data confidence
+              </span>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px" }} title={buildSwingConfTooltip(setup)}>
+                <div style={{ position: "relative", width: "120px", height: "3px", background: "rgba(255,255,255,0.06)", borderRadius: "2px" }}>
+                  <div
+                    style={{
+                      position: "absolute", left: 0, top: 0, height: "100%",
+                      width: `${setup.confidence}%`,
+                      background:
+                        setup.confidence >= 70 ? "var(--color-accent-green)" :
+                        setup.confidence >= 40 ? "var(--color-accent-amber)" :
+                                                 "var(--color-accent-red)",
+                      borderRadius: "2px",
+                      transition: "width 0.8s cubic-bezier(0.4, 0, 0.2, 1)",
+                    }}
+                  />
+                </div>
+                <span style={{ fontFamily: MONO, fontSize: "13px", fontWeight: 700, color: "var(--color-text-primary)", fontVariantNumeric: "tabular-nums" }}>
+                  {setup.confidence}%
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {claimText(setup.phase_basis) && (
+          <p
+            title={claimSource(setup.phase_basis) || ""}
+            style={{
+              fontFamily: SERIF, fontStyle: "italic",
+              fontSize: "14.5px", lineHeight: 1.6,
+              color: "var(--color-text-secondary)",
+              margin: 0, paddingTop: "14px", marginTop: "14px",
+              borderTop: "1px solid var(--border-subtle)",
+              letterSpacing: "-0.003em",
+            }}
+          >
+            &ldquo;{claimText(setup.phase_basis)}&rdquo;
+          </p>
+        )}
+      </Card>
+
+      {/* Momentum card */}
+      <Card>
+        <SectionLabel>Momentum read</SectionLabel>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "16px", marginBottom: "16px" }}>
+          <MomentumRow label="RSI"    text={momentum.rsi_read} />
+          <MomentumRow label="Trend"  text={momentum.trend_read} />
+          <MomentumRow label="Volume" text={momentum.volume_read} />
+        </div>
+        {momentum.score_0_100 != null && (
+          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+            <div
+              style={{
+                display: "flex", justifyContent: "space-between",
+                fontFamily: MONO, fontSize: "10.5px", fontWeight: 700,
+                letterSpacing: "0.14em", textTransform: "uppercase",
+                color: "var(--color-text-muted)",
+              }}
+            >
+              <span>Composite momentum score</span>
+              <span style={{ color: "var(--color-text-primary)", fontVariantNumeric: "tabular-nums" }}>
+                {momentum.score_0_100}/100
+              </span>
+            </div>
+            <div style={{ position: "relative", height: "4px", background: "rgba(255,255,255,0.06)", borderRadius: "2px" }}>
+              <div
+                style={{
+                  position: "absolute", left: 0, top: 0, height: "100%",
+                  width: `${Math.max(0, Math.min(100, momentum.score_0_100))}%`,
+                  background:
+                    momentum.score_0_100 >= 65 ? "var(--color-accent-green)" :
+                    momentum.score_0_100 >= 40 ? "var(--color-accent-amber)" :
+                                                 "var(--color-accent-red)",
+                  borderRadius: "2px",
+                  transition: "width 0.8s cubic-bezier(0.4, 0, 0.2, 1)",
+                }}
+              />
+              <div aria-hidden style={{ position: "absolute", left: "50%", top: "-2px", bottom: "-2px", width: "1px", background: "rgba(255,255,255,0.18)" }} />
+            </div>
+          </div>
+        )}
+      </Card>
+
+      {/* Key levels chart — support ⟷ current ⟷ resistance */}
+      {levels && <KeyLevelsCard levels={levels} />}
+
+      {/* Bull / Bear cases */}
+      <Card style={{ padding: "26px 28px" }}>
+        <div className="responsive-grid-2" style={{ gap: "32px" }}>
+          <CaseColumn side="bull" items={data.bull_case} />
+          <CaseColumn side="bear" items={data.bear_case} />
+        </div>
+      </Card>
+
+      {/* What to watch + Key risks */}
+      <div className="responsive-grid-2" style={{ gap: "20px" }}>
+        <Card>
+          <SectionLabel>What to watch · short-term triggers</SectionLabel>
+          {data.what_to_watch && data.what_to_watch.length > 0 ? (
+            <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "14px" }}>
+              {data.what_to_watch.map((w, i) => (
+                <li key={i} style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
+                  <span style={{ fontFamily: MONO, fontSize: "12.5px", fontWeight: 700, color: "var(--color-text-primary)", letterSpacing: "0.01em" }}>
+                    › {w.trigger}
+                  </span>
+                  <span style={{ fontSize: "12.5px", color: "var(--color-text-muted)", lineHeight: 1.5, paddingLeft: "14px" }}>{w.why}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p style={{ fontSize: "13px", color: "var(--color-text-muted)", fontStyle: "italic" }}>No actionable triggers identified.</p>
+          )}
+        </Card>
+
+        <Card>
+          <SectionLabel>Key risks · short-term</SectionLabel>
+          {data.key_risks && data.key_risks.length > 0 ? (
+            <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "12px" }}>
+              {data.key_risks.map((r, i) => (
+                <li key={i} style={{ display: "grid", gridTemplateColumns: "14px 1fr", gap: "10px", alignItems: "flex-start" }} title={claimSource(r) || ""}>
+                  <span style={{ fontFamily: MONO, fontSize: "12px", fontWeight: 700, color: "var(--color-accent-red)", lineHeight: 1.6 }}>!</span>
+                  <span style={{ fontSize: "13.5px", color: "var(--color-text-secondary)", lineHeight: 1.55 }}>{claimText(r)}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p style={{ fontSize: "13px", color: "var(--color-text-muted)", fontStyle: "italic" }}>No specific short-term risks surfaced.</p>
+          )}
+        </Card>
+      </div>
+
+      {/* Horizon note — the "when to re-evaluate" line */}
+      {data.horizon_note && (
+        <Card style={{
+          padding: "16px 20px",
+          background: "color-mix(in srgb, var(--color-accent-primary) 5%, transparent)",
+          borderColor: "color-mix(in srgb, var(--color-accent-primary) 22%, var(--border-subtle))",
+        }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: "12px" }}>
+            <span style={{
+              fontFamily: MONO, fontSize: "9.5px", fontWeight: 700,
+              letterSpacing: "0.16em", textTransform: "uppercase",
+              color: "var(--color-accent-primary)",
+            }}>
+              Re-evaluate when
+            </span>
+            <span style={{ fontSize: "13.5px", color: "var(--color-text-primary)", lineHeight: 1.5, flex: 1 }}>
+              {data.horizon_note}
+            </span>
+          </div>
+        </Card>
+      )}
+
+      {/* Data gaps */}
+      {data.data_gaps && data.data_gaps.length > 0 && (
+        <div style={{
+          fontSize: "11.5px", color: "var(--color-text-muted)",
+          fontFamily: MONO, letterSpacing: "0.02em", lineHeight: 1.6,
+          padding: "12px 16px", border: "1px dashed var(--border-subtle)",
+          borderRadius: "var(--radius-control)",
+        }}>
+          <strong style={{ color: "var(--color-text-secondary)", letterSpacing: "0.1em" }}>DATA GAPS · </strong>
+          {data.data_gaps.join(" · ")}
+        </div>
+      )}
+    </>
+  );
+}
+
+function MomentumRow({ label, text }) {
+  return (
+    <div>
+      <div style={{
+        fontFamily: MONO, fontSize: "9.5px", fontWeight: 700,
+        letterSpacing: "0.16em", textTransform: "uppercase",
+        color: "var(--color-text-muted)", marginBottom: "6px",
+      }}>
+        {label}
+      </div>
+      <div style={{
+        fontSize: "13px", color: "var(--color-text-secondary)",
+        lineHeight: 1.55,
+      }}>
+        {text || "—"}
+      </div>
+    </div>
+  );
+}
+
+// Key levels visualization — a horizontal "ruler" from key_support →
+// key_resistance with markers for immediate support/resistance + a dot for
+// current price. Makes "where am I in the range" a glance instead of a paragraph.
+function KeyLevelsCard({ levels }) {
+  const { current_price: cp, immediate_support: iSup, immediate_resistance: iRes,
+          key_support: kSup, key_resistance: kRes } = levels;
+
+  if (!cp || !kSup || !kRes || kRes <= kSup) {
+    return (
+      <Card>
+        <SectionLabel>Key technical levels</SectionLabel>
+        <p style={{ fontSize: "13px", color: "var(--color-text-muted)", fontStyle: "italic" }}>
+          Not enough price history to map levels.
+        </p>
+      </Card>
+    );
+  }
+
+  const pctOf = (v) => ((v - kSup) / (kRes - kSup)) * 100;
+  const cpPct  = Math.max(0, Math.min(100, pctOf(cp)));
+  const iSupPct = iSup ? Math.max(0, Math.min(100, pctOf(iSup))) : null;
+  const iResPct = iRes ? Math.max(0, Math.min(100, pctOf(iRes))) : null;
+
+  const fmt = (v) => v != null ? `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2 })}` : "—";
+
+  return (
+    <Card>
+      <SectionLabel hint="52-week range with 20-day support/resistance overlay">Key technical levels</SectionLabel>
+
+      {/* Ruler */}
+      <div style={{ position: "relative", height: "44px", marginTop: "20px", marginBottom: "16px" }}>
+        {/* The base line */}
+        <div style={{
+          position: "absolute", top: "20px", left: 0, right: 0, height: "3px",
+          background: "rgba(255,255,255,0.06)", borderRadius: "2px",
+        }} />
+        {/* Filled portion from key support to current price */}
+        <div style={{
+          position: "absolute", top: "20px", left: 0, height: "3px",
+          width: `${cpPct}%`,
+          background: "var(--color-accent-primary)",
+          opacity: 0.5, borderRadius: "2px",
+        }} />
+        {/* Immediate support tick */}
+        {iSupPct != null && (
+          <LevelTick pct={iSupPct} color="var(--color-accent-green)" label="20D LOW" labelTop />
+        )}
+        {/* Immediate resistance tick */}
+        {iResPct != null && (
+          <LevelTick pct={iResPct} color="var(--color-accent-red)" label="20D HIGH" labelTop />
+        )}
+        {/* Current price dot */}
+        <div
+          title={`Current price ${fmt(cp)}`}
+          style={{
+            position: "absolute", top: "14px",
+            left: `calc(${cpPct}% - 7px)`,
+            width: "14px", height: "14px", borderRadius: "50%",
+            background: "var(--color-accent-primary)",
+            border: "3px solid var(--color-bg-card)",
+            boxShadow: "0 0 0 1px var(--color-accent-primary)",
+          }}
+        />
+      </div>
+
+      {/* Bottom row — 52w support / current / 52w resistance */}
+      <div style={{
+        display: "grid", gridTemplateColumns: "1fr 1fr 1fr",
+        marginTop: "8px", fontFamily: MONO,
+      }}>
+        <LevelStat label="52W support"    value={fmt(kSup)} distance={levels.distance_to_key_support_pct} align="left"  good />
+        <LevelStat label="Current"        value={fmt(cp)}   distance={null} align="center" />
+        <LevelStat label="52W resistance" value={fmt(kRes)} distance={levels.distance_to_key_resistance_pct} align="right" />
+      </div>
+
+      {/* Mid row — immediate levels */}
+      {(iSup || iRes) && (
+        <div style={{
+          marginTop: "14px", paddingTop: "12px",
+          borderTop: "1px dashed var(--border-subtle)",
+          display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px",
+          fontFamily: MONO,
+        }}>
+          {iSup && <LevelStat label="20D support"    value={fmt(iSup)} distance={levels.distance_to_imm_support_pct} align="left" small good />}
+          {iRes && <LevelStat label="20D resistance" value={fmt(iRes)} distance={levels.distance_to_imm_resistance_pct} align="right" small />}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function LevelTick({ pct, color, label, labelTop }) {
+  return (
+    <>
+      <div style={{
+        position: "absolute", top: "14px",
+        left: `${pct}%`, width: "2px", height: "15px",
+        background: color, opacity: 0.8,
+      }} />
+      <div style={{
+        position: "absolute", top: labelTop ? 0 : "32px",
+        left: `${pct}%`, transform: "translateX(-50%)",
+        fontFamily: MONO, fontSize: "8.5px", fontWeight: 700,
+        letterSpacing: "0.12em", color, opacity: 0.9, whiteSpace: "nowrap",
+      }}>
+        {label}
+      </div>
+    </>
+  );
+}
+
+function LevelStat({ label, value, distance, align = "left", small, good }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: align === "right" ? "flex-end" : align === "center" ? "center" : "flex-start", gap: "2px" }}>
+      <span style={{
+        fontSize: "9px", fontWeight: 700,
+        letterSpacing: "0.14em", textTransform: "uppercase",
+        color: "var(--color-text-muted)",
+      }}>
+        {label}
+      </span>
+      <span style={{
+        fontSize: small ? "12px" : "13px", fontWeight: 700,
+        color: "var(--color-text-primary)",
+        fontVariantNumeric: "tabular-nums",
+      }}>
+        {value}
+      </span>
+      {distance != null && (
+        <span style={{
+          fontSize: "10px", fontWeight: 600,
+          color: good ? "var(--color-accent-green)" : "var(--color-accent-red)",
+          fontVariantNumeric: "tabular-nums", opacity: 0.8,
+        }}>
+          {good ? "−" : "+"}{Math.abs(distance).toFixed(1)}%
+        </span>
+      )}
+    </div>
+  );
+}
+
+function buildSwingConfTooltip(setup) {
+  const b = setup?.confidence_basis;
+  if (!b) return "Confidence reflects how much technical data we could pull.";
+  const lines = [
+    `Score: ${setup.confidence}% (${setup.confidence_label || "—"})`,
+    "",
+    "Computed from grounding signals:",
+    `• Technicals available: ${b.has_technicals ? "yes" : "NO (−35)"}`,
+    `• Key levels mapped: ${b.has_key_levels ? "yes" : "NO (−15)"}`,
+    `• News items grounding catalysts: ${b.news_count}`,
+    `• Data gaps admitted by the model: ${b.data_gaps}`,
+  ];
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 export default function AnalysisView({ initialTicker, onBack, backLabel = "Back" }) {
+  const { user } = useAuth();
   const [ticker, setTicker] = useState(initialTicker || "");
   const [searchQuery, setSearchQuery] = useState(initialTicker || "");
   const [searchResults, setSearchResults] = useState([]);
@@ -388,6 +914,22 @@ export default function AnalysisView({ initialTicker, onBack, backLabel = "Back"
   const [ddLoading, setDdLoading] = useState(false);
   const [ddSteps, setDdSteps] = useState([]);
   const [ddError, setDdError] = useState(null);
+  // Horizon toggle — LONG-TERM (existing behaviour) vs SWING (1-3 month brief).
+  // Initial value reads from per-user localStorage so a swing trader stays in
+  // swing mode across stock visits without re-flipping. The effect below
+  // re-syncs when user.id resolves (auth is async on first paint).
+  const [horizon, setHorizon] = useState(() => getHorizonPref(null));
+  useEffect(() => {
+    // Once auth resolves we may switch from the anon pref to this user's pref.
+    if (user?.id) setHorizon(getHorizonPref(user.id));
+  }, [user?.id]);
+
+  // Wrap setHorizon to persist on every change — keeps the pref + state in
+  // lockstep so the next ticker the user clicks defaults to the same horizon.
+  const updateHorizon = (next) => {
+    setHorizon(next);
+    setHorizonPref(user?.id, next);
+  };
 
   // Sync internal state when the parent passes a NEW initialTicker. Without
   // this, useState(initialTicker) only captures the prop on first mount, so
@@ -404,12 +946,13 @@ export default function AnalysisView({ initialTicker, onBack, backLabel = "Back"
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialTicker]);
 
-  // Auto-trigger when ticker changes (from prop sync above, search dropdown,
-  // or "alternatives" click further down the view).
+  // Auto-trigger when ticker OR horizon changes. Horizon flip re-runs with
+  // a different prompt/schema so the result panel switches between long-term
+  // and swing views.
   useEffect(() => {
-    if (ticker) runDeepDive(ticker);
+    if (ticker) runDeepDive(ticker, horizon);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ticker]);
+  }, [ticker, horizon]);
 
   const handleSearch = async (q) => {
     setSearchQuery(q);
@@ -430,7 +973,7 @@ export default function AnalysisView({ initialTicker, onBack, backLabel = "Back"
     setSearchResults([]);
   };
 
-  const runDeepDive = async (t) => {
+  const runDeepDive = async (t, h = "long_term") => {
     setDdLoading(true);
     setDeepDive(null);
     setDdSteps([]);
@@ -440,7 +983,7 @@ export default function AnalysisView({ initialTicker, onBack, backLabel = "Back"
       const response = await fetch(`${API_BASE}/api/analysis/deep-dive`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ticker: t }),
+        body: JSON.stringify({ ticker: t, horizon: h }),
       });
 
       for await (const data of readSSE(response)) {
@@ -626,7 +1169,8 @@ export default function AnalysisView({ initialTicker, onBack, backLabel = "Back"
             <p style={{ fontSize: "13px", color: "var(--color-text-muted)", lineHeight: 1.6 }}>
               You&rsquo;ll get a grounded brief — bull case, bear case, valuation read,
               peer-relative financial health, key risks, and concrete triggers to watch.
-              Every number cites a source.
+              Toggle <strong style={{ color: "var(--color-text-secondary)" }}>SWING</strong> on the brief for a 4–12 week
+              technical setup instead. Every number cites a source.
             </p>
           </div>
         </Card>
@@ -644,9 +1188,13 @@ export default function AnalysisView({ initialTicker, onBack, backLabel = "Back"
                 alignItems: "center",
                 gap: "20px",
                 flexWrap: "wrap",
-                borderLeft: deepDive?.verdict?.action
-                  ? `3px solid ${STANCE_COLORS[deepDive.verdict.action] || "var(--border-strong)"}`
-                  : "3px solid var(--border-strong)",
+                borderLeft: (() => {
+                  // Long-term verdict OR swing setup — whichever is present.
+                  const s = deepDive?.verdict?.action || deepDive?.setup?.stance;
+                  return s
+                    ? `3px solid ${STANCE_COLORS[s] || "var(--border-strong)"}`
+                    : "3px solid var(--border-strong)";
+                })(),
               }}
             >
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.15 }}>
@@ -736,9 +1284,10 @@ export default function AnalysisView({ initialTicker, onBack, backLabel = "Back"
                 </div>
               )}
 
-              <div style={{ marginLeft: "auto" }}>
+              <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "10px" }}>
+                <HorizonToggle value={horizon} onChange={updateHorizon} disabled={ddLoading} />
                 <button
-                  onClick={() => runDeepDive(ticker)}
+                  onClick={() => runDeepDive(ticker, horizon)}
                   disabled={ddLoading}
                   style={{
                     padding: "7px 13px",
@@ -806,7 +1355,13 @@ export default function AnalysisView({ initialTicker, onBack, backLabel = "Back"
             </Card>
           )}
 
-          {deepDive && (
+          {/* SWING result panel — only when horizon=swing. Different schema,
+              different visualization. Long-term sections below are skipped. */}
+          {deepDive && deepDive.horizon === "swing" && (
+            <SwingResultPanel data={deepDive} />
+          )}
+
+          {deepDive && deepDive.horizon !== "swing" && (
             <>
               {/* One-liner — the headline read of the company. Serif italic, the
                   same voice the loaders use, so the analysis FEELS continuous

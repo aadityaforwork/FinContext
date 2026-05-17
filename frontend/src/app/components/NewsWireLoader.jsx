@@ -76,7 +76,7 @@ export default function NewsWireLoader() {
           style={{
             margin: 0,
             fontFamily:
-              "'Georgia', 'Iowan Old Style', 'Apple Garamond', 'Times New Roman', serif",
+              "var(--font-serif)",
             fontStyle: "italic",
             fontWeight: 400,
             fontSize: "19px",
@@ -89,7 +89,7 @@ export default function NewsWireLoader() {
         </blockquote>
         <figcaption
           style={{
-            fontFamily: "var(--font-inter, 'Inter', system-ui, sans-serif)",
+            fontFamily: "var(--font-sans)",
             fontSize: "10.5px",
             fontWeight: 600,
             letterSpacing: "0.22em",
@@ -120,7 +120,7 @@ export default function NewsWireLoader() {
         <div
           style={{
             fontFamily:
-              "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)",
+              "var(--font-mono)",
             fontSize: "10.5px",
             fontWeight: 600,
             letterSpacing: "0.16em",

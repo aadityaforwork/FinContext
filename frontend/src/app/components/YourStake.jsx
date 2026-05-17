@@ -144,7 +144,7 @@ const labelStyle = {
 };
 
 const tickerStyle = {
-  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+  fontFamily: "var(--font-mono)",
   fontWeight: 700,
   color: "var(--color-text-primary)",
   fontSize: "11.5px",
