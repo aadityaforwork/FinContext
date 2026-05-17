@@ -38,6 +38,10 @@ export default function App() {
   const [activeNav, setActiveNav] = useState("dashboard");
   const [analysisTicker, setAnalysisTicker] = useState(null);
   const [companyTicker, setCompanyTicker] = useState(null);
+  // Lightweight nav history — only stores the page the user was on before
+  // jumping into a stock-detail view (analysis / company). Powers the "← Back"
+  // affordance on those pages without a full router.
+  const [prevNav, setPrevNav] = useState(null);
   // Drawer state for the hub-and-drawer model. Only one drawer open at a time.
   const [drawer, setDrawer] = useState(null); // "watchlist" | "screener" | null
   // First-run onboarding modal (shown to new users with empty universe).
@@ -159,12 +163,41 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id]);
 
-  // Navigation handler used by child components
+  // Navigation handler used by child components. Records the previous page
+  // before jumping into a stock-detail view so the detail view can render an
+  // accurate "← Back to <where>" affordance. Doesn't overwrite prevNav when
+  // hopping between two detail views (analysis ↔ company) — we want back to
+  // return to the list (portfolio/watchlist/screener) where the journey started.
   const handleNavigate = (page, ticker) => {
+    const isDetailPage = page === "analysis" || page === "company";
+    const wasDetailPage = activeNav === "analysis" || activeNav === "company";
+    if (isDetailPage && !wasDetailPage && activeNav !== page) {
+      setPrevNav(activeNav);
+    }
     setActiveNav(page);
     if (page === "analysis" && ticker) setAnalysisTicker(ticker);
-    if (page === "company" && ticker) setCompanyTicker(ticker);
+    if (page === "company"  && ticker) setCompanyTicker(ticker);
   };
+
+  // Pop back to where the user came from. Defaults to dashboard if no history.
+  const handleBack = () => {
+    const target = prevNav || "dashboard";
+    setActiveNav(target);
+    setPrevNav(null);
+  };
+
+  // Human-readable labels for back-button copy.
+  const NAV_LABELS = {
+    dashboard: "Dashboard",
+    portfolio: "Portfolio",
+    watchlist: "Watchlist",
+    screener:  "Screener",
+    accuracy:  "Accuracy",
+    settings:  "Settings",
+    analysis:  "Deep dive",
+    company:   "Company details",
+  };
+  const backLabel = NAV_LABELS[prevNav || "dashboard"];
 
   // ---- Keep-alive view rendering --------------------------------------------
   // Switching tabs used to unmount the previous view, throwing away its state
@@ -228,8 +261,8 @@ export default function App() {
           {renderTab("screener",  () => <ScreenerView onNavigate={handleNavigate} />)}
           {renderTab("watchlist", () => <WatchlistView onNavigate={handleNavigate} />)}
           {renderTab("portfolio", () => <PortfolioView onNavigate={handleNavigate} />)}
-          {renderTab("analysis",  () => <AnalysisView initialTicker={analysisTicker} />)}
-          {renderTab("company",   () => <CompanyView ticker={companyTicker} onNavigate={handleNavigate} />)}
+          {renderTab("analysis",  () => <AnalysisView initialTicker={analysisTicker} onBack={handleBack} backLabel={backLabel} onNavigate={handleNavigate} />)}
+          {renderTab("company",   () => <CompanyView ticker={companyTicker} onNavigate={handleNavigate} onBack={handleBack} backLabel={backLabel} />)}
         </div>
 
         {/* Dashboard handles its own disclaimer per-pane; other views show the footer. */}

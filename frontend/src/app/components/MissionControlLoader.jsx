@@ -1,522 +1,298 @@
 "use client";
 
 /**
- * MissionControlLoader — the "command center" loader for Context Engine + AI Analysis.
+ * MissionControlLoader — Editorial Quiet edition (Context + Analysis).
  *
- * Replaces the generic terminal-style step list with a Bloomberg-flavored:
- *   • radar sweep (SVG, no chart lib) — communicates "actively scanning"
- *   • live counters of work units (holdings, sectors, news, signals) that
- *     advance in response to real SSE step events — feels alive, not faked
- *   • single live status line — last meaningful step, not 8 scrolling lines
- *   • elapsed timer in the corner — sets the expectation "this is heavy work"
+ * Rewritten to match the home news loader's restraint: serif italic quote as
+ * hero, hairlines, one motion element, one quiet status line. The Bloomberg
+ * radar/counters version felt busy next to the calm news loader; this aligns
+ * the whole product on one loading vocabulary.
  *
- * Why it works: each counter is keyed to a real step message we already emit
- * from the backend (`/movers` and `/portfolio` SSE generators). The target
- * numbers are bounded by actual portfolio size when known, so the user sees
- * "41/41 holdings scanned" — not "Analyzing 1B data points!" theatre.
+ * Each variant gets ONE distinguishing signature so they don't feel identical:
+ *   • context  → ScanBeam     — a slow horizontal beam crossing a thin grid
+ *                              (reads "scanning the market")
+ *   • analysis → ThoughtPulse — concentric pulses rippling out from a core
+ *                              (reads "deep reasoning")
  *
- * Props:
- *   • steps           — array of step messages from the SSE stream
- *   • portfolioSize   — number of holdings (used to scope counter targets)
- *   • variant         — "context" | "analysis" — picks counter set + label
- *   • compact         — render in a smaller card (used inside tabs)
+ * The status line still shows the latest SSE step so the loader feels alive,
+ * but it sits as one quiet mono line — no scrolling counters, no chips.
+ *
+ * Props (unchanged for back-compat):
+ *   • steps          — string[] from the SSE stream (last item is shown)
+ *   • portfolioSize  — kept for prop compatibility, no longer rendered
+ *   • variant        — "context" | "analysis"
+ *   • compact        — slightly tighter padding for in-tab use
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { pickLoaderQuote } from "../lib/loaderQuotes";
-
-// ---------------------------------------------------------------------------
-// Counter spec — each metric advances when one of its `triggers` substrings
-// appears in a step message. `target(portfolioSize)` returns the final value
-// the counter should walk up to. Tween runs over `durationMs` after trigger.
-// ---------------------------------------------------------------------------
-function counterSpec(variant) {
-  if (variant === "analysis") {
-    return [
-      {
-        key: "holdings",
-        label: "HOLDINGS PRICED",
-        triggers: ["Fetching live prices", "Computing P&L"],
-        target: (n) => n || 0,
-        suffix: (n) => `/${n || 0}`,
-        duration: 1400,
-      },
-      {
-        key: "fundamentals",
-        label: "FUNDAMENTALS PULLED",
-        triggers: ["Computing P&L", "Benchmarking"],
-        target: (n) => (n || 1) * 7,        // ~7 metrics per stock
-        duration: 1800,
-      },
-      {
-        key: "peers",
-        label: "PEER COMPARISONS",
-        triggers: ["Benchmarking"],
-        target: (n) => Math.min(150, (n || 1) * 4),
-        duration: 1600,
-      },
-      {
-        key: "llm",
-        label: "LLM TOKENS STREAMED",
-        triggers: ["grounded AI", "strategist", "Still working", "finalizing", "Cross-checking", "Ranking"],
-        target: () => 2400,
-        suffix: () => "",
-        duration: 18000,                    // climbs slowly during LLM phase
-      },
-      {
-        key: "claims",
-        label: "CLAIMS VERIFIED",
-        triggers: ["Verifying"],
-        target: (n) => Math.min(40, (n || 1) * 2),
-        duration: 2000,
-      },
-    ];
-  }
-  // Default — Context Engine ("/movers")
-  return [
-    {
-      key: "holdings",
-      label: "HOLDINGS SCANNED",
-      triggers: ["per-holding", "Computing per-holding", "Cross-checking"],
-      target: (n) => n || 0,
-      suffix: (n) => `/${n || 0}`,
-      duration: 1600,
-    },
-    {
-      key: "sectors",
-      label: "SECTOR INDICES",
-      triggers: ["NIFTY", "sector index"],
-      target: () => 15,
-      suffix: () => "/15",
-      duration: 1200,
-    },
-    {
-      key: "headlines",
-      label: "HEADLINES PARSED",
-      triggers: ["headlines from India", "overnight headlines"],
-      target: () => 47,
-      duration: 1500,
-    },
-    {
-      key: "semantic",
-      label: "SEMANTIC MATCHES",
-      triggers: ["Attributing", "catalysts"],
-      target: (n) => Math.max(12, Math.round((n || 1) * 0.45)),
-      duration: 1800,
-    },
-    {
-      key: "technicals",
-      label: "TECHNICAL SIGNALS",
-      triggers: ["catalysts", "Scanning for tomorrow"],
-      target: (n) => n || 0,
-      suffix: (n) => `/${n || 0}`,
-      duration: 1600,
-    },
-    {
-      key: "llm",
-      label: "LLM TOKENS STREAMED",
-      triggers: ["Cross-checking", "Ranking", "Still working", "finalizing", "Almost"],
-      target: () => 2200,
-      duration: 18000,
-    },
-  ];
-}
-
-// Smoothly tween an integer counter from current → target. Returns a cancel fn.
-function tween(setter, from, to, durationMs) {
-  if (to === from) return () => {};
-  const t0 = performance.now();
-  let raf;
-  const step = (now) => {
-    const k = Math.min(1, (now - t0) / durationMs);
-    // ease-out cubic — fast start, smooth land
-    const eased = 1 - Math.pow(1 - k, 3);
-    const v = Math.round(from + (to - from) * eased);
-    setter(v);
-    if (k < 1) raf = requestAnimationFrame(step);
-  };
-  raf = requestAnimationFrame(step);
-  return () => cancelAnimationFrame(raf);
-}
 
 export default function MissionControlLoader({
   steps = [],
+  // eslint-disable-next-line no-unused-vars
   portfolioSize = 0,
   variant = "context",
   compact = false,
 }) {
-  const specs = useMemo(() => counterSpec(variant), [variant]);
-  const [counts, setCounts] = useState(() =>
-    Object.fromEntries(specs.map((s) => [s.key, 0]))
-  );
-  const [elapsed, setElapsed] = useState(0);
-  // Pick a quote once per loader mount — stable across the entire load cycle
-  // so it doesn't flicker between every elapsed-clock tick.
+  // One quote per mount — never rerolls, so the user reads the same line they
+  // first saw. Stillness > churn.
   const [quote] = useState(() => pickLoaderQuote());
-  const startRef = useRef(performance.now());
-  const firedRef = useRef(new Set());     // which counters have already started
-  const cancelersRef = useRef([]);
+  const [elapsed, setElapsed] = useState(0);
 
-  // Elapsed clock — single setInterval, mm:ss display.
   useEffect(() => {
+    const t0 = performance.now();
     const id = setInterval(() => {
-      setElapsed(Math.floor((performance.now() - startRef.current) / 1000));
+      setElapsed(Math.floor((performance.now() - t0) / 1000));
     }, 1000);
     return () => clearInterval(id);
   }, []);
 
-  // Drive counters: any new step message may trigger one or more counters.
-  // Each counter fires AT MOST once — re-firing on repeat steps would look
-  // janky (numbers jumping back down then up again).
-  useEffect(() => {
-    if (!steps.length) return;
-    const latest = steps[steps.length - 1] || "";
-    specs.forEach((spec) => {
-      if (firedRef.current.has(spec.key)) return;
-      const hit = spec.triggers.some((t) =>
-        latest.toLowerCase().includes(t.toLowerCase())
-      );
-      if (!hit) return;
-      firedRef.current.add(spec.key);
-      const target = spec.target(portfolioSize);
-      const cancel = tween(
-        (v) => setCounts((prev) => ({ ...prev, [spec.key]: v })),
-        0,
-        target,
-        spec.duration
-      );
-      cancelersRef.current.push(cancel);
-    });
-  }, [steps, specs, portfolioSize]);
-
-  // Cleanup any in-flight RAFs on unmount.
-  useEffect(() => () => cancelersRef.current.forEach((c) => c()), []);
-
-  // Single live status line — show the most recent meaningful step.
-  const lastStep = steps[steps.length - 1] || "Establishing connection…";
   const mm = String(Math.floor(elapsed / 60)).padStart(2, "0");
   const ss = String(elapsed % 60).padStart(2, "0");
 
-  const labelText = variant === "analysis" ? "AI ANALYSIS" : "CONTEXT ENGINE";
-  const pad = compact ? "18px" : "26px";
+  const lastStep = steps[steps.length - 1] || "Establishing connection…";
+
+  const labelText =
+    variant === "analysis" ? "Reasoning through your portfolio" : "Reading the market";
+
+  const pad = compact ? "36px 24px" : "52px 28px";
 
   return (
     <div
       style={{
         marginTop: "14px",
-        background: "var(--color-bg-secondary)",
+        background: "var(--color-bg-card)",
         border: "1px solid var(--border-subtle)",
         borderRadius: "var(--radius-card)",
         padding: pad,
-        position: "relative",
-        overflow: "hidden",
-        fontFamily: "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        textAlign: "center",
+        gap: "26px",
+        minHeight: compact ? "300px" : "360px",
       }}
     >
-      {/* Header */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          marginBottom: compact ? "14px" : "20px",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-          <span
-            className="mc-pulse-dot"
-            style={{
-              width: "8px",
-              height: "8px",
-              borderRadius: "50%",
-              background: "var(--color-accent-primary)",
-              boxShadow: "0 0 8px rgba(99,102,241,0.7)",
-            }}
-          />
-          <span
-            style={{
-              fontSize: "11px",
-              fontWeight: 700,
-              letterSpacing: "0.14em",
-              color: "var(--color-text-secondary)",
-            }}
-          >
-            {labelText}
-          </span>
-          <span
-            style={{
-              fontSize: "10.5px",
-              letterSpacing: "0.1em",
-              color: "var(--color-accent-primary)",
-              fontWeight: 700,
-            }}
-          >
-            · SCANNING
-          </span>
-        </div>
-        <span
-          style={{
-            fontSize: "11px",
-            fontWeight: 600,
-            color: "var(--color-text-muted)",
-            letterSpacing: "0.06em",
-          }}
-        >
-          T+{mm}:{ss}
-        </span>
-      </div>
+      <Hairline />
 
-      {/* Body — radar + counters side by side */}
-      <div
+      {/* Hero — serif italic quote, system serif for premium feel without a
+          runtime webfont fetch. */}
+      <figure
         style={{
-          display: "grid",
-          gridTemplateColumns: compact ? "120px 1fr" : "150px 1fr",
-          gap: compact ? "20px" : "28px",
-          alignItems: "center",
-        }}
-      >
-        <RadarSweep size={compact ? 120 : 150} />
-        <div style={{ display: "flex", flexDirection: "column", gap: compact ? "8px" : "10px" }}>
-          {specs.map((spec) => {
-            const v = counts[spec.key];
-            const target = spec.target(portfolioSize);
-            const done = v > 0 && v >= target;
-            const active = v > 0 && !done;
-            const suffix = spec.suffix ? spec.suffix(portfolioSize) : "";
-            return (
-              <div
-                key={spec.key}
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "1fr auto",
-                  alignItems: "center",
-                  gap: "10px",
-                  opacity: v === 0 ? 0.4 : 1,
-                  transition: "opacity 0.3s",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "8px",
-                    fontSize: "10.5px",
-                    letterSpacing: "0.1em",
-                    color: "var(--color-text-muted)",
-                    fontWeight: 600,
-                  }}
-                >
-                  <span style={{ width: "6px", display: "inline-block" }}>
-                    {done ? "✓" : active ? "›" : "·"}
-                  </span>
-                  <span>{spec.label}</span>
-                  <span
-                    style={{
-                      flex: 1,
-                      borderBottom: "1px dotted rgba(255,255,255,0.08)",
-                      margin: "0 4px",
-                      position: "relative",
-                      top: "-2px",
-                    }}
-                  />
-                </div>
-                <div
-                  style={{
-                    fontSize: compact ? "13px" : "14px",
-                    fontWeight: 700,
-                    color: done
-                      ? "var(--color-accent-green)"
-                      : active
-                      ? "var(--color-text-primary)"
-                      : "var(--color-text-muted)",
-                    fontVariantNumeric: "tabular-nums",
-                    minWidth: "60px",
-                    textAlign: "right",
-                  }}
-                >
-                  {v.toLocaleString()}
-                  {suffix}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Live status line */}
-      <div
-        style={{
-          marginTop: compact ? "16px" : "22px",
-          paddingTop: compact ? "14px" : "18px",
-          borderTop: "1px solid var(--border-subtle)",
-          display: "flex",
-          alignItems: "center",
-          gap: "10px",
-        }}
-      >
-        <span
-          className="mc-cursor"
-          style={{
-            color: "var(--color-accent-primary)",
-            fontWeight: 700,
-            fontSize: "13px",
-          }}
-        >
-          ›
-        </span>
-        <span
-          style={{
-            fontSize: "12.5px",
-            color: "var(--color-text-secondary)",
-            fontFamily: "var(--font-mono, ui-monospace, monospace)",
-            letterSpacing: "0.01em",
-          }}
-        >
-          {lastStep}
-        </span>
-      </div>
-
-      {/* Investor wisdom — picked once per mount. Quiet by design; sits below
-          the live status line so it doesn't compete with the scanning UI. */}
-      <div
-        style={{
-          marginTop: "14px",
-          paddingTop: "12px",
-          borderTop: "1px dashed rgba(255,255,255,0.06)",
+          maxWidth: "460px",
+          margin: 0,
           display: "flex",
           flexDirection: "column",
-          gap: "5px",
-          fontFamily: "var(--font-inter, 'Inter', system-ui, sans-serif)",
+          gap: "20px",
+          animation: "mc-fade-in 1.2s ease-out both",
         }}
       >
-        <p
+        <blockquote
           style={{
-            fontSize: "12.5px",
-            fontStyle: "italic",
-            color: "var(--color-text-secondary)",
-            lineHeight: 1.45,
             margin: 0,
+            fontFamily:
+              "'Georgia', 'Iowan Old Style', 'Apple Garamond', 'Times New Roman', serif",
+            fontStyle: "italic",
+            fontWeight: 400,
+            fontSize: compact ? "17px" : "19px",
+            lineHeight: 1.55,
+            color: "var(--color-text-primary)",
             letterSpacing: "-0.005em",
           }}
         >
           &ldquo;{quote.text}&rdquo;
-        </p>
-        <p
+        </blockquote>
+        <figcaption
           style={{
+            fontFamily: "var(--font-inter, 'Inter', system-ui, sans-serif)",
             fontSize: "10.5px",
             fontWeight: 600,
-            color: "var(--color-text-muted)",
-            letterSpacing: "0.06em",
+            letterSpacing: "0.22em",
             textTransform: "uppercase",
-            margin: 0,
+            color: "var(--color-text-muted)",
           }}
         >
           — {quote.author}
-        </p>
+        </figcaption>
+      </figure>
+
+      <Hairline />
+
+      {/* Variant signature — the only motion on the page. */}
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: "16px",
+          marginTop: "2px",
+        }}
+      >
+        {variant === "analysis" ? <ThoughtPulse /> : <ScanBeam />}
+
+        <div
+          style={{
+            fontFamily:
+              "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)",
+            fontSize: "10.5px",
+            fontWeight: 600,
+            letterSpacing: "0.16em",
+            color: "var(--color-text-muted)",
+            textTransform: "uppercase",
+          }}
+        >
+          {labelText}&nbsp;&nbsp;·&nbsp;&nbsp;T+{mm}:{ss}
+        </div>
+
+        {/* Live status — single line, very quiet. Truncates so a long step
+            message never breaks the layout. */}
+        <div
+          title={lastStep}
+          style={{
+            maxWidth: "460px",
+            fontFamily:
+              "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)",
+            fontSize: "11.5px",
+            color: "var(--color-text-secondary)",
+            letterSpacing: "0.01em",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            opacity: 0.85,
+          }}
+        >
+          › {lastStep}
+        </div>
       </div>
 
-      {/* Local styles for the pulse + sweep + cursor blink */}
       <style jsx>{`
-        @keyframes mc-pulse {
-          0%, 100% { opacity: 1; transform: scale(1); }
-          50%      { opacity: 0.45; transform: scale(1.45); }
+        @keyframes mc-fade-in {
+          from { opacity: 0; transform: translateY(4px); }
+          to   { opacity: 1; transform: translateY(0); }
         }
-        @keyframes mc-blink {
-          0%, 49% { opacity: 1; }
-          50%, 100% { opacity: 0.25; }
-        }
-        :global(.mc-pulse-dot) { animation: mc-pulse 1.6s ease-in-out infinite; }
-        :global(.mc-cursor)    { animation: mc-blink 1s steps(2, end) infinite; }
       `}</style>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// RadarSweep — pure SVG, no deps. A rotating conic sweep + concentric rings +
-// a few "blips" that fade in/out at random offsets along a ring (data points
-// being detected). All animation is CSS so React doesn't re-render the SVG.
+// Hairline — mirrors the news loader's rule so both loaders feel like the
+// same product.
 // ---------------------------------------------------------------------------
-function RadarSweep({ size = 150 }) {
-  const c = size / 2;
-  const rings = [size * 0.18, size * 0.32, size * 0.45];
-  // Pseudo-random blip positions, stable across renders (no Math.random in render)
-  const blips = [
-    { angle: 25,  ring: 1, delay: 0    },
-    { angle: 110, ring: 2, delay: 0.8  },
-    { angle: 200, ring: 0, delay: 1.6  },
-    { angle: 285, ring: 1, delay: 2.4  },
-    { angle: 340, ring: 2, delay: 3.2  },
-  ];
-
+function Hairline() {
   return (
-    <div style={{ width: size, height: size, position: "relative" }}>
-      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+    <div
+      aria-hidden
+      style={{
+        width: "min(140px, 32%)",
+        height: "1px",
+        background:
+          "linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.16) 50%, transparent 100%)",
+      }}
+    />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ScanBeam — Context Engine signature. A thin vertical beam sweeps left→right
+// across a faint chart grid. Reads as "scanning the market" without the noise
+// of an actual radar.
+// ---------------------------------------------------------------------------
+function ScanBeam() {
+  const w = 200;
+  const h = 44;
+  return (
+    <div style={{ position: "relative", width: w, height: h, overflow: "hidden" }}>
+      <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
         <defs>
-          <radialGradient id="mc-radar-bg" cx="50%" cy="50%" r="50%">
-            <stop offset="0%"   stopColor="rgba(99,102,241,0.08)" />
-            <stop offset="100%" stopColor="rgba(99,102,241,0)" />
-          </radialGradient>
-          <linearGradient id="mc-sweep" x1="0%" y1="50%" x2="100%" y2="50%">
+          <linearGradient id="mc-beam" x1="0%" y1="0%" x2="0%" y2="100%">
             <stop offset="0%"   stopColor="rgba(99,102,241,0)" />
-            <stop offset="100%" stopColor="rgba(99,102,241,0.55)" />
+            <stop offset="50%"  stopColor="rgba(99,102,241,0.85)" />
+            <stop offset="100%" stopColor="rgba(99,102,241,0)" />
           </linearGradient>
         </defs>
-        {/* Soft fill */}
-        <circle cx={c} cy={c} r={size * 0.46} fill="url(#mc-radar-bg)" />
-        {/* Concentric rings */}
-        {rings.map((r, i) => (
-          <circle
-            key={i}
-            cx={c} cy={c} r={r}
-            fill="none"
-            stroke="rgba(255,255,255,0.08)"
+        {/* Faint grid — 4 horizontal lines, evenly spaced. */}
+        {[0.2, 0.4, 0.6, 0.8].map((k) => (
+          <line
+            key={k}
+            x1="0" y1={h * k} x2={w} y2={h * k}
+            stroke="rgba(255,255,255,0.05)"
             strokeWidth="1"
           />
         ))}
-        {/* Crosshairs */}
-        <line x1={c} y1={size * 0.05} x2={c} y2={size * 0.95} stroke="rgba(255,255,255,0.05)" strokeWidth="1" />
-        <line x1={size * 0.05} y1={c} x2={size * 0.95} y2={c} stroke="rgba(255,255,255,0.05)" strokeWidth="1" />
-        {/* Sweep — a thin wedge that rotates. CSS animation. */}
-        <g className="mc-sweep-rotor" style={{ transformOrigin: `${c}px ${c}px` }}>
-          <path
-            d={`M ${c} ${c} L ${c + size * 0.46} ${c} A ${size * 0.46} ${size * 0.46} 0 0 0 ${
-              c + size * 0.46 * Math.cos(-Math.PI / 3)
-            } ${c + size * 0.46 * Math.sin(-Math.PI / 3)} Z`}
-            fill="url(#mc-sweep)"
+        {/* Two faint vertical tick marks at quartiles. */}
+        {[0.25, 0.5, 0.75].map((k) => (
+          <line
+            key={k}
+            x1={w * k} y1="0" x2={w * k} y2={h}
+            stroke="rgba(255,255,255,0.04)"
+            strokeWidth="1"
           />
-        </g>
-        {/* Center dot */}
-        <circle cx={c} cy={c} r="2.5" fill="var(--color-accent-primary)" />
-        {/* Blips */}
-        {blips.map((b, i) => {
-          const rad = (b.angle * Math.PI) / 180;
-          const r = rings[b.ring];
-          const x = c + r * Math.cos(rad);
-          const y = c + r * Math.sin(rad);
-          return (
-            <circle
-              key={i}
-              cx={x} cy={y} r="2"
-              fill="var(--color-accent-primary)"
-              className="mc-blip"
-              style={{ animationDelay: `${b.delay}s` }}
-            />
-          );
-        })}
+        ))}
+        {/* The beam itself — a thin rect that slides via CSS transform. */}
+        <rect
+          className="mc-beam-rect"
+          x="-3" y="0" width="3" height={h}
+          fill="url(#mc-beam)"
+        />
       </svg>
       <style jsx>{`
-        @keyframes mc-sweep-rotate {
-          from { transform: rotate(0deg); }
-          to   { transform: rotate(360deg); }
+        @keyframes mc-beam-slide {
+          0%   { transform: translateX(0); opacity: 0; }
+          12%  { opacity: 1; }
+          88%  { opacity: 1; }
+          100% { transform: translateX(${w + 6}px); opacity: 0; }
         }
-        @keyframes mc-blip {
-          0%, 100% { opacity: 0; r: 1.5; }
-          20%      { opacity: 1; r: 3; }
-          60%      { opacity: 0.6; r: 2; }
+        :global(.mc-beam-rect) {
+          animation: mc-beam-slide 2.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
         }
-        :global(.mc-sweep-rotor) { animation: mc-sweep-rotate 3.2s linear infinite; }
-        :global(.mc-blip)        { animation: mc-blip 4s ease-out infinite; }
+      `}</style>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ThoughtPulse — AI Analysis signature. A still center dot with two concentric
+// rings that ripple outward in sequence. Reads as "reasoning" — slow, focused,
+// not frantic.
+// ---------------------------------------------------------------------------
+function ThoughtPulse() {
+  const size = 44;
+  const c = size / 2;
+  return (
+    <div style={{ position: "relative", width: size, height: size }}>
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+        {/* Two outward-ripple rings, staggered. */}
+        <circle
+          className="mc-ring mc-ring-a"
+          cx={c} cy={c} r="6"
+          fill="none"
+          stroke="var(--color-accent-primary)"
+          strokeWidth="1"
+        />
+        <circle
+          className="mc-ring mc-ring-b"
+          cx={c} cy={c} r="6"
+          fill="none"
+          stroke="var(--color-accent-primary)"
+          strokeWidth="1"
+        />
+        {/* Solid core. */}
+        <circle cx={c} cy={c} r="3" fill="var(--color-accent-primary)" />
+      </svg>
+      <style jsx>{`
+        @keyframes mc-ripple {
+          0%   { r: 4;  opacity: 0.7; }
+          80%  { r: 18; opacity: 0;   }
+          100% { r: 18; opacity: 0;   }
+        }
+        :global(.mc-ring) {
+          transform-origin: center;
+          animation: mc-ripple 2.4s ease-out infinite;
+        }
+        :global(.mc-ring-b) {
+          animation-delay: 1.2s;
+        }
       `}</style>
     </div>
   );

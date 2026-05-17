@@ -424,18 +424,23 @@ function MoverRow({ mover, onClick, holdingsToday }) {
         transition: "transform 0.16s ease, background 0.15s, border-color 0.15s",
       }}>
       <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "10px", flexWrap: "wrap" }}>
-        <span style={{ fontSize: "14px", fontWeight: 700, color: "var(--color-text-primary)" }}>{mover.ticker}</span>
+        <span style={{ fontSize: "14px", fontWeight: 700, color: "var(--color-text-primary)", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>{mover.ticker}</span>
         <span style={{
           fontSize: "15px", fontWeight: 800, fontVariantNumeric: "tabular-nums",
           color: pos ? "var(--color-accent-green)" : "var(--color-accent-red)",
         }}>
           {pos ? "▲ +" : "▼ "}{mover.move_percent}%
         </span>
+        {/* Driver pill — neutral outlined, no fill. Labels the move's CATEGORY
+            (news vs sector vs macro). Keeping it color-free reduces row noise
+            and lets the % change be the only loud thing on the line. */}
         <span style={{
-          padding: "3px 8px", borderRadius: "6px", fontSize: "10px", fontWeight: 700,
-          background: `${DRIVER_COLORS[mover.primary_driver] || "#64748b"}20`,
-          color: DRIVER_COLORS[mover.primary_driver] || "#64748b",
-          textTransform: "uppercase", letterSpacing: "0.5px",
+          padding: "3px 8px", borderRadius: "4px", fontSize: "10px", fontWeight: 700,
+          background: "transparent",
+          color: "var(--color-text-muted)",
+          border: "1px solid var(--border-subtle)",
+          textTransform: "uppercase", letterSpacing: "0.12em",
+          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
         }}>
           {DRIVER_LABELS[mover.primary_driver] || mover.primary_driver}
         </span>
@@ -457,7 +462,7 @@ function MoverRow({ mover, onClick, holdingsToday }) {
         ))}
       </div>
       {tech && (tech.rsi_zone || tech.vol_zone || tech.momentum_state || tech.sma_state) && (
-        <TechBadges tech={tech} />
+        <TechBadges tech={tech} direction={pos ? "up" : "down"} />
       )}
       {/* Personalization — what this move did to YOUR ₹ today. Hidden if the
           ticker isn't in the user's portfolio (rare for movers but possible). */}
@@ -470,7 +475,18 @@ function MoverRow({ mover, onClick, holdingsToday }) {
   );
 }
 
-function TechBadges({ tech }) {
+// TechBadges — every chip in a row uses ONE color keyed to the price direction
+// of the stock (accessibility-first). User sees green = winner today, red =
+// loser today, without parsing "what does RSI overbought mean for me." The
+// chip TEXT still carries the signal name for users who want the detail; the
+// tooltip explains it. We never use 4 different hues per row — that was the
+// "AI-app rainbow" we're rooting out.
+function TechBadges({ tech, direction = "up" }) {
+  const color =
+    direction === "up"   ? "var(--color-accent-green)" :
+    direction === "down" ? "var(--color-accent-red)"   :
+                           "var(--color-text-muted)";
+
   return (
     <div style={{
       marginTop: "10px", paddingTop: "10px",
@@ -479,16 +495,16 @@ function TechBadges({ tech }) {
     }}>
       <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
         {tech.rsi_zone && (
-          <Pill color={RSI_COLORS[tech.rsi_zone] || "#64748b"} label={`RSI ${tech.rsi_zone}`} tooltip={TECH_TOOLTIPS.rsi} />
+          <Pill color={color} label={`RSI ${tech.rsi_zone}`} tooltip={TECH_TOOLTIPS.rsi} />
         )}
         {tech.vol_zone && (
-          <Pill color={VOL_COLORS[tech.vol_zone] || "#64748b"} label={`Vol ${tech.vol_zone}`} tooltip={TECH_TOOLTIPS.vol_vs_avg} />
+          <Pill color={color} label={`Vol ${tech.vol_zone}`} tooltip={TECH_TOOLTIPS.vol_vs_avg} />
         )}
         {tech.momentum_state && (
-          <Pill color="#a855f7" label={tech.momentum_state.replace(/_/g, " ")} tooltip={TECH_TOOLTIPS.momentum_state} />
+          <Pill color={color} label={tech.momentum_state.replace(/_/g, " ")} tooltip={TECH_TOOLTIPS.momentum_state} />
         )}
         {tech.sma_state && (
-          <Pill color="#06b6d4" label={tech.sma_state.replace(/_/g, " ")} tooltip={TECH_TOOLTIPS.sma_state} />
+          <Pill color={color} label={tech.sma_state.replace(/_/g, " ")} tooltip={TECH_TOOLTIPS.sma_state} />
         )}
       </div>
       {tech.confirms_or_contradicts && (
@@ -500,11 +516,20 @@ function TechBadges({ tech }) {
   );
 }
 
+// Pill — quieter background (10% alpha vs the old 20%) + thin matching outline
+// so multiple pills in a row read as one bar of related signals, not 4 stickers.
 function Pill({ color, label, tooltip }) {
+  // color is a CSS var like var(--color-accent-green). For the translucent
+  // background and outline we use color-mix so the rgba math works on theme
+  // tokens — falls back gracefully on old browsers (full color is still readable).
+  const bg     = `color-mix(in srgb, ${color} 12%, transparent)`;
+  const border = `color-mix(in srgb, ${color} 28%, transparent)`;
   const pill = (
     <span style={{
-      padding: "3px 8px", borderRadius: "6px", fontSize: "10px", fontWeight: 700,
-      background: `${color}20`, color, textTransform: "uppercase", letterSpacing: "0.5px",
+      padding: "3px 8px", borderRadius: "5px", fontSize: "10px", fontWeight: 700,
+      background: bg, color, border: `1px solid ${border}`,
+      textTransform: "uppercase", letterSpacing: "0.08em",
+      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
       cursor: tooltip ? "help" : "default",
     }}>
       {label}
@@ -1251,10 +1276,23 @@ function ThemeDetailModal({ theme, holdingsDetail, sectorReturns, onClose }) {
                         {chg >= 0 ? "▲ +" : "▼ "}{chg}%
                       </span>
                     )}
-                    {tech?.rsi_zone && <Pill color={RSI_COLORS[tech.rsi_zone]} label={`RSI ${tech.rsi_zone}`} tooltip={TECH_TOOLTIPS.rsi} />}
-                    {tech?.vol_zone && <Pill color={VOL_COLORS[tech.vol_zone]} label={`Vol ${tech.vol_zone}`} tooltip={TECH_TOOLTIPS.vol_vs_avg} />}
-                    {tech?.momentum_state && <Pill color="#a855f7" label={tech.momentum_state.replace(/_/g, " ")} tooltip={TECH_TOOLTIPS.momentum_state} />}
-                    {tech?.sma_state && <Pill color="#06b6d4" label={tech.sma_state.replace(/_/g, " ")} tooltip={TECH_TOOLTIPS.sma_state} />}
+                    {/* All four tech chips share one direction-keyed color so
+                        the row reads as a winner/loser at a glance. See
+                        TechBadges for the same pattern. */}
+                    {(() => {
+                      const pillColor =
+                        chg == null ? "var(--color-text-muted)" :
+                        chg >= 0    ? "var(--color-accent-green)" :
+                                      "var(--color-accent-red)";
+                      return (
+                        <>
+                          {tech?.rsi_zone && <Pill color={pillColor} label={`RSI ${tech.rsi_zone}`} tooltip={TECH_TOOLTIPS.rsi} />}
+                          {tech?.vol_zone && <Pill color={pillColor} label={`Vol ${tech.vol_zone}`} tooltip={TECH_TOOLTIPS.vol_vs_avg} />}
+                          {tech?.momentum_state && <Pill color={pillColor} label={tech.momentum_state.replace(/_/g, " ")} tooltip={TECH_TOOLTIPS.momentum_state} />}
+                          {tech?.sma_state && <Pill color={pillColor} label={tech.sma_state.replace(/_/g, " ")} tooltip={TECH_TOOLTIPS.sma_state} />}
+                        </>
+                      );
+                    })()}
                   </div>
                 </div>
               );
