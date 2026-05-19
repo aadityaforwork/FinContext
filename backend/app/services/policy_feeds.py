@@ -40,6 +40,11 @@ _policy_cache: TTLCache = TTLCache(maxsize=8, ttl=60 * 60)
 # the upstream recovers in 10 min we pick it back up automatically.
 _policy_neg_cache: TTLCache = TTLCache(maxsize=32, ttl=10 * 60)
 
+# Per-feed "we already logged the failure once" guard — same idea as in
+# news_sources.py. RBI predictably returns 418 to Render IPs (Cloudflare anti-
+# bot), and we don't need that line in the logs every Context Engine run.
+_policy_logged_failure: set[str] = set()
+
 # Hard cap on a single feed fetch. PIB/RBI are slow Indian gov servers; on a
 # bad day they hang the TCP connect indefinitely. feedparser.parse() ignores
 # timeouts entirely, so we MUST fetch bytes ourselves and hand them in.
@@ -229,8 +234,13 @@ def _fetch_feed(url: str, source: str, scope: str, limit: int) -> list[dict]:
         r.raise_for_status()
         feed = feedparser.parse(r.content)
     except Exception as e:
-        logger.warning("policy feed fetch failed %s: %s", url, e)
         _policy_neg_cache[url] = True
+        # Log once per process. RBI's 418 from Render is a known persistent
+        # condition; PIB occasionally times out. The pipeline degrades
+        # gracefully via the negative cache — no need to spam the log.
+        if url not in _policy_logged_failure:
+            _policy_logged_failure.add(url)
+            logger.info("policy source unavailable (will retry after cache): %s — %s", source, type(e).__name__)
         return []
     out: list[dict] = []
     for entry in (feed.entries or [])[:limit]:

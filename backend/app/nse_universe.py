@@ -250,18 +250,197 @@ def resolve_yf_symbol(ticker: str) -> str | None:
 def search_stocks(query: str, sector: str | None = None, limit: int = 50) -> list[dict]:
     """
     Search the NSE stock universe by ticker or company name.
-    Optionally filter by sector.
+
+    Two-tier strategy:
+      1. Curated NSE_STOCKS (~143 entries, full sector metadata).
+      2. Yahoo Search API fallback — if curated returns nothing, call Yahoo's
+         autocomplete endpoint. Does FUZZY matching on both symbol and company
+         name, so "waaree" surfaces WAAREEENER.NS (Waaree Energies), "indigo"
+         finds INDIGO.NS, etc. Works for any of the ~1,800 NSE-listed equities.
+
+    Sector filter only applies to curated results (search-API path has no
+    curated sector data; we use Yahoo's US-NAICS classification as best-effort).
     """
     results = NSE_STOCKS
-    
+
     if sector:
         results = [s for s in results if s["sector"].lower() == sector.lower()]
-    
+
     if query:
         q = query.lower()
         results = [
             s for s in results
             if q in s["ticker"].lower() or q in s["name"].lower()
         ]
-    
+
+    # Fallback — fires ONLY when curated came up empty, no sector filter was
+    # applied, and the query has enough characters to be meaningful (≥2). Two
+    # sub-paths, tried in order: Yahoo Search API (fuzzy name+symbol), then a
+    # direct {QUERY}.NS probe (for users who type the exact symbol of a stock
+    # Yahoo Search misses, which happens for newly listed names sometimes).
+    if not results and not sector and query and len(query.strip()) >= 2:
+        results = _yahoo_search_ns(query.strip(), limit=limit) or []
+        if not results:
+            probe = _probe_yf_ticker(query)
+            if probe:
+                results = [probe]
+
     return results[:limit]
+
+
+# ---------------------------------------------------------------------------
+# yfinance probe — resolves uncurated NSE tickers (the ~1,650 stocks we don't
+# carry in NSE_STOCKS but ARE listed on NSE). Cached aggressively so search
+# autocompletes don't slam Yahoo.
+# ---------------------------------------------------------------------------
+import re as _re
+import logging as _logging
+from cachetools import TTLCache as _TTLCache
+
+_probe_log = _logging.getLogger(__name__)
+
+# Hit cache: 6 hours — ticker metadata doesn't change intraday.
+_probe_cache: _TTLCache = _TTLCache(maxsize=2000, ttl=6 * 60 * 60)
+# Miss cache: 30 min — short enough that a Yahoo blip recovers, long enough that
+# typos don't keep paying the network round-trip.
+_probe_neg_cache: _TTLCache = _TTLCache(maxsize=2000, ttl=30 * 60)
+
+# Yahoo Search API cache. Key is the lowercased query string. Hit TTL is 1h
+# (search results are stable but new listings happen) and miss TTL is short
+# so a transient Yahoo hiccup doesn't lock the query out for long.
+_search_cache:     _TTLCache = _TTLCache(maxsize=2000, ttl=60 * 60)
+_search_neg_cache: _TTLCache = _TTLCache(maxsize=2000, ttl=5 * 60)
+
+_TICKER_PATTERN = _re.compile(r"^[A-Z][A-Z0-9&-]{1,11}$")
+
+
+def _yahoo_search_ns(query: str, limit: int = 8) -> list[dict]:
+    """Yahoo Finance autocomplete API — fuzzy name+symbol search.
+
+    Endpoint: https://query1.finance.yahoo.com/v1/finance/search
+
+    Filters results to `.NS` symbols (NSE-listed) and returns NSE_STOCKS-shape
+    dicts. Handles the case the ticker-probe path can't: queries that don't
+    match the exact symbol of the stock, like "waaree" → WAAREEENER.NS.
+
+    Cached aggressively so typing autocomplete doesn't slam Yahoo. Returns []
+    on any failure; the caller falls back further.
+    """
+    q = (query or "").strip().lower()
+    if not q:
+        return []
+    if q in _search_cache:
+        return _search_cache[q]
+    if q in _search_neg_cache:
+        return []
+    try:
+        import requests as _rq
+        url = "https://query1.finance.yahoo.com/v1/finance/search"
+        params = {
+            "q": q,
+            "quotesCount": 15,
+            "newsCount": 0,
+            "enableFuzzyQuery": "true",
+        }
+        # Yahoo's search rejects bot UAs. Use a browser-realistic one.
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json, text/plain, */*",
+        }
+        r = _rq.get(url, params=params, headers=headers, timeout=3.0)
+        r.raise_for_status()
+        payload = r.json() or {}
+        quotes = payload.get("quotes") or []
+
+        # Keep only NSE-listed equities. Yahoo tags Indian NSE symbols with the
+        # ".NS" suffix and exchange code "NSI"; BSE is ".BO" / "BSE".
+        out: list[dict] = []
+        for item in quotes:
+            symbol = item.get("symbol") or ""
+            if not symbol.endswith(".NS"):
+                continue
+            if (item.get("quoteType") or "").upper() not in ("EQUITY", ""):
+                continue
+            ticker = symbol[:-3]  # strip the ".NS"
+            name = item.get("longname") or item.get("shortname") or ticker
+            # Prefer the curated sector if we happen to have one for this ticker.
+            curated = TICKER_TO_META.get(ticker)
+            sector = (curated or {}).get("sector") or item.get("sector") or "—"
+            out.append({
+                "ticker":    ticker,
+                "yf_symbol": symbol,
+                "name":      name,
+                "sector":    sector,
+            })
+            if len(out) >= limit:
+                break
+
+        if out:
+            _search_cache[q] = out
+            return out
+        else:
+            _search_neg_cache[q] = True
+            return []
+    except Exception as e:
+        _probe_log.debug("yahoo search failed for %s: %s", q, type(e).__name__)
+        _search_neg_cache[q] = True
+        return []
+
+
+def _probe_yf_ticker(query: str) -> dict | None:
+    """Try `{query.upper()}.NS` on yfinance. Returns NSE_STOCKS-shape dict on
+    success, None otherwise. Cached. Sub-second when cached, ~2s on a miss."""
+    q = (query or "").upper().strip()
+    if not q:
+        return None
+    # Only attempt for things that look like tickers. Full-name searches
+    # ("Reliance Industries") and typos ("infor") are skipped — those are
+    # the curated path's job.
+    if not _TICKER_PATTERN.match(q):
+        return None
+    if q in _probe_cache:
+        return _probe_cache[q]
+    if q in _probe_neg_cache:
+        return None
+    try:
+        # Lazy import — yfinance import is heavy; we don't want module-load
+        # cost just to define this function.
+        import yfinance as yf
+        from app.services import yf_safe
+
+        def _inner():
+            t = yf.Ticker(f"{q}.NS")
+            info = t.info or {}
+            # `longName` / `shortName` indicate Yahoo has the symbol on file.
+            # We also require a price OR a market cap to filter out delisted
+            # stubs that still return metadata.
+            name = info.get("longName") or info.get("shortName")
+            has_data = (
+                (info.get("regularMarketPrice") is not None and info["regularMarketPrice"] > 0)
+                or (info.get("marketCap") is not None)
+                or (info.get("trailingPE") is not None)
+            )
+            if not name or not has_data:
+                return None
+            return {
+                "ticker":    q,
+                "yf_symbol": f"{q}.NS",
+                "name":      name,
+                # Yahoo's `sector` is US-NAICS flavour but better than nothing.
+                "sector":    info.get("sector") or "—",
+            }
+
+        result, ok = yf_safe.run_with_timeout(_inner, timeout_s=3.0)
+        if not ok or result is None:
+            _probe_neg_cache[q] = True
+            return None
+        _probe_cache[q] = result
+        return result
+    except Exception as e:
+        _probe_log.debug("yf probe failed for %s: %s", q, type(e).__name__)
+        _probe_neg_cache[q] = True
+        return None

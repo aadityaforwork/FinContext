@@ -24,6 +24,7 @@ import OnboardingModal, {
 } from "./components/OnboardingModal";
 import FirstInsightCard from "./components/FirstInsightCard";
 import OnboardingTour from "./components/OnboardingTour";
+import PreTradeCheckModal from "./components/PreTradeCheckModal";
 import { useAuth } from "./context/AuthContext";
 import { supabase } from "./lib/supabase";
 import { useToast } from "./components/Toast";
@@ -42,6 +43,9 @@ export default function App() {
   // jumping into a stock-detail view (analysis / company). Powers the "← Back"
   // affordance on those pages without a full router.
   const [prevNav, setPrevNav] = useState(null);
+  // Pre-Trade Check modal — the muscle-memory "before you click buy" surface.
+  // null = closed; ticker string = open with that ticker.
+  const [preTradeTicker, setPreTradeTicker] = useState(null);
   // Drawer state for the hub-and-drawer model. Only one drawer open at a time.
   const [drawer, setDrawer] = useState(null); // "watchlist" | "screener" | null
   // First-run onboarding modal (shown to new users with empty universe).
@@ -243,6 +247,7 @@ export default function App() {
       <main className="main-content">
         <DashboardHeader
           onSearch={() => setActiveNav("screener")}
+          onCheckTicker={(t) => setPreTradeTicker(t)}
           user={user}
           onLogout={logout}
         />
@@ -268,6 +273,16 @@ export default function App() {
         {/* Dashboard handles its own disclaimer per-pane; other views show the footer. */}
         {activeNav !== "dashboard" && <ComplianceFooter />}
       </main>
+
+      {/* Pre-Trade Check — modal at app root so it overlays any view.
+          Triggered by the header pill (or programmatically elsewhere). */}
+      {preTradeTicker && (
+        <PreTradeCheckModal
+          ticker={preTradeTicker}
+          onClose={() => setPreTradeTicker(null)}
+          onOpenDeepDive={(t) => handleNavigate("analysis", t)}
+        />
+      )}
 
       {/* Drawers — rendered at app root so they overlay everything */}
       <WatchlistDrawer

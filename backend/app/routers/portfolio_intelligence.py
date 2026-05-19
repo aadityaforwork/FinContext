@@ -1874,22 +1874,54 @@ def _slim_summary_context(ctx: dict) -> dict:
         # work (the prompt expects `global_news[i]`/`india_news[i]`).
         "india_headlines": _slim_news(ctx.get("india_headlines"), limit=5),
         "global_headlines": _slim_news(ctx.get("global_headlines"), limit=8),
+        # Policy headlines — PIB / RBI. Carry their own scope tag the LLM can
+        # cite for `watch_today` ("RBI MPC tomorrow per policy_news[2]") instead
+        # of saying "investors should watch for RBI announcements."
+        "policy_headlines": _slim_news(ctx.get("policy_headlines"), limit=6),
     }
-    # Holdings: cap at 15 by name+sector+1 news item.
+    # Holdings: ticker, name, sector, 1 news item, + upcoming_earnings (the
+    # concrete date the LLM cites in watch_today/tomorrow_setup instead of
+    # falling back on "earnings reports may provide insights").
     holdings = []
     for h in (ctx.get("holdings") or [])[:15]:
-        holdings.append({
+        slot = {
             "ticker": h.get("ticker"),
             "name": h.get("name"),
             "sector": h.get("sector"),
             "news": _slim_news(h.get("news"), limit=1),
-        })
+        }
+        ue = h.get("upcoming_earnings")
+        if ue:
+            slot["upcoming_earnings"] = ue
+        holdings.append(slot)
     slim["holdings"] = holdings
-    # Watchlist: ticker + sector only — no news needed for narrative.
-    slim["watchlist"] = [
-        {"ticker": w.get("ticker"), "sector": w.get("sector")}
-        for w in (ctx.get("watchlist") or [])[:10]
-    ]
+    # Watchlist: ticker + sector + upcoming earnings (no news to keep payload small).
+    watchlist = []
+    for w in (ctx.get("watchlist") or [])[:10]:
+        slot = {"ticker": w.get("ticker"), "sector": w.get("sector")}
+        ue = w.get("upcoming_earnings")
+        if ue:
+            slot["upcoming_earnings"] = ue
+        watchlist.append(slot)
+    slim["watchlist"] = watchlist
+
+    # Roll up all upcoming earnings across holdings + watchlist into one
+    # `upcoming_events` list the LLM can scan at a glance. Sorted by days_ahead.
+    # This is the single biggest fix for filler text in watch_today /
+    # tomorrow_setup — the model now has a concrete calendar to cite from.
+    rolled: list[dict] = []
+    for w in (holdings + watchlist):
+        ue = w.get("upcoming_earnings")
+        if ue and isinstance(ue, dict) and ue.get("date"):
+            rolled.append({
+                "ticker": w.get("ticker"),
+                "name": w.get("name") or w.get("ticker"),
+                "event": "earnings",
+                "date": ue.get("date"),
+                "days_ahead": ue.get("days_ahead"),
+            })
+    rolled.sort(key=lambda x: x.get("days_ahead") or 999)
+    slim["upcoming_events"] = rolled[:12]
     return slim
 
 
@@ -1903,7 +1935,11 @@ def _summary_cache_key(positions: list[dict], watchlist: list[str]) -> str:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     h_key = ",".join(sorted({(p.get("ticker") or "").upper() for p in positions if p.get("ticker")}))
     w_key = ",".join(sorted({t.upper() for t in watchlist if t}))
-    return f"summary|{today}|{h_key}|{w_key}"
+    # `v2` — bumped after the prompt rewrite that bans filler phrases and
+    # requires concrete dated events in watch_today/tomorrow_setup. Stale
+    # cached payloads written under the old prompt would still serve filler;
+    # the bump invalidates them in one line.
+    return f"summary|v2|{today}|{h_key}|{w_key}"
 
 
 @router.post("/market-summary")
@@ -1960,30 +1996,84 @@ async def market_summary(req: MarketSummaryRequest):
         "Write a comprehensive daily market summary for an Indian retail investor with "
         "the universe shown in CONTEXT. The output must read like a senior analyst's "
         "morning note — plain English, complete sentences, narrative flow.\n\n"
-        "STRUCTURE — emit EXACTLY these 6 sections in this order:\n"
-        "  1. 'overnight'         — what happened in US/EU/Asia overnight, ~3-4 sentences\n"
-        "  2. 'india_open'        — Nifty/Sensex/sector breadth this morning, ~3-4 sentences\n"
-        "  3. 'your_portfolio'    — direct catalysts hitting CONTEXT.holdings; name "
-        "                           specific tickers and which news/sector moved them. "
-        "                           ~5-7 sentences. THIS IS THE LONGEST SECTION.\n"
-        "  4. 'sector_pulse'      — sector-wide forces relevant to the user's exposure; "
-        "                           reference CONTEXT.user_universe.sector_exposure_pct. "
+        "STRUCTURE — emit EXACTLY these 6 sections in this order. Each section has a\n"
+        "STRICTLY ENFORCED scope (what it covers) and exclusion (what belongs elsewhere).\n"
+        "Sections must NOT cover the same evidence — if a fact appears in one section,\n"
+        "it cannot reappear in another. Use the SAME headline / news id at most ONCE\n"
+        "across the entire brief.\n\n"
+        "  1. 'overnight'         — what happened in US/EU/Asia LAST NIGHT (Wall Street\n"
+        "                           close, Asia-Pacific overnight, Europe close).\n"
+        "                           ALLOWED: global_news[*], indices (US/EU/Asia).\n"
+        "                           DO NOT include: India market open, Indian holdings,\n"
+        "                           or 'what to watch tonight' (that's tomorrow_setup).\n"
+        "                           ~3-4 sentences.\n"
+        "  2. 'india_open'        — Nifty/Sensex levels and DOMESTIC breadth this morning.\n"
+        "                           ALLOWED: indices.nifty_50/sensex/midcap, sectors[*]\n"
+        "                           returns, india_news[*] about the broad market.\n"
+        "                           DO NOT include: global overnight (overnight), any\n"
+        "                           single holding by name (your_portfolio).\n"
+        "                           ~3-4 sentences.\n"
+        "  3. 'your_portfolio'    — direct catalysts hitting CONTEXT.holdings; name\n"
+        "                           specific tickers and which {TICKER}_news[*] item or\n"
+        "                           sector move drove them. THIS IS THE LONGEST SECTION.\n"
+        "                           ALLOWED: per-ticker news ids, holdings.\n"
+        "                           DO NOT include: generic sector commentary (that's\n"
+        "                           sector_pulse), upcoming-event teasers (watch_today).\n"
+        "                           ~5-7 sentences.\n"
+        "  4. 'sector_pulse'      — sector-wide forces relevant to the user's exposure.\n"
+        "                           Reference user_universe.sector_exposure_pct + the\n"
+        "                           sectors[*] return data. Talk about the SECTOR as a\n"
+        "                           whole, not individual tickers.\n"
+        "                           DO NOT include: per-ticker stories (your_portfolio),\n"
+        "                           any global news (overnight).\n"
         "                           ~3-5 sentences.\n"
-        "  5. 'watch_today'       — events likely to move things later today (RBI, "
-        "                           earnings, results, data releases). ~3-4 sentences.\n"
-        "  6. 'tomorrow_setup'    — overnight catalysts to watch (Fed, results, US data) "
-        "                           and how they'd transmit to the user's holdings. "
-        "                           ~3-4 sentences.\n\n"
+        "  5. 'watch_today'       — events scheduled IN INDIA in the next 0-2 days.\n"
+        "                           SOURCES (one of these MUST be cited or this section\n"
+        "                           is just 1 short honest sentence):\n"
+        "                             • upcoming_events[*] with days_ahead ≤ 2 → name\n"
+        "                               the TICKER + EXACT DATE ('TCS earnings 22 May\n"
+        "                               per upcoming_events[1]').\n"
+        "                             • policy_news[*] dated today/tomorrow → cite by id.\n"
+        "                           If neither has any item: write ONE sentence — 'No\n"
+        "                           portfolio earnings or scheduled policy events in the\n"
+        "                           next 48 hours' — and STOP. Do not pad.\n"
+        "  6. 'tomorrow_setup'    — what to watch TONIGHT (US session, Fed/Powell, US\n"
+        "                           data, US earnings) AND upcoming_events[*] with\n"
+        "                           days_ahead between 1 and 5. Name specific holdings\n"
+        "                           and their dates.\n"
+        "                           DO NOT include: anything that already happened\n"
+        "                           overnight (that's section 1), any India-today events\n"
+        "                           (that's watch_today).\n"
+        "                           If thin: ONE honest sentence. No filler.\n\n"
         "STRICT RULES:\n"
-        "1. NEVER recommend buy/sell/hold. Use stance language only ('tailwind', "
-        "'headwind', 'watch', 'caution'). Educational, not advisory.\n"
-        "2. Every analytical claim must reference a specific id from CONTEXT (e.g. "
-        "global_news[2], INFY_news[0], sectors[i]). Cite inline as '(per global_news[2])'.\n"
-        "3. Mention the user's specific tickers by name where relevant — this is "
-        "personalized, not generic.\n"
-        "4. Total output across all sections should be ~60 lines / ~500-700 words. "
-        "Concise, readable, no fluff.\n"
-        "5. If CONTEXT has thin data for a section, say so explicitly rather than padding."
+        "1. NEVER recommend buy/sell/hold. Use stance language only ('tailwind',\n"
+        "   'headwind', 'watch', 'caution'). Educational, not advisory.\n"
+        "2. Every analytical claim must reference a specific id from CONTEXT (e.g.\n"
+        "   global_news[2], INFY_news[0], sectors[i]). Cite inline as '(per global_news[2])'.\n"
+        "3. Mention the user's specific tickers by name where relevant — this is\n"
+        "   personalized, not generic.\n"
+        "4. **NO CROSS-SECTION REPETITION.** Each evidence id (a news[i] or sectors[i])\n"
+        "   may be cited in AT MOST ONE section. If you find yourself wanting to reuse\n"
+        "   the same point in a second section, that's a signal the second section\n"
+        "   has nothing to add and should be SHORTER, not a paraphrase of the first.\n"
+        "5. **NO REPHRASED PARAPHRASES.** Two sections must not say the same thing in\n"
+        "   different words. The reader will notice and the brief becomes worthless.\n"
+        "6. Total output across all sections should be ~60 lines / ~500-700 words.\n"
+        "   Concise, readable, no fluff.\n"
+        "7. If CONTEXT has thin data for a section, write a SHORTER section (1-2\n"
+        "   sentences) explicitly saying the calendar is light. NEVER pad with content\n"
+        "   already covered elsewhere.\n"
+        "8. **BANNED FILLER PHRASES** — these are zero-information templates and will\n"
+        "   make the brief look generated. Never use:\n"
+        "     • 'investors should keep an eye on...' / '...should monitor...'\n"
+        "     • '...may provide further insights...' / '...could provide direction...'\n"
+        "     • 'market participants remain vigilant' / '...remain cautious'\n"
+        "     • 'looking ahead...' / 'going forward...'\n"
+        "     • 'potential policy announcements' (cite a SPECIFIC policy_news[i] or omit)\n"
+        "     • 'earnings reports from various companies' (NAME the tickers + dates)\n"
+        "     • 'sectors exposed to international trends' (NAME the sector)\n"
+        "   Every sentence must carry SPECIFIC data — a ticker, a date, a percentage,\n"
+        "   a named policy, or a news id. Otherwise delete the sentence."
     )
     schema = """{
   "sections": [

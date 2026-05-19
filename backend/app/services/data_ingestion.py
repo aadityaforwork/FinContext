@@ -97,44 +97,66 @@ def _fetch_google_news(query: str, num_results: int = 8) -> list[dict]:
 def retrieve_context(ticker: str, query: str | None = None, top_k: int = 5) -> list[dict]:
     """
     Retrieve relevant context documents for a given ticker.
-    
-    Strategy:
-    1. Try to fetch real news from Google News RSS
-    2. Fall back to seed data if fetching fails
-    
-    In production, this will use vector similarity search.
-    
+
+    Strategy (multi-source, post-fix):
+    1. Pull from news_sources.fetch_for_ticker — this fans out across
+       Moneycontrol / ET / Livemint / Business Standard / Hindu BusinessLine
+       AND Google News, dedupes by normalized title, sorts by freshness.
+    2. If the user passed an explicit `query`, supplement with a targeted
+       Google search on that query.
+    3. Fall back to seed data only if every source returns empty.
+
+    The previous version pulled from Google News only — which meant the same
+    5 articles ranked for any IT-stock query (TCS/INFY/WIPRO/HCLTECH) showed
+    up identically, making the news feed feel stuck.
+
     Args:
         ticker: Stock ticker symbol
-        query: Optional natural-language query
+        query: Optional natural-language query — adds a focused Google call
         top_k: Number of documents to retrieve
-    
+
     Returns:
-        List of context documents sorted by relevance score
+        List of context documents sorted by freshness, with `relevance_score`
+        attached for back-compat with seed-data ranking consumers.
     """
-    cache_key = f"context_{ticker}"
+    cache_key = f"context_{ticker}_{query or ''}"
     if cache_key in _news_cache:
         return _news_cache[cache_key][:top_k]
-    
-    # Build an effective search query
+
     meta = TICKER_TO_META.get(ticker, {})
     stock_name = meta.get("name", ticker)
     sector = meta.get("sector", "")
-    
-    search_query = f"{stock_name} stock {sector} NSE"
+
+    # Lazy import to avoid circular dependency at module load.
+    from app.services import news_sources
+
+    # 1. Multi-source ticker pull
+    news: list[dict] = news_sources.fetch_for_ticker(
+        ticker, stock_name, sector, n=top_k + 3
+    )
+
+    # 2. Optional supplement when caller provides a custom query
     if query:
-        search_query = f"{stock_name} {query}"
-    
-    # Try real news first
-    news = _fetch_google_news(search_query, num_results=top_k + 3)
-    
+        try:
+            extra = news_sources.google_news_for_query(
+                f"{stock_name} {query}", hl="en-IN", gl="IN", ceid="IN:en",
+                n=top_k,
+            )
+            news = news_sources.dedup_items(news + extra)
+        except Exception as e:
+            logger.warning(f"Custom query fetch failed for {ticker}: {e}")
+
+    # Attach relevance_score for back-compat: rank is freshness-derived, with
+    # the first item highest. Old callers (seed_data sort) keep working.
+    for i, item in enumerate(news):
+        item.setdefault("relevance_score", round(0.95 - i * 0.05, 2))
+
     if len(news) >= 2:
-        # Got real news — use it
         _news_cache[cache_key] = news
-        logger.info(f"Retrieved {len(news)} real news articles for {ticker}")
+        logger.info(f"Retrieved {len(news)} multi-source news items for {ticker}")
         return news[:top_k]
-    
-    # Fall back to seed data
+
+    # 3. Fall back to seed data only if everything else came up empty
     logger.info(f"Falling back to seed data for {ticker}")
     corpus = NEWS_CORPUS.get(ticker, [])
     fallback = sorted(corpus, key=lambda x: x["relevance_score"], reverse=True)[:top_k]

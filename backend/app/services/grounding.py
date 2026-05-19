@@ -28,7 +28,7 @@ import yfinance as yf
 from cachetools import TTLCache
 
 from app.nse_universe import TICKER_TO_META, TICKER_TO_YF, NSE_STOCKS, resolve_yf_symbol
-from app.services import data_ingestion, market_flows, policy_feeds, technicals, vector_store, yf_safe
+from app.services import data_ingestion, market_flows, news_sources, policy_feeds, technicals, vector_store, yf_safe
 
 logger = logging.getLogger(__name__)
 
@@ -723,10 +723,21 @@ def build_market_context() -> dict:
         if data:
             sectors.append({"sector": sector_name, "index": sym, **data})
 
+    # India headlines — multi-source pool (Moneycontrol, ET, Mint, BS, Hindu
+    # BusinessLine) + Google News. Earlier this was a single Google query which
+    # returned the same 5 articles for hours because Google's ranking is stable
+    # — UI felt stuck on yesterday's news. The pool gives genuine variety; we
+    # take 6 from the pool and 3 from Google as supplement, dedup, and freshness-
+    # sort. Per-source failures are isolated inside news_sources.
+    india_pool = news_sources.fetch_india_market_pool(n=12)
     india_query = "India economy stock market finance when:1d"
-    india_news_raw = _fetch_rss_headlines(india_query, hl="en-IN", gl="IN", ceid="IN:en", n=6)
+    india_google = news_sources.google_news_for_query(
+        india_query, hl="en-IN", gl="IN", ceid="IN:en", n=6
+    )
+    india_merged = news_sources.dedup_items(india_pool + india_google)
+    # Keep the top 10 — more variety than the old 6 since we have real source diversity now.
     india_news = [
-        {"id": f"india_news[{i}]", **n} for i, n in enumerate(india_news_raw)
+        {"id": f"india_news[{i}]", **n} for i, n in enumerate(india_merged[:10])
     ]
 
     # Policy + regulatory pulse (PIB government press releases + RBI). This is
@@ -1193,11 +1204,16 @@ def build_morning_brief_context(
                 })
         except Exception as e:
             logger.warning("morning brief: news fetch failed for %s: %s", t, e)
+        # Upcoming earnings (≤14 days). Without this the LLM has no concrete
+        # event to cite for `watch_today` / `tomorrow_setup` and falls back to
+        # filler — "investors should keep an eye on upcoming data releases".
+        earnings = _upcoming_earnings(t, max_days=14)
         holdings_summary.append({
             "ticker": t,
             "name": meta.get("name"),
             "sector": meta.get("sector"),
             "news": news_items,
+            "upcoming_earnings": earnings,
         })
 
     watchlist_summary: list[dict] = []
@@ -1214,11 +1230,13 @@ def build_morning_brief_context(
                 })
         except Exception as e:
             logger.warning("morning brief: news fetch failed for watch %s: %s", t, e)
+        earnings = _upcoming_earnings(t, max_days=14)
         watchlist_summary.append({
             "ticker": t,
             "name": meta.get("name"),
             "sector": meta.get("sector"),
             "news": news_items,
+            "upcoming_earnings": earnings,
         })
 
     from datetime import datetime

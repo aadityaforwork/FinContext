@@ -47,6 +47,10 @@ class DeepDiveRequest(BaseModel):
     horizon: str = "long_term"
 
 
+class PreTradeCheckRequest(BaseModel):
+    ticker: str
+
+
 # ---------------------------------------------------------------------------
 # 1. The "What-If" Scenario Simulator (grounded)
 # ---------------------------------------------------------------------------
@@ -706,3 +710,162 @@ async def deep_dive_analysis(req: DeepDiveRequest):
         gen(req.ticker.upper()),
         media_type="text/event-stream",
     )
+
+
+# ---------------------------------------------------------------------------
+# 6. Pre-Trade Check — deterministic scorecard, NO LLM, sub-2-second
+# ---------------------------------------------------------------------------
+# Product positioning: "the thing you check before you hit buy on Zerodha."
+#
+# Compliance shape: this is NOT a recommendation. It is a checklist of factors
+# a careful investor would inspect. Status labels are PASS / CAUTION / FAIL on
+# each factor in isolation; the top-line is just a count, never a verdict.
+# Every line carries a `why` so the user learns the framework, not just the
+# verdict — education, not advice.
+#
+# Speed: pulls from already-cached grounding context + technicals. No LLM call,
+# no fresh peer fetch. If a check's data is missing (e.g. no technicals), the
+# check is omitted from the scorecard rather than guessing.
+# ---------------------------------------------------------------------------
+def _check(check_id: str, label: str, status: str, value: str, why: str) -> dict:
+    return {"id": check_id, "label": label, "status": status, "value": value, "why": why}
+
+
+def _compute_pretrade_checks(context: dict, tech: dict | None) -> list[dict]:
+    """Run the 6 deterministic checks. Each returns PASS / CAUTION / FAIL or
+    is skipped entirely if its input data isn't available. The order matters —
+    it's the order rendered in the UI, structured from most-immediate (price
+    extension) to most-contextual (trend / 52w position)."""
+    checks: list[dict] = []
+    snap = context.get("snapshot") or {}
+    pb   = context.get("peer_benchmark") or {}
+    medians = pb.get("medians") or {}
+
+    # 1. RSI — is the stock overbought / oversold right now?
+    if tech and tech.get("rsi14") is not None:
+        rsi = tech["rsi14"]
+        if rsi >= 80:
+            status = "FAIL"; why = "RSI ≥ 80 — strongly overbought; recent buyers have priced in a lot."
+        elif rsi >= 70:
+            status = "CAUTION"; why = "RSI ≥ 70 — overbought; pullback risk elevated short-term."
+        elif rsi <= 20:
+            status = "CAUTION"; why = "RSI ≤ 20 — deeply oversold; may bounce but could also indicate distress."
+        elif rsi <= 30:
+            status = "CAUTION"; why = "RSI ≤ 30 — oversold; technical bounce possible but check the why."
+        else:
+            status = "PASS"; why = "RSI in healthy 30–70 range — neither extended nor washed out."
+        checks.append(_check("rsi", "Price not extended", status, f"RSI {round(rsi)}", why))
+
+    # 2. Distance from 20-DMA — is the entry pressing a short-term mean?
+    if tech and tech.get("pct_from_sma20") is not None:
+        dist = tech["pct_from_sma20"]
+        abs_d = abs(dist)
+        sign = "+" if dist >= 0 else "−"
+        if abs_d <= 5:
+            status = "PASS"; why = "Within 5% of 20-day moving average — not stretched from short-term mean."
+        elif abs_d <= 10:
+            status = "CAUTION"; why = f"{round(abs_d)}% from 20-DMA — somewhat extended; mean-reversion risk."
+        else:
+            status = "FAIL"; why = f"{round(abs_d)}% from 20-DMA — heavily extended; high reversion risk."
+        checks.append(_check("dist_sma20", "Not stretched from mean", status, f"{sign}{round(abs_d, 1)}% from SMA20", why))
+
+    # 3. Volume vs 20-day average — is today abnormal?
+    if tech and tech.get("vol_vs_avg20") is not None:
+        vx = tech["vol_vs_avg20"]
+        if vx >= 3.0:
+            status = "FAIL"; why = "Volume ≥ 3× avg — climactic; either capitulation or blowoff. Wait for the dust."
+        elif vx >= 2.0:
+            status = "CAUTION"; why = "Volume ≥ 2× avg — surge; often marks a short-term inflection."
+        elif vx <= 0.3:
+            status = "CAUTION"; why = "Volume ≤ 0.3× avg — very thin; price moves are unreliable signals."
+        else:
+            status = "PASS"; why = "Volume within normal range — price action is on representative flow."
+        checks.append(_check("volume", "Volume is normal", status, f"{vx}× 20d avg", why))
+
+    # 4. Valuation vs sector peer median (P/E)
+    pe = snap.get("pe_ratio")
+    med_pe = medians.get("pe_ratio")
+    if pe is not None and med_pe and med_pe > 0:
+        ratio = pe / med_pe
+        diff_pct = round((ratio - 1) * 100)
+        if ratio > 1.6:
+            status = "FAIL"; why = f"P/E {round(pe)} is {diff_pct}% above sector median {round(med_pe)} — pricing in big growth."
+        elif ratio > 1.3:
+            status = "CAUTION"; why = f"P/E {round(pe)} is {diff_pct}% above sector median {round(med_pe)} — modest premium."
+        elif ratio < 0.7:
+            status = "PASS"; why = f"P/E {round(pe)} is {abs(diff_pct)}% below sector median {round(med_pe)} — relative value."
+        else:
+            status = "PASS"; why = f"P/E {round(pe)} sits near sector median {round(med_pe)} — fairly valued vs peers."
+        checks.append(_check("valuation", "Valuation vs sector", status, f"P/E {round(pe)} vs med {round(med_pe)}", why))
+
+    # 5. 52-week position
+    cp = snap.get("current_price")
+    hi = snap.get("52w_high")
+    lo = snap.get("52w_low")
+    if cp and hi and lo and hi > lo:
+        band = round((cp - lo) / (hi - lo) * 100)
+        if band >= 95:
+            status = "CAUTION"; why = "≥ 95% of 52-week range — near the top; thinner air, less margin of error."
+        elif band <= 5:
+            status = "CAUTION"; why = "≤ 5% of 52-week range — near the floor; could be value or could be falling."
+        elif band >= 80:
+            status = "CAUTION"; why = f"{band}% of 52-week range — upper end; price has run."
+        else:
+            status = "PASS"; why = f"{band}% of 52-week range — mid-range, room either way."
+        checks.append(_check("range_52w", "52-week range position", status, f"{band}% of range", why))
+
+    # 6. Trend state (relative to SMA50)
+    if tech and tech.get("sma_state"):
+        state = tech["sma_state"]
+        mom = (tech.get("momentum_state") or "").replace("_", " ")
+        if state == "above_sma50":
+            status = "PASS"; why = "Trading above 50-day moving average — primary trend is up."
+            val = "Above SMA50"
+        else:
+            status = "CAUTION"; why = "Trading below 50-day moving average — primary trend is down; buying a downtrend takes conviction."
+            val = "Below SMA50"
+        if mom:
+            val += f" · {mom}"
+        checks.append(_check("trend", "Primary trend", status, val, why))
+
+    return checks
+
+
+@router.post("/pre-trade-check")
+async def pre_trade_check(req: PreTradeCheckRequest):
+    """Fast, deterministic checklist. No LLM. Sub-2-second.
+
+    Designed to be the muscle-memory check a user runs before clicking buy:
+    six grounded factors, each with a PASS/CAUTION/FAIL and a 1-line why.
+    Top-line is a count — never a verdict. We do not say "buy" or "don't buy".
+    """
+    ticker = req.ticker.upper()
+    meta = TICKER_TO_META.get(ticker)
+    if not meta:
+        raise HTTPException(status_code=404, detail=f"Ticker {ticker} not found in NSE universe")
+
+    # Both calls hit caches first — sub-second when warm. Run them concurrently.
+    context_task = asyncio.to_thread(grounding.build_stock_context, ticker, False, 0)
+    tech_task    = asyncio.to_thread(technicals.compute_signals, ticker)
+    context, tech = await asyncio.gather(context_task, tech_task)
+
+    checks = _compute_pretrade_checks(context, tech)
+
+    summary = {
+        "passes":   sum(1 for c in checks if c["status"] == "PASS"),
+        "cautions": sum(1 for c in checks if c["status"] == "CAUTION"),
+        "fails":    sum(1 for c in checks if c["status"] == "FAIL"),
+        "total":    len(checks),
+    }
+
+    snap = context.get("snapshot") or {}
+    return with_disclaimer({
+        "ticker": ticker,
+        "company": meta.get("name", ticker),
+        "sector":  meta.get("sector", ""),
+        "current_price":  snap.get("current_price"),
+        "change_percent": snap.get("change_percent"),
+        "checks":   checks,
+        "summary":  summary,
+        "generated_at": context.get("generated_at"),
+    })
