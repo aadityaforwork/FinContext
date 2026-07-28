@@ -48,6 +48,28 @@ _MAX_ROWS = 10_000
 _PURGE_PROBABILITY = 0.02
 
 
+# ---------------------------------------------------------------------------
+# Datetime handling
+# ---------------------------------------------------------------------------
+# `LLMCache.expires_at` is a plain DateTime column — TIMESTAMP WITHOUT TIME
+# ZONE on Postgres, a naive string on SQLite. Writing an aware datetime into it
+# and comparing the naive value that comes back against an aware `now()` raises
+# "can't compare offset-naive and offset-aware datetimes". Because get() wraps
+# everything in `except Exception`, that raise was invisible: it just returned
+# None every time, so the DB tier never served a single hit and every caller
+# silently regenerated. The in-process TTLCache masked it in dev.
+#
+# Rule: this column is naive-UTC on the wire. Write naive-UTC, and coerce
+# whatever comes back to aware-UTC before comparing.
+def _utcnow_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _as_aware_utc(dt: datetime) -> datetime:
+    """Interpret a stored timestamp as UTC. Tolerates legacy aware rows."""
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
 async def get(cache_key: str) -> dict | None:
     """Return the cached payload if present and unexpired, else None."""
     if cache_key in _inproc:
@@ -58,7 +80,7 @@ async def get(cache_key: str) -> dict | None:
             row = await session.get(LLMCache, cache_key)
             if row is None:
                 return None
-            if row.expires_at < datetime.now(timezone.utc):
+            if _as_aware_utc(row.expires_at) < datetime.now(timezone.utc):
                 # Expired — delete lazily.
                 await session.delete(row)
                 await session.commit()
@@ -73,7 +95,7 @@ async def get(cache_key: str) -> dict | None:
 
 async def set(cache_key: str, payload: dict, ttl_seconds: int, scope: str = "global") -> None:
     """Upsert a cache row. Idempotent."""
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+    expires_at = _utcnow_naive() + timedelta(seconds=ttl_seconds)
     _inproc[cache_key] = payload
 
     try:
@@ -119,7 +141,8 @@ async def invalidate(cache_key: str) -> None:
 
 async def purge_expired(limit: int = 500) -> int:
     """Delete up to `limit` expired rows. Returns the row count deleted."""
-    now = datetime.now(timezone.utc)
+    # Naive-UTC: compared in SQL against a naive column (see note above).
+    now = _utcnow_naive()
     try:
         async with async_session() as session:
             stmt = (

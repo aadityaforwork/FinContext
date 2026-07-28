@@ -24,7 +24,7 @@
  * with the rest of the app's loading vocabulary.
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import StockChart from "./StockChart";
 import MissionControlLoader from "./MissionControlLoader";
 
@@ -900,6 +900,55 @@ function buildSwingConfTooltip(setup) {
 }
 
 // ---------------------------------------------------------------------------
+// Local brief cache
+// ---------------------------------------------------------------------------
+// Mirrors the backend's stale-while-revalidate window. Purely a paint
+// accelerator — the backend remains the source of truth and every render is
+// followed by a network call that overwrites this. Kept deliberately short
+// (matching the server's stale ceiling) so we never show yesterday's brief.
+const DD_CACHE_PREFIX = "fc:deepdive:";
+const DD_CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6h — same as the server ceiling
+
+function ddCacheKey(ticker, horizon) {
+  return `${DD_CACHE_PREFIX}${ticker}|${horizon}`;
+}
+
+function readDdCache(key) {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed?.data || Date.now() - (parsed.ts || 0) > DD_CACHE_MAX_AGE_MS) {
+      localStorage.removeItem(key);
+      return null;
+    }
+    return parsed;
+  } catch {
+    // Corrupt entry or storage unavailable — treat as a miss.
+    return null;
+  }
+}
+
+function writeDdCache(key, data) {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(key, JSON.stringify({ data, ts: Date.now() }));
+  } catch {
+    // Quota exceeded / private mode. Drop other briefs to make room, then
+    // give up quietly — this is an optimization, never a requirement.
+    try {
+      Object.keys(localStorage)
+        .filter((k) => k.startsWith(DD_CACHE_PREFIX) && k !== key)
+        .forEach((k) => localStorage.removeItem(k));
+      localStorage.setItem(key, JSON.stringify({ data, ts: Date.now() }));
+    } catch {
+      /* no-op */
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 export default function AnalysisView({ initialTicker, onBack, backLabel = "Back" }) {
@@ -914,6 +963,12 @@ export default function AnalysisView({ initialTicker, onBack, backLabel = "Back"
   const [ddLoading, setDdLoading] = useState(false);
   const [ddSteps, setDdSteps] = useState([]);
   const [ddError, setDdError] = useState(null);
+  // ddFromCache — a locally-cached brief is on screen while the network
+  // confirms it. ddRefreshing — the user asked for a fresh generation.
+  const [ddFromCache, setDdFromCache] = useState(false);
+  const [ddRefreshing, setDdRefreshing] = useState(false);
+  // Monotonic id of the most recent deep-dive request; older ones are ignored.
+  const ddReqRef = useRef(0);
   // Horizon toggle — LONG-TERM (existing behaviour) vs SWING (1-3 month brief).
   // Initial value reads from per-user localStorage so a swing trader stays in
   // swing mode across stock visits without re-flipping. The effect below
@@ -973,28 +1028,69 @@ export default function AnalysisView({ initialTicker, onBack, backLabel = "Back"
     setSearchResults([]);
   };
 
-  const runDeepDive = async (t, h = "long_term") => {
-    setDdLoading(true);
-    setDeepDive(null);
+  const runDeepDive = async (t, h = "long_term", { force = false } = {}) => {
+    const cacheKey = ddCacheKey(t, h);
+
+    // Guard against out-of-order responses. Instant cache paints make it easy
+    // to click through several stocks quickly, and a slow in-flight request for
+    // an earlier ticker must not overwrite the one the user is now looking at.
+    const reqId = ++ddReqRef.current;
+    const isCurrent = () => ddReqRef.current === reqId;
+
+    // Third cache tier, in front of the backend's two (in-process + Postgres).
+    // Paints the last brief for this ticker+horizon in the same frame, so a
+    // revisit shows the analysis immediately instead of a minute of loader.
+    // The network call still fires underneath: the backend replays its own
+    // cache in well under a second and we swap in whatever it returns, so a
+    // stale local copy is only ever on screen briefly.
+    const cached = force ? null : readDdCache(cacheKey);
+    if (cached) {
+      setDeepDive(cached.data);
+      setDdFromCache(true);
+      setDdLoading(false);
+    } else {
+      setDeepDive(null);
+      setDdFromCache(false);
+      setDdLoading(true);
+    }
     setDdSteps([]);
     setDdError(null);
+    if (force) setDdRefreshing(true);
 
     try {
       const response = await fetch(`${API_BASE}/api/analysis/deep-dive`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ticker: t, horizon: h }),
+        body: JSON.stringify({ ticker: t, horizon: h, force_refresh: force }),
       });
 
       for await (const data of readSSE(response)) {
-        if (data === "[DONE]") { setDdLoading(false); break; }
-        if (data.type === "step") setDdSteps((prev) => [...prev, data.message]);
-        else if (data.type === "error") { setDdError(data.message); setDdLoading(false); }
-        else if (data.type === "result") { setDeepDive(data); setDdLoading(false); }
+        if (data === "[DONE]") break;
+        if (data.type === "result") {
+          // Always cache the brief — it's valid for its ticker even if the
+          // user has since moved on — but only render it if it's still wanted.
+          writeDdCache(cacheKey, data);
+          if (!isCurrent()) break;
+          setDeepDive(data);
+          setDdFromCache(false);
+        } else if (!isCurrent()) {
+          break;
+        } else if (data.type === "step") {
+          // While a cached copy is on screen the step messages are noise —
+          // the user is reading, not waiting.
+          if (!cached) setDdSteps((prev) => [...prev, data.message]);
+        } else if (data.type === "error") {
+          // A cached brief on screen beats an error banner; keep it and stay quiet.
+          if (!cached) setDdError(data.message);
+        }
       }
     } catch (err) {
-      setDdError(String(err));
-      setDdLoading(false);
+      if (!cached && isCurrent()) setDdError(String(err));
+    } finally {
+      if (isCurrent()) {
+        setDdLoading(false);
+        setDdRefreshing(false);
+      }
     }
   };
 
@@ -1285,10 +1381,29 @@ export default function AnalysisView({ initialTicker, onBack, backLabel = "Back"
               )}
 
               <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "10px" }}>
-                <HorizonToggle value={horizon} onChange={updateHorizon} disabled={ddLoading} />
+                {/* Explains why the brief appeared instantly, and that a
+                    fresh read is on its way. Disappears once it lands. */}
+                {ddFromCache && (
+                  <span
+                    style={{
+                      fontFamily: MONO,
+                      fontSize: "9.5px",
+                      letterSpacing: "0.14em",
+                      textTransform: "uppercase",
+                      fontWeight: 700,
+                      color: "var(--color-text-muted)",
+                    }}
+                  >
+                    Saved brief · checking
+                  </span>
+                )}
+                <HorizonToggle value={horizon} onChange={updateHorizon} disabled={ddLoading || ddRefreshing} />
                 <button
-                  onClick={() => runDeepDive(ticker, horizon)}
-                  disabled={ddLoading}
+                  // Explicit user action → force a real regeneration, bypassing
+                  // every cache tier. Without the flag this would just replay
+                  // the same cached brief and look broken.
+                  onClick={() => runDeepDive(ticker, horizon, { force: true })}
+                  disabled={ddLoading || ddRefreshing}
                   style={{
                     padding: "7px 13px",
                     borderRadius: "var(--radius-control)",
@@ -1297,12 +1412,12 @@ export default function AnalysisView({ initialTicker, onBack, backLabel = "Back"
                     letterSpacing: "0.04em",
                     border: "1px solid var(--border-subtle)",
                     background: "transparent",
-                    color: ddLoading ? "var(--color-text-muted)" : "var(--color-text-secondary)",
-                    cursor: ddLoading ? "default" : "pointer",
+                    color: (ddLoading || ddRefreshing) ? "var(--color-text-muted)" : "var(--color-text-secondary)",
+                    cursor: (ddLoading || ddRefreshing) ? "default" : "pointer",
                     fontFamily: MONO,
                   }}
                 >
-                  {ddLoading ? "Working…" : "↻ Re-run"}
+                  {(ddLoading || ddRefreshing) ? "Working…" : "↻ Re-run"}
                 </button>
               </div>
             </Card>

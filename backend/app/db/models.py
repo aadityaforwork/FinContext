@@ -85,7 +85,10 @@ class LLMCache(Base):
     cache_key = Column(String(255), primary_key=True)
     payload = Column(JSON, nullable=False)
     scope = Column(String(64), nullable=False, default="global")  # 'global' or 'user:<id>'
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    # Both timestamps are naive-UTC to match the column type (TIMESTAMP WITHOUT
+    # TIME ZONE on Postgres). Binding an aware datetime here is what broke the
+    # read path — see the datetime note in services/llm_cache.py.
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), nullable=False)
     expires_at = Column(DateTime, nullable=False, index=True)
 
     __table_args__ = (

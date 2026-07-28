@@ -25,6 +25,7 @@ from app.services import (
     outcome_ledger,
     response_cache,
     signal_ensemble,
+    sse_cache,
     vector_store,
 )
 from concurrent.futures import ThreadPoolExecutor
@@ -62,7 +63,7 @@ SSE_FRESH_TTL_S = 5 * 60     # 5 min
 SSE_MAX_TTL_S   = 15 * 60    # 15 min
 
 
-async def _cached_sse_stream(
+def _cached_sse_stream(
     inner_generator,
     cache_key: str,
     *,
@@ -72,7 +73,13 @@ async def _cached_sse_stream(
 ):
     """Wrap an SSE async-generator with stale-while-revalidate caching.
 
-    Strategy:
+    This is now a thin adapter over services.sse_cache, which grew out of an
+    almost line-for-line copy of what used to live here (the analysis router
+    needed the same behaviour). Semantics are unchanged for these endpoints:
+    in-process cache only, no persistent tier — /portfolio and /movers payloads
+    are keyed to one user's positions hash and don't belong in the shared
+    global-scope llm_cache table.
+
       • Cache hit + fresh  → emit cached payload as a single result event,
                              discard the un-iterated `inner_generator`.
       • Cache hit + stale  → emit cached payload immediately, kick off a
@@ -85,67 +92,14 @@ async def _cached_sse_stream(
     iterated). On a cache hit we either discard it or hand it off to a
     background task.
     """
-    if not force_refresh:
-        cached, _ = response_cache.get(cache_key, max_ttl_s=max_ttl_s)
-        if cached is not None:
-            age = response_cache.age_seconds(cache_key) or 0
-            label = (
-                "Loaded from cache." if age < fresh_ttl_s
-                else f"Loaded from cache ({int(age)}s old) — refreshing."
-            )
-            yield f"data: {json.dumps({'type':'step','message':label})}\n\n"
-            yield f"data: {json.dumps(cached)}\n\n"
-            yield "data: [DONE]\n\n"
-
-            # If stale, background-refresh once. Multiple concurrent stale-hits
-            # would otherwise kick off duplicate refreshes; the in-flight set
-            # prevents that.
-            if age >= fresh_ttl_s and cache_key not in response_cache._refreshing:
-                response_cache._refreshing.add(cache_key)
-
-                async def _bg_refresh():
-                    try:
-                        last = None
-                        async for chunk in inner_generator:
-                            if isinstance(chunk, str) and chunk.startswith("data: "):
-                                body = chunk[6:].strip()
-                                if body and body != "[DONE]":
-                                    try:
-                                        p = json.loads(body)
-                                        if isinstance(p, dict) and p.get("type") == "result":
-                                            last = p
-                                    except (ValueError, json.JSONDecodeError):
-                                        pass
-                        if last:
-                            response_cache.put(cache_key, last)
-                    except Exception as e:
-                        logger.warning("SSE bg refresh failed for %s: %s", cache_key, e)
-                    finally:
-                        response_cache._refreshing.discard(cache_key)
-
-                try:
-                    asyncio.create_task(_bg_refresh())
-                except RuntimeError:
-                    response_cache._refreshing.discard(cache_key)
-            return
-
-    # MISS / force_refresh — stream the inner generator, capturing the result
-    # event for the cache so the next request is fast.
-    last_result = None
-    async for chunk in inner_generator:
-        if isinstance(chunk, str) and chunk.startswith("data: "):
-            body = chunk[6:].strip()
-            if body and body != "[DONE]":
-                try:
-                    p = json.loads(body)
-                    if isinstance(p, dict) and p.get("type") == "result":
-                        last_result = p
-                except (ValueError, json.JSONDecodeError):
-                    pass
-        yield chunk
-
-    if last_result is not None:
-        response_cache.put(cache_key, last_result)
+    return sse_cache.cached_sse_stream(
+        inner_generator,
+        cache_key,
+        force_refresh=force_refresh,
+        fresh_ttl_s=fresh_ttl_s,
+        max_ttl_s=max_ttl_s,
+        persist_key=None,
+    )
 
 
 async def _intelligence_generator(raw_holdings: list[dict]):

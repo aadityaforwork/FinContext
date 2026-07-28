@@ -57,6 +57,18 @@ _earnings_neg_transient: TTLCache = TTLCache(maxsize=300, ttl=yf_safe.NEG_TTL_TR
 from concurrent.futures import ThreadPoolExecutor as _Pool
 _movers_pool = _Pool(max_workers=12, thread_name_prefix="movers-enrich")
 
+# Thread pools for build_stock_context's internal fan-out. Separate from
+# _movers_pool so a 40-holding movers fan-out can't starve a deep-dive that
+# lands at the same moment.
+#
+# TWO pools, deliberately — _context_pool runs the three legs of one context
+# build, and the peer leg fans out AGAIN over ~10 peer snapshots. Nesting both
+# levels on a single pool deadlocks: N concurrent builds occupy all N workers,
+# each blocked on peer tasks queued behind them that can never start. Distinct
+# pools break the cycle. Threads are spawned lazily, so idle pools cost nothing.
+_context_pool = _Pool(max_workers=8, thread_name_prefix="ctx-fanout")
+_peer_pool = _Pool(max_workers=10, thread_name_prefix="ctx-peers")
+
 # Lightweight cache for the price-only path (fast_info). Separate from
 # _snapshot_cache so the heavy build_portfolio_context flow (which needs full
 # fundamentals) and the light build_movers_context flow (which only needs
@@ -305,11 +317,19 @@ def _peer_stats(sector: str, exclude_ticker: str) -> dict:
             "pe_ratio": [], "pb_ratio": [], "roe_pct": [],
             "profit_margin_pct": [], "debt_to_equity": [], "revenue_growth_pct": [],
         }
+        # Fan out the peer snapshots. Each _fetch_snapshot is an 8-second-budget
+        # yfinance .info call; ten of them in sequence was 10-30s of wall time on
+        # a cold peer cache and the single largest cost in a deep-dive. In
+        # parallel it collapses to roughly the slowest one. Order is preserved
+        # via .map() so peers_data stays deterministic.
+        snaps = list(_peer_pool.map(_fetch_snapshot, [pm["ticker"] for pm in peer_meta]))
         peers_data: list[dict] = []
-        for pm in peer_meta:
-            pt = pm["ticker"]
-            snap = _fetch_snapshot(pt)
-            peers_data.append({"ticker": pt, "name": pm.get("name", pt), "snapshot": snap})
+        for pm, snap in zip(peer_meta, snaps):
+            peers_data.append({
+                "ticker": pm["ticker"],
+                "name": pm.get("name", pm["ticker"]),
+                "snapshot": snap,
+            })
             for k in collected:
                 v = snap.get(k)
                 if v is not None:
@@ -418,24 +438,21 @@ def build_stock_context(ticker: str, include_news: bool = True, news_k: int = 5)
         return _context_cache[cache_key]
 
     meta = TICKER_TO_META.get(ticker, {"name": ticker, "sector": "Unknown"})
-    snap = _fetch_snapshot(ticker)
 
-    # --- peer benchmark + percentile rank on this stock ------------------
-    peer = _peer_stats(meta.get("sector", "Unknown"), ticker)
-    ranks: dict[str, int | None] = {}
-    for k, dist in peer.get("distributions", {}).items():
-        ranks[k] = _percentile_rank(snap.get(k), dist)
-
-    # --- rule-based signals (Screener-style pros/cons from raw numbers) --
-    signals = _derive_signals(snap, peer.get("medians", {}))
-
-    # --- news -----------------------------------------------------------
-    news: list[dict] = []
-    if include_news:
+    # The three expensive legs are independent of each other: this stock's own
+    # snapshot (yfinance .info), the sector peer sample (up to 10 more), and the
+    # news pull (RSS + vector store). Run them concurrently — sequentially they
+    # stacked to 15-40s on cold caches, which was most of the deep-dive wall
+    # time. Percentile ranks and signals need snapshot AND peers, so they're
+    # computed after the join.
+    def _news_leg() -> list[dict]:
+        if not include_news:
+            return []
+        out: list[dict] = []
         try:
             raw_news = data_ingestion.retrieve_context(ticker, top_k=news_k)
             for i, n in enumerate(raw_news):
-                news.append({
+                out.append({
                     "id": f"news[{i}]",
                     "source": n.get("source"),
                     "headline": n.get("headline"),
@@ -444,6 +461,33 @@ def build_stock_context(ticker: str, include_news: bool = True, news_k: int = 5)
                 })
         except Exception as e:
             logger.warning("news fetch failed for %s: %s", ticker, e)
+        return out
+
+    snap_fut = _context_pool.submit(_fetch_snapshot, ticker)
+    peer_fut = _context_pool.submit(_peer_stats, meta.get("sector", "Unknown"), ticker)
+    news_fut = _context_pool.submit(_news_leg)
+
+    # Each leg already bounds its own failures and returns an empty result, so
+    # a raise here would be a genuine bug — but we still isolate it so one bad
+    # leg degrades the context instead of failing the whole request.
+    def _resolve(fut, fallback, label):
+        try:
+            return fut.result()
+        except Exception as e:
+            logger.warning("%s leg failed for %s: %s", label, ticker, e)
+            return fallback
+
+    snap = _resolve(snap_fut, {}, "snapshot")
+    peer = _resolve(peer_fut, {}, "peer")
+    news = _resolve(news_fut, [], "news")
+
+    # --- peer benchmark + percentile rank on this stock ------------------
+    ranks: dict[str, int | None] = {}
+    for k, dist in peer.get("distributions", {}).items():
+        ranks[k] = _percentile_rank(snap.get(k), dist)
+
+    # --- rule-based signals (Screener-style pros/cons from raw numbers) --
+    signals = _derive_signals(snap, peer.get("medians", {}))
 
     from datetime import datetime
     ctx = {

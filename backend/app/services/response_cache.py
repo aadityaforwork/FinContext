@@ -80,9 +80,16 @@ def get(key: str, max_ttl_s: int = DEFAULT_MAX_TTL_S) -> tuple[Any | None, str]:
     return entry["value"], "stale"  # caller upgrades to "fresh" via serve()
 
 
-def put(key: str, value: Any) -> None:
+def put(key: str, value: Any, stored_at: float | None = None) -> None:
+    """Store `value` under `key`.
+
+    `stored_at` lets a caller backdate the entry — used when hydrating this
+    in-memory tier from the persistent (DB) tier, so a payload generated 20
+    minutes ago in another worker doesn't come back looking brand new and
+    skip the background refresh it's due.
+    """
     _evict_if_full()
-    _store[key] = {"value": value, "stored_at": time.time()}
+    _store[key] = {"value": value, "stored_at": stored_at or time.time()}
 
 
 def age_seconds(key: str) -> float | None:

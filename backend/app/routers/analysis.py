@@ -14,16 +14,67 @@ from pydantic import BaseModel
 import asyncio
 import json
 import logging
+import os
+from datetime import date
 
 from app.nse_universe import TICKER_TO_META
 from app.agents import base as agents_base
 from app.agents.crews import narrative as narrative_crew
 from app.core.compliance import with_disclaimer
-from app.services import ai_client, grounding, technicals
+from app.services import ai_client, grounding, llm_cache, sse_cache, technicals
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
+
+
+# ---------------------------------------------------------------------------
+# Deep-dive performance budget
+# ---------------------------------------------------------------------------
+# A cold deep-dive used to run 60-75s. Where it went, and what changed:
+#
+#   ~1.8s   six `await asyncio.sleep(0.3)` step messages emitted BEFORE any
+#           real work started               → steps now stream while the
+#                                             context build is already in flight
+#   15-40s  grounding.build_stock_context — this stock's snapshot, then up to
+#           ten peer snapshots one after another, then news
+#                                           → the three legs and the peer
+#                                             sample now fan out in parallel
+#                                             (see services/grounding.py)
+#   15-30s  the main grounded LLM call     → unchanged; this is the real work
+#   10-20s  a second full LLM verifier pass→ off the critical path by default
+#
+# And the part that matters most for a returning user: the finished brief is
+# now cached (in-process + Postgres) and replayed in well under a second.
+# ---------------------------------------------------------------------------
+
+# Step messages exist to animate the loader, not to pace the work. Keep a hair
+# of delay so each SSE event flushes as its own chunk and the loader steps
+# visibly, but nothing close to the 0.3s-per-step this used to cost.
+_STEP_DELAY_S = 0.05
+
+# SWR windows for a generated brief.
+#   FRESH  — replay straight from cache, no work at all.
+#   STALE  — replay from cache, regenerate in the background for the next visit.
+#   MISS   — full generation (the only path that costs a minute).
+# 30 min fresh keeps a brief current through a normal reading session; the 6h
+# stale ceiling means the cache still covers a whole trading day, with the
+# quoted price refreshed on the way out (see _overlay_live_price).
+DEEP_DIVE_FRESH_TTL_S = 30 * 60          # 30 min
+DEEP_DIVE_MAX_TTL_S   = 6 * 60 * 60      # 6 h
+# The persistent tier holds a bit longer than the in-memory window so a Render
+# restart mid-session still finds "the most recent generation" on disk rather
+# than making the next user pay full price again.
+DEEP_DIVE_PERSIST_TTL_S = 12 * 60 * 60   # 12 h
+
+# Second-pass verifier (ai_client.verify_claims). It re-sends the entire brief
+# AND the entire context to the model, costing 10-20s on every generation, to
+# prune list items whose `source` path doesn't back their `text`. With JSON
+# mode plus the hard grounding contract in the prompt, it very rarely removes
+# anything — the same conclusion portfolio_intelligence reached when it dropped
+# its own verifier pass. Off by default; set DEEP_DIVE_VERIFIER=1 to restore it.
+# When off, `removed_by_verifier` is simply an empty list.
+VERIFIER_ENABLED = os.getenv("DEEP_DIVE_VERIFIER", "0").strip().lower() in ("1", "true", "yes")
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +96,8 @@ class DeepDiveRequest(BaseModel):
     # "swing"               → 1-3 month horizon: setup, momentum, key levels,
     #                         near-term catalysts. Different prompt + schema.
     horizon: str = "long_term"
+    # User-driven "regenerate" — bypasses the cache and pays the full cost.
+    force_refresh: bool = False
 
 
 class PreTradeCheckRequest(BaseModel):
@@ -267,24 +320,31 @@ async def calculate_narrative_impact(req: NarrativeRequest):
 async def deep_dive_generator(ticker: str):
     meta = TICKER_TO_META.get(ticker, {"name": ticker, "sector": "General"})
 
-    for msg in [
-        f"Deep-dive on {meta['name']} ({ticker})...",
-        "Pulling real ratios from NSE data...",
-        "Benchmarking against sector peers (percentile ranks)...",
-        "Reading recent news...",
-        "Drafting grounded analysis...",
-        "Running fact-check verifier...",
-    ]:
-        yield f"data: {json.dumps({'type': 'step', 'message': msg})}\n\n"
-        await asyncio.sleep(0.3)
-
     if not ai_client.is_available():
         yield f"data: {json.dumps({'type':'step','message':'ERROR: AI client not configured.'})}\n\n"
         yield "data: [DONE]\n\n"
         return
 
+    # Start the context build BEFORE announcing it. The step messages below
+    # describe work that is already running, so the loader animation overlaps
+    # the fetch instead of delaying it.
+    ctx_task = asyncio.create_task(asyncio.to_thread(grounding.build_stock_context, ticker))
+
+    steps = [
+        f"Deep-dive on {meta['name']} ({ticker})...",
+        "Pulling real ratios from NSE data...",
+        "Benchmarking against sector peers (percentile ranks)...",
+        "Reading recent news...",
+        "Drafting grounded analysis...",
+    ]
+    if VERIFIER_ENABLED:
+        steps.append("Running fact-check verifier...")
+    for msg in steps:
+        yield f"data: {json.dumps({'type': 'step', 'message': msg})}\n\n"
+        await asyncio.sleep(_STEP_DELAY_S)
+
     try:
-        context = await asyncio.to_thread(grounding.build_stock_context, ticker)
+        context = await ctx_task
     except Exception as e:
         yield f"data: {json.dumps({'type':'error','message':f'Context build failed: {e}'})}\n\n"
         yield "data: [DONE]\n\n"
@@ -387,9 +447,13 @@ async def deep_dive_generator(ticker: str):
         yield "data: [DONE]\n\n"
         return
 
-    # Verifier pass — strip any unsupported catalyst/rationale items
-    verified = await asyncio.to_thread(ai_client.verify_claims, data, context, 1024)
-    data = verified.get("verified", data)
+    # Verifier pass — strip any unsupported catalyst/rationale items. Skipped
+    # unless DEEP_DIVE_VERIFIER is set; see the note at the top of this module.
+    if VERIFIER_ENABLED:
+        verified = await asyncio.to_thread(ai_client.verify_claims, data, context, 1024)
+        data = verified.get("verified", data)
+    else:
+        verified = {"verified": data, "removed": []}
 
     # Deterministic UI compat: compute *_score fields + alternatives from context.
     financials = data.get("financials") or {}
@@ -538,6 +602,18 @@ def _derive_key_levels(snap: dict, tech: dict | None) -> dict | None:
 async def swing_dive_generator(ticker: str):
     meta = TICKER_TO_META.get(ticker, {"name": ticker, "sector": "General"})
 
+    if not ai_client.is_available():
+        yield f"data: {json.dumps({'type':'step','message':'ERROR: AI client not configured.'})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
+    # Kick both data pulls off before the step messages. They're independent —
+    # technicals reads OHLCV, the context build reads fundamentals/peers/news —
+    # so running them concurrently (rather than context-then-technicals) saves
+    # the whole technicals leg on a cold cache.
+    ctx_task  = asyncio.create_task(asyncio.to_thread(grounding.build_stock_context, ticker))
+    tech_task = asyncio.create_task(asyncio.to_thread(technicals.compute_signals, ticker))
+
     for msg in [
         f"Swing read on {meta['name']} ({ticker})...",
         "Pulling intraday + 3-month price history...",
@@ -547,22 +623,23 @@ async def swing_dive_generator(ticker: str):
         "Drafting setup brief...",
     ]:
         yield f"data: {json.dumps({'type': 'step', 'message': msg})}\n\n"
-        await asyncio.sleep(0.25)
-
-    if not ai_client.is_available():
-        yield f"data: {json.dumps({'type':'step','message':'ERROR: AI client not configured.'})}\n\n"
-        yield "data: [DONE]\n\n"
-        return
+        await asyncio.sleep(_STEP_DELAY_S)
 
     try:
-        context = await asyncio.to_thread(grounding.build_stock_context, ticker)
+        context = await ctx_task
     except Exception as e:
+        tech_task.cancel()
         yield f"data: {json.dumps({'type':'error','message':f'Context build failed: {e}'})}\n\n"
         yield "data: [DONE]\n\n"
         return
 
     # Augment context with technicals — same payload the per-holding card uses.
-    tech = await asyncio.to_thread(technicals.compute_signals, ticker)
+    # Never fatal: a swing brief without technicals just scores lower confidence.
+    try:
+        tech = await tech_task
+    except Exception as e:
+        logger.warning("technicals failed for %s: %s", ticker, e)
+        tech = None
     if tech:
         context["technicals"] = tech
     snap = context.get("snapshot") or {}
@@ -702,12 +779,61 @@ async def swing_dive_generator(ticker: str):
     yield "data: [DONE]\n\n"
 
 
+async def _overlay_live_price(ticker: str, payload: dict) -> dict:
+    """Refresh the quoted price on a cached brief.
+
+    A brief served from a 4-hour-old cache is still analytically valid — ratios,
+    peer percentiles and the thesis don't move intraday — but showing a stale
+    price in the hero strip reads as a bug. The fast_info snapshot behind this
+    is itself cached for 15 min, so on a cache hit it's normally a dict lookup;
+    the to_thread hop is there for the occasional cold one, which can spend a
+    few seconds inside yfinance and must not block the event loop.
+
+    Best-effort and non-destructive: on any failure the payload is returned
+    untouched. Returns a shallow copy so the cached entry is never mutated.
+    """
+    fresh = await asyncio.to_thread(grounding._fetch_fast_snapshot, ticker)
+    if not fresh or fresh.get("current_price") is None:
+        return payload
+
+    out = dict(payload)
+    snap = dict(out.get("snapshot") or {})
+    snap["current_price"]  = fresh["current_price"]
+    snap["change_percent"] = fresh.get("change_percent", snap.get("change_percent"))
+    out["snapshot"] = snap
+    return out
+
+
 @router.post("/deep-dive")
 async def deep_dive_analysis(req: DeepDiveRequest):
+    """Generate (or replay) an equity brief.
+
+    Wrapped in the shared SSE stale-while-revalidate cache: the same
+    ticker + horizon on the same day replays the last generation in well under
+    a second instead of re-running a minute of yfinance fan-out and LLM work.
+    `force_refresh: true` bypasses it.
+    """
+    ticker  = req.ticker.upper()
     horizon = (req.horizon or "long_term").lower()
     gen = swing_dive_generator if horizon == "swing" else deep_dive_generator
+
+    # Date is part of the key so every brief regenerates at least once a day,
+    # regardless of TTL arithmetic. The model id is in there too, so flipping
+    # OPENAI_MODEL doesn't serve briefs written by the previous model.
+    today = date.today().isoformat()
+    key_parts = ("deep_dive", ticker, horizon, today, ai_client.MODEL)
+
     return StreamingResponse(
-        gen(req.ticker.upper()),
+        sse_cache.cached_sse_stream(
+            gen(ticker),
+            cache_key=sse_cache.make_key(*key_parts),
+            force_refresh=req.force_refresh,
+            fresh_ttl_s=DEEP_DIVE_FRESH_TTL_S,
+            max_ttl_s=DEEP_DIVE_MAX_TTL_S,
+            persist_key=llm_cache.make_key(*key_parts),
+            persist_ttl_s=DEEP_DIVE_PERSIST_TTL_S,
+            on_hit=lambda p: _overlay_live_price(ticker, p),
+        ),
         media_type="text/event-stream",
     )
 
