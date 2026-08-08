@@ -1,0 +1,25 @@
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+exclude = ["venv", ".venv", "__pycache__"]
+
+[tool.ruff.lint]
+# Kept deliberately small — this codebase leans on broad `except Exception`
+# for graceful degradation (yfinance/Supabase/LLM calls all fail open by
+# design, see grounding.py / vector_store.py / outcome_ledger.py). Don't
+# enable blanket-except or unused-import-in-__init__ rules without checking
+# that pattern first.
+select = ["E", "F", "I", "B", "UP"]
+ignore = [
+    "E501",  # line length handled by formatter/line-length above, not worth failing CI over in data-heavy dict literals
+]
+
+[tool.ruff.lint.per-file-ignores]
+"app/agents/*" = ["F401"]  # crewai/CrewAI types are imported lazily inside functions on purpose
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "live_llm: hits a real LLM provider — costs money, needs an API key, skipped by default in CI without secrets",
+]
