@@ -52,7 +52,7 @@ flowchart TD
 ```
 
 A more detailed, annotated version of this same diagram (with a two-systems
-comparison table and the known-gaps list) is published as an
+comparison table) is published as an
 [architecture artifact](https://claude.ai/code/artifact/6ffc72ab-2190-4ee5-a6b0-f195869efb6d).
 
 ### Two systems, one contract
@@ -67,20 +67,6 @@ which side before changing either.
 | LLM round-trips | 1 per call (+1 optional `verify_claims` pass) | 2 sequential agents (extract → quantify), or 1 for Risk Brief |
 | Caching | `response_cache` / ad hoc TTL caches | `llm_cache`, wrapped automatically by the orchestrator |
 | Status | primary workhorse today | 2 of ~7 flows moved; `Equity Researcher` / `Synthesizer` agents exist but aren't wired to a router yet |
-
-### Known gaps
-
-- **No runtime provider fallback.** OpenAI/Groq is picked once at import in
-  `ai_client.py`; `agents/base.py` hard-requires Groq independently. One
-  provider outage takes down the whole AI surface.
-- **Config sprawl.** Six-plus modules each run their own `load_dotenv()` +
-  `os.getenv()` instead of one settings object owning AI/Supabase config.
-- **Migration paused mid-flight.** Only Narrative-to-Numbers and Risk Brief
-  run on CrewAI; the direct-call path duplicates the same grounding
-  discipline by hand.
-- **Two files own most of the surface.** `portfolio_intelligence.py`
-  (2,255 lines) and `analysis.py` (871 lines) each bundle several unrelated
-  AI flows together.
 
 ## Quickstart
 
