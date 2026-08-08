@@ -1,0 +1,6 @@
+# Dev-only tooling — not needed in production (Render build should keep
+# using requirements.txt alone to avoid installing this on every deploy).
+-r requirements.txt
+
+pytest>=8.0.0
+ruff>=0.6.0

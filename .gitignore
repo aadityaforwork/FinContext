@@ -1,4 +1,7 @@
-# Ignore all markdown files except README.md
+# Ignore all markdown files except README.md and the AI-agent instruction files
+# (AGENTS.md / CLAUDE.md must be tracked so every clone/agent sees the same rules).
 *.md
 !README.md
 !**/README.md
+!AGENTS.md
+!CLAUDE.md

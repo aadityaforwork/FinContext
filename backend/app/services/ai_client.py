@@ -13,9 +13,12 @@ expose the same chat.completions.create() shape, so the call sites are identical
 """
 
 import json
-import os
 import logging
+import os
+
 from dotenv import load_dotenv
+
+from app.services import llm_trace
 
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -97,13 +100,18 @@ def generate_text(
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
-    resp = _client.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
-    return resp.choices[0].message.content or ""
+    with llm_trace.span("ai_client.generate_text", provider=_provider, model=MODEL) as t:
+        resp = _client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            t.record(tokens_in=getattr(usage, "prompt_tokens", None),
+                      tokens_out=getattr(usage, "completion_tokens", None))
+        return resp.choices[0].message.content or ""
 
 
 def generate_json(
@@ -122,14 +130,19 @@ def generate_json(
         {"role": "user", "content": prompt},
     ]
 
-    resp = _client.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        max_tokens=max_tokens,
-        response_format={"type": "json_object"},
-        temperature=temperature,
-    )
-    return resp.choices[0].message.content or "{}"
+    with llm_trace.span("ai_client.generate_json", provider=_provider, model=MODEL) as t:
+        resp = _client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"},
+            temperature=temperature,
+        )
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            t.record(tokens_in=getattr(usage, "prompt_tokens", None),
+                      tokens_out=getattr(usage, "completion_tokens", None))
+        return resp.choices[0].message.content or "{}"
 
 
 def generate_grounded_json(
@@ -158,19 +171,33 @@ def generate_grounded_json(
         {"role": "system", "content": GROUNDING_CONTRACT},
         {"role": "user", "content": user_prompt},
     ]
-    resp = _client.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        max_tokens=max_tokens,
-        response_format={"type": "json_object"},
-        temperature=temperature,
-    )
-    raw = resp.choices[0].message.content or "{}"
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        logger.error("generate_grounded_json: invalid JSON. first 500 chars=%s", raw[:500])
-        return {}
+    with llm_trace.span(
+        "ai_client.generate_grounded_json",
+        provider=_provider, model=MODEL, context_chars=len(context_json),
+    ) as t:
+        resp = _client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"},
+            temperature=temperature,
+        )
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            t.record(tokens_in=getattr(usage, "prompt_tokens", None),
+                      tokens_out=getattr(usage, "completion_tokens", None))
+        raw = resp.choices[0].message.content or "{}"
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.error("generate_grounded_json: invalid JSON. first 500 chars=%s", raw[:500])
+            t.record(parse_error=True)
+            return {}
+        t.record(
+            confidence=parsed.get("confidence") if isinstance(parsed, dict) else None,
+            data_gaps=len(parsed.get("data_gaps") or []) if isinstance(parsed, dict) else None,
+        )
+        return parsed
 
 
 def verify_claims(output: dict, context: dict, max_tokens: int = 1024) -> dict:
@@ -193,21 +220,25 @@ def verify_claims(output: dict, context: dict, max_tokens: int = 1024) -> dict:
         f"CLAIM:\n```json\n{json.dumps(output, default=str)}\n```\n\n"
         f"CONTEXT:\n```json\n{json.dumps(context, default=str)}\n```"
     )
-    try:
-        resp = _client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            max_tokens=max_tokens,
-            response_format={"type": "json_object"},
-            temperature=0.1,
-        )
-        parsed = json.loads(resp.choices[0].message.content or "{}")
-        if "verified" not in parsed:
+    with llm_trace.span("ai_client.verify_claims", provider=_provider, model=MODEL) as t:
+        try:
+            resp = _client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+                temperature=0.1,
+            )
+            parsed = json.loads(resp.choices[0].message.content or "{}")
+            if "verified" not in parsed:
+                t.record(fallback=True)
+                return {"verified": output, "removed": []}
+            t.record(removed_count=len(parsed.get("removed") or []))
+            return parsed
+        except Exception as e:
+            logger.warning("verify_claims failed, returning unverified output: %s", e)
+            t.record(error_swallowed=str(e))
             return {"verified": output, "removed": []}
-        return parsed
-    except Exception as e:
-        logger.warning("verify_claims failed, returning unverified output: %s", e)
-        return {"verified": output, "removed": []}

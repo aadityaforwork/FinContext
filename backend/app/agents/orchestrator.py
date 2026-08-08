@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 
-from app.services import llm_cache
+from app.services import llm_cache, llm_trace
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 async def run_cached(
     cache_key: str,
     ttl_seconds: int,
-    builder: Callable[[], "object"],
+    builder: Callable[[], object],
     inputs: dict,
     scope: str = "global",
 ) -> dict:
@@ -40,25 +40,30 @@ async def run_cached(
     cached = await llm_cache.get(cache_key)
     if cached is not None:
         logger.info("crew cache hit: %s", cache_key)
+        with llm_trace.span("crew.run_cached", cache_key=cache_key) as t:
+            t.record(cache_hit=True)
         return cached
 
-    crew = builder()
-    # CrewAI's kickoff_async exists in recent versions; prefer it. Fall back to
-    # running the sync kickoff on a thread.
-    try:
-        kickoff_async = getattr(crew, "kickoff_async", None)
-        if kickoff_async is not None:
-            output = await kickoff_async(inputs=inputs)
-        else:
-            output = await asyncio.to_thread(crew.kickoff, inputs=inputs)
-    except Exception:
-        logger.exception("crew kickoff failed for %s", cache_key)
-        raise
+    with llm_trace.span("crew.run_cached", cache_key=cache_key) as t:
+        t.record(cache_hit=False)
+        crew = builder()
+        # CrewAI's kickoff_async exists in recent versions; prefer it. Fall back to
+        # running the sync kickoff on a thread.
+        try:
+            kickoff_async = getattr(crew, "kickoff_async", None)
+            if kickoff_async is not None:
+                output = await kickoff_async(inputs=inputs)
+            else:
+                output = await asyncio.to_thread(crew.kickoff, inputs=inputs)
+        except Exception:
+            logger.exception("crew kickoff failed for %s", cache_key)
+            raise
 
-    payload = _coerce_output(output)
-    if payload:
-        await llm_cache.set(cache_key, payload, ttl_seconds, scope)
-    return payload
+        payload = _coerce_output(output)
+        t.record(agent_count=len(getattr(crew, "agents", []) or []))
+        if payload:
+            await llm_cache.set(cache_key, payload, ttl_seconds, scope)
+        return payload
 
 
 async def run_parallel(jobs: list[Awaitable[dict]]) -> list[dict]:
