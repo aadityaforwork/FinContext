@@ -777,11 +777,20 @@ async def _movers_generator(raw_holdings: list[dict]):
         "india_headlines": _slim_news(market_ctx.get("india_headlines"), limit=4),
     }
 
-    # -------- Tomorrow outlook --------
+    # -------- This week on your radar --------
+    # IMPORTANT framing change: this section is no longer "what will happen
+    # tomorrow" (forecast). It's "what's SCHEDULED this week on your holdings"
+    # (calendar of facts). We're unregistered — describing an upcoming earnings
+    # event with its technical state is education; predicting "should rise" is
+    # advice. Keep direction/importance in the schema for the backend's
+    # filtering logic, but the user-facing `what_to_watch` prose must be pure
+    # observation — no "may", "could", "expected to".
     tomorrow_task = (
-        "Produce a SPECIFIC, HOLDING-CENTRIC outlook for tomorrow — not generic macro headlines. "
-        "Use every signal in CONTEXT.holdings (semantic_news, technicals, upcoming_earnings) plus "
-        "global_headlines + india_headlines + market.flows (FII/DII).\n\n"
+        "Build a FACTUAL, HOLDING-CENTRIC radar of upcoming events and observable "
+        "state changes for the user's holdings. This is NOT a forecast — every "
+        "sentence should describe something CONCRETE that already exists in CONTEXT: "
+        "a scheduled earnings date, a current RSI reading, a published news catalyst, "
+        "a measured volume surge.\n\n"
         "OUTPUT TWO LAYERS:\n"
         "  A) per_holding[] — for EACH holding in CONTEXT.holdings that has at least ONE of: "
         "     an upcoming_earnings entry, a semantic_news match with similarity ≥ 0.6, OR a "
@@ -790,36 +799,38 @@ async def _movers_generator(raw_holdings: list[dict]):
         "     Build a 'watch_item' object with:\n"
         "       - ticker, sector\n"
         "       - catalyst_type: 'earnings' | 'news' | 'technical' | 'sector_flow' | 'mixed'\n"
-        "       - what_to_watch: ONE concrete sentence — e.g. 'Earnings on 2026-05-15 (3 days); "
-        "         consensus expects margin expansion; technicals show momentum_state extending_up with "
-        "         vol 1.4x avg — beat could push to 20d high.'\n"
-        "       - direction: 'positive' | 'negative' | 'mixed' | 'neutral'\n"
-        "       - importance: 'high' | 'medium' | 'low'\n"
+        "       - event_date: ISO date 'YYYY-MM-DD' when there is a known scheduled event\n"
+        "         (earnings date from upcoming_earnings). null if no dated event.\n"
+        "       - days_to_event: integer days from today to event_date. null if no event.\n"
+        "       - what_to_watch: ONE concrete OBSERVATIONAL sentence — describe the\n"
+        "         current state plus the upcoming event, WITHOUT predicting the outcome.\n"
+        "         Good:  'Earnings 22 May (5 days); RSI 72 — extended; volume 1.4x 20d avg.'\n"
+        "         Bad:   'May pull back from current levels' / 'could lead to a price correction'\n"
+        "         The user reads facts and decides — we do not.\n"
+        "       - direction: 'positive' | 'negative' | 'mixed' | 'neutral' (used by\n"
+        "         backend filters; NOT rendered as a sentiment chip in the UI anymore)\n"
+        "       - importance: 'high' | 'medium' | 'low' (used by backend filters)\n"
         "       - sources: list of ids from {TICKER}_news[i] / {TICKER}_sem[i] / 'technicals' / 'upcoming_earnings'\n"
-        "  B) macro_themes[] — 1-3 cross-cutting macro themes from global/india headlines that may "
-        "     touch MULTIPLE holdings (e.g. crude spike, Fed decision, FII outflow). Each theme must "
-        "     list the affected_holdings explicitly — no theme allowed without naming holdings.\n\n"
-        "RULES:\n"
-        "  • At least 60% of output items must be per_holding[], NOT macro_themes[]. The user wants "
-        "    'what about MY stocks tomorrow', not 'general market commentary'.\n"
-        "  • If FII/DII flows in CONTEXT.market.flows are large (|net_inr_cr| > 1000), surface that "
-        "    in a macro_theme with the specific number cited.\n"
-        "  • If a holding has NO catalyst, do NOT include it. Empty watchlist is fine.\n"
-        "  • NEVER use phrases like 'may impact', 'could affect', 'foreign investors exiting' without a number. "
-        "    Be specific: 'crude headline +X% on global_news[i] → ONGC realisations positive' beats "
-        "    'rising crude prices'.\n"
-        "\n"
-        "DIRECTION DISCIPLINE — read carefully:\n"
-        "  • DEFAULT TO 'neutral' when in doubt. Markets are noisy; over-confident calls are how AI "
-        "    products lose credibility. Use 'positive' / 'negative' ONLY when the evidence in CONTEXT "
-        "    strongly supports it (e.g. a clear earnings beat catalyst with confirming technicals, OR "
-        "    a sector index move > 1.5% with named affected stocks).\n"
-        "  • If technicals contradict the news catalyst (e.g. positive earnings but the stock is "
-        "    extending_down with vol surge — institutions selling into the print), call it 'mixed' or "
-        "    'neutral'. Do NOT force a direction just because there's a catalyst.\n"
-        "  • BANNED words/phrases: 'will likely', 'expected to', 'should rise', 'poised to'. These are "
-        "    forecasts dressed as facts. Use 'if X then Y' framing instead — 'if the print beats, the "
-        "    setup supports a bounce; if it misses, momentum_state extending_down extends'."
+        "  B) macro_themes[] — 1-3 cross-cutting macro themes from global/india headlines that\n"
+        "     are CURRENTLY visible in CONTEXT and touch MULTIPLE holdings (e.g. crude spike,\n"
+        "     Fed decision, FII outflow). Each theme must list the affected_holdings explicitly.\n"
+        "     `mechanism` describes the channel of impact in OBSERVATIONAL language — what's\n"
+        "     happening and which holdings are exposed — not a directional bet.\n\n"
+        "STRICT RULES:\n"
+        "  • At least 60% of output items must be per_holding[], NOT macro_themes[]. The user\n"
+        "    wants 'what's scheduled on MY stocks', not 'general market commentary'.\n"
+        "  • If FII/DII flows in CONTEXT.market.flows are large (|net_inr_cr| > 1000), surface\n"
+        "    that in a macro_theme with the specific number cited.\n"
+        "  • If a holding has NO catalyst, do NOT include it. Empty radar is fine.\n"
+        "  • BANNED forecast phrases (zero tolerance — these are advice, not education):\n"
+        "      'may pull back', 'could lead to', 'expected to', 'should rise', 'poised to',\n"
+        "      'will likely', 'price correction', 'face downward pressure', 'further upside',\n"
+        "      'profit-taking', 'breakout candidate', 'a beat could push to', 'if the print misses'.\n"
+        "    If you find yourself wanting to use one, REWRITE as observation: instead of\n"
+        "    'OLAELEC may face downward pressure if momentum shifts', write 'OLAELEC RSI 70,\n"
+        "    momentum_state consolidating; earnings 30 May (12 days).'\n"
+        "  • Default direction to 'neutral' when in doubt. The frontend no longer shows the\n"
+        "    direction chip so this matters less for UX, but it still controls filtering.\n"
     )
     tomorrow_schema = """{
   "per_holding": [
@@ -827,7 +838,9 @@ async def _movers_generator(raw_holdings: list[dict]):
       "ticker": str,
       "sector": str,
       "catalyst_type": "earnings" | "news" | "technical" | "sector_flow" | "mixed",
-      "what_to_watch": str,
+      "event_date":    str | null,                   // ISO date if scheduled event
+      "days_to_event": int | null,                   // days from today; null if no event
+      "what_to_watch": str,                          // factual observation, NO forecast
       "direction": "positive" | "negative" | "mixed" | "neutral",
       "importance": "high" | "medium" | "low",
       "sources": [ str ]
