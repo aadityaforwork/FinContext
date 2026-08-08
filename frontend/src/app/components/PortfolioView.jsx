@@ -6,7 +6,7 @@ import { supabase } from "../lib/supabase";
 import { API_BASE as _SHARED_API_BASE } from "../lib/api";
 import { claimText, claimSource } from "../lib/claim";
 import PortfolioContextCard from "./PortfolioContextCard";
-import RiskMetricsCard from "./RiskMetricsCard";
+import PeerPulseCard from "./PeerPulseCard";
 import MissionControlLoader from "./MissionControlLoader";
 import { useToast } from "./Toast";
 import { LoaderHeader, Skeleton } from "./Loaders";
@@ -233,9 +233,9 @@ export default function PortfolioView({ onNavigate }) {
               }}
             >
               {[
-                { id: "context", label: "🧭 Context Engine", desc: "Why did your portfolio move today?" },
-                { id: "risk",    label: "📐 Risk Metrics",    desc: "Vol, beta, Sharpe, correlation" },
-                { id: "intel",   label: "🧠 AI Analysis",      desc: "Portfolio health + signals" },
+                { id: "context", label: "Context Engine", desc: "Why did your portfolio move today?" },
+                { id: "peers",   label: "Peer pulse",     desc: "What investors with similar sectors are adding" },
+                { id: "intel",   label: "AI Analysis",    desc: "Portfolio health + signals" },
               ].map((t) => {
                 const active = aiTab === t.id;
                 return (
@@ -272,10 +272,8 @@ export default function PortfolioView({ onNavigate }) {
               />
             </div>
 
-            <div style={{ display: aiTab === "risk" ? "block" : "none" }}>
-              <RiskMetricsCard
-                positions={portfolio.positions.map((p) => ({ ticker: p.ticker, quantity: p.quantity, buy_price: p.buy_price }))}
-              />
+            <div style={{ display: aiTab === "peers" ? "block" : "none" }}>
+              <PeerPulseCard onTickerClick={(t) => onNavigate?.("company", t)} />
             </div>
 
             <div style={{ display: aiTab === "intel" ? "block" : "none" }}>

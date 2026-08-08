@@ -84,7 +84,11 @@ function _contextCacheKey(positions) {
     .join(",");
   if (!tickers) return null;
   const date = new Date().toISOString().slice(0, 10);
-  return `fc:cache:context-engine:${tickers}:${date}`;
+  // `v2` — bumped after the Tomorrow tab editorial rewrite. Old cached
+  // payloads from before the prompt change still carry "may pull back" /
+  // forecast language and chips the new UI no longer renders correctly.
+  // Bumping the key invalidates them in one line.
+  return `fc:cache:context-engine:v2:${tickers}:${date}`;
 }
 
 export default function PortfolioContextCard({ positions }) {
@@ -294,10 +298,10 @@ export default function PortfolioContextCard({ positions }) {
           {/* Tabs */}
           <div style={{ display: "flex", gap: "8px", borderBottom: "1px solid var(--border-subtle)", marginBottom: "16px" }}>
             <TabButton active={tab === "today"} onClick={() => setTab("today")}>
-              Today — Why did we move?
+              Today's moves on your portfolio
             </TabButton>
             <TabButton active={tab === "tomorrow"} onClick={() => setTab("tomorrow")}>
-              Tomorrow — What to watch
+              This week on your radar
             </TabButton>
           </div>
 
@@ -371,20 +375,43 @@ function TodaySection({ today, holdingsToday, onMoverClick }) {
 
   return (
     <div>
+      {/* Top drivers — paired editorial cards, same vocabulary as the rest
+          of the Context Engine. Direction indicated by a single colored
+          glyph (▲/▼) + mono caps label, not by background tints. */}
       {(top_positive_driver || top_negative_driver) && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "12px", marginBottom: "16px" }}>
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+          gap: "12px", marginBottom: "16px",
+        }}>
           {top_positive_driver && (
-            <DriverHeadline label="Top positive driver" color="var(--color-accent-green)" claim={top_positive_driver} />
+            <DriverHeadline
+              label="Top positive driver"
+              direction="up"
+              claim={top_positive_driver}
+            />
           )}
           {top_negative_driver && (
-            <DriverHeadline label="Top negative driver" color="var(--color-accent-red)" claim={top_negative_driver} />
+            <DriverHeadline
+              label="Top negative driver"
+              direction="down"
+              claim={top_negative_driver}
+            />
           )}
         </div>
       )}
 
       {movers.length === 0 ? (
-        <p style={{ fontSize: "13px", color: "var(--color-text-muted)", padding: "16px", textAlign: "center", background: "rgba(0,0,0,0.15)", borderRadius: "10px" }}>
-          No notable movers today (all holdings within ±1.5%).
+        <p style={{
+          fontSize: "13px", color: "var(--color-text-muted)",
+          padding: "20px", textAlign: "center",
+          background: "transparent",
+          border: "1px dashed var(--border-subtle)",
+          borderRadius: "var(--radius-card)",
+          fontFamily: "var(--font-serif)", fontStyle: "italic",
+          lineHeight: 1.5,
+        }}>
+          No notable moves on your portfolio today &mdash; everything is within &plusmn;1.5&percnt;.
         </p>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
@@ -414,14 +441,15 @@ function MoverRow({ mover, onClick, holdingsToday }) {
       tabIndex={onClick ? 0 : undefined}
       onClick={onClick}
       onKeyDown={(e) => { if (onClick && (e.key === "Enter" || e.key === " ")) onClick(); }}
-      onMouseEnter={(e) => { if (onClick) e.currentTarget.style.background = "rgba(99,102,241,0.04)"; }}
-      onMouseLeave={(e) => { if (onClick) e.currentTarget.style.background = "rgba(255,255,255,0.02)"; }}
+      onMouseEnter={(e) => { if (onClick) e.currentTarget.style.background = "var(--color-bg-card-hover, rgba(255,255,255,0.03))"; }}
+      onMouseLeave={(e) => { if (onClick) e.currentTarget.style.background = "transparent"; }}
       className={onClick ? "living-row" : undefined}
       style={{
-        padding: "14px 16px", background: "rgba(255,255,255,0.02)",
-        border: "1px solid var(--border-subtle)", borderRadius: "10px",
+        padding: "14px 16px", background: "transparent",
+        border: "1px solid var(--border-subtle)",
+        borderRadius: "var(--radius-card)",
         cursor: onClick ? "pointer" : "default",
-        transition: "transform 0.16s ease, background 0.15s, border-color 0.15s",
+        transition: "background 0.15s, border-color 0.15s",
       }}>
       <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "10px", flexWrap: "wrap" }}>
         <span style={{ fontSize: "14px", fontWeight: 700, color: "var(--color-text-primary)", fontFamily: "var(--font-mono)" }}>{mover.ticker}</span>
@@ -447,12 +475,25 @@ function MoverRow({ mover, onClick, holdingsToday }) {
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
         {(mover.attribution || []).map((a, i) => (
-          <div key={i} title={claimSource(a) || ""} style={{ fontSize: "13px", color: "var(--color-text-secondary)", lineHeight: 1.5, display: "flex", gap: "10px", alignItems: "baseline" }}>
+          <div
+            key={i}
+            title={claimSource(a) || ""}
+            style={{
+              fontSize: "13px", color: "var(--color-text-secondary)",
+              lineHeight: 1.55, display: "flex", gap: "10px", alignItems: "baseline",
+            }}
+          >
             {a.weight_pct != null && (
               <span style={{
-                fontSize: "10px", fontWeight: 700, padding: "2px 6px", borderRadius: "4px",
-                background: "rgba(99,102,241,0.12)", color: "var(--color-accent-secondary)",
-                flexShrink: 0, minWidth: "38px", textAlign: "center",
+                fontSize: "10px", fontWeight: 700,
+                padding: "2px 6px", borderRadius: "4px",
+                background: "transparent",
+                color: "var(--color-text-muted)",
+                border: "1px solid var(--border-subtle)",
+                fontFamily: "var(--font-mono)",
+                letterSpacing: "0.04em",
+                flexShrink: 0, minWidth: "40px", textAlign: "center",
+                fontVariantNumeric: "tabular-nums",
               }}>
                 {a.weight_pct}%
               </span>
@@ -605,18 +646,35 @@ function TomorrowSection({ tomorrow, holdingsToday, onWatchClick, onThemeClick }
     <div>
       {overall_bias && (
         <div style={{
-          padding: "10px 14px", marginBottom: "14px", borderRadius: "10px",
-          background: `${biasColor}14`, borderLeft: `3px solid ${biasColor}`,
+          padding: "10px 14px", marginBottom: "14px",
+          borderRadius: "var(--radius-control)",
+          background: "transparent",
+          border: "1px solid var(--border-subtle)",
           display: "flex", alignItems: "center", gap: "10px",
         }}>
-          <span style={{ fontSize: "11px", color: "var(--color-text-muted)", textTransform: "uppercase", letterSpacing: "1px" }}>Overnight bias for tomorrow</span>
-          <span style={{ fontSize: "13px", fontWeight: 700, color: biasColor, textTransform: "uppercase" }}>{overall_bias}</span>
+          {/* "Overnight news TONE" — describes the news desks' sentiment as of
+              this morning. Renamed from "bias for tomorrow" which read as a
+              forecast. We don't predict tomorrow; we describe today's news. */}
+          <span style={{
+            fontFamily: "var(--font-mono)", fontSize: "10px", fontWeight: 700,
+            color: "var(--color-text-muted)", textTransform: "uppercase",
+            letterSpacing: "0.16em",
+          }}>
+            Overnight news tone
+          </span>
+          <span style={{
+            fontFamily: "var(--font-mono)", fontSize: "11px", fontWeight: 700,
+            color: "var(--color-text-secondary)",
+            textTransform: "uppercase", letterSpacing: "0.14em",
+          }}>
+            {overall_bias}
+          </span>
         </div>
       )}
 
       {per_holding.length > 0 && (
         <div style={{ marginBottom: macros.length > 0 ? "18px" : 0 }}>
-          <SectionLabel>For your holdings ({per_holding.length})</SectionLabel>
+          <SectionLabel>On your holdings &nbsp;·&nbsp; {per_holding.length}</SectionLabel>
           <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
             {per_holding.map((w, i) => (
               <Reveal key={`w-${i}`} index={i}>
@@ -633,7 +691,7 @@ function TomorrowSection({ tomorrow, holdingsToday, onWatchClick, onThemeClick }
 
       {macros.length > 0 && (
         <div>
-          <SectionLabel>Cross-market themes</SectionLabel>
+          <SectionLabel>Cross-market themes &nbsp;·&nbsp; {macros.length}</SectionLabel>
           <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
             {macros.map((t, i) => (
               <Reveal key={`t-${i}`} index={i}>
@@ -649,10 +707,18 @@ function TomorrowSection({ tomorrow, holdingsToday, onWatchClick, onThemeClick }
       )}
 
       {nothing && (
-        <p style={{ fontSize: "13px", color: "var(--color-text-muted)", padding: "16px", textAlign: "center", background: "rgba(0,0,0,0.15)", borderRadius: "10px" }}>
+        <p style={{
+          fontSize: "13px", color: "var(--color-text-muted)",
+          padding: "16px", textAlign: "center",
+          background: "transparent",
+          border: "1px dashed var(--border-subtle)",
+          borderRadius: "var(--radius-card)",
+          fontFamily: "var(--font-serif)", fontStyle: "italic",
+          lineHeight: 1.5,
+        }}>
           {hiddenCount > 0
-            ? `No high-conviction calls right now. ${hiddenCount} low-conviction item${hiddenCount === 1 ? "" : "s"} hidden — signals didn't agree.`
-            : "No strong overnight signals tied to your holdings."}
+            ? `No scheduled events on your radar this week. ${hiddenCount} weaker signal${hiddenCount === 1 ? "" : "s"} hidden.`
+            : "No scheduled events on your radar for the next few days."}
         </p>
       )}
 
@@ -660,9 +726,9 @@ function TomorrowSection({ tomorrow, holdingsToday, onWatchClick, onThemeClick }
         <p style={{
           marginTop: "10px", fontSize: "11px", color: "var(--color-text-muted)",
           fontStyle: "italic", textAlign: "center",
+          fontFamily: "var(--font-serif)",
         }}>
-          Showing {per_holding.length} high-conviction call{per_holding.length === 1 ? "" : "s"} ·
-          {" "}{hiddenCount} hidden where signals disagreed.
+          Showing {per_holding.length} item{per_holding.length === 1 ? "" : "s"} on radar · {hiddenCount} hidden where signals were weak.
         </p>
       )}
 
@@ -674,8 +740,11 @@ function TomorrowSection({ tomorrow, holdingsToday, onWatchClick, onThemeClick }
 function SectionLabel({ children }) {
   return (
     <div style={{
-      fontSize: "10px", fontWeight: 700, color: "var(--color-text-muted)",
-      textTransform: "uppercase", letterSpacing: "1.2px", marginBottom: "8px",
+      fontSize: "10.5px", fontWeight: 700,
+      color: "var(--color-text-muted)",
+      textTransform: "uppercase", letterSpacing: "0.18em",
+      fontFamily: "var(--font-mono)",
+      marginBottom: "10px",
     }}>
       {children}
     </div>
@@ -683,57 +752,83 @@ function SectionLabel({ children }) {
 }
 
 function WatchItemRow({ watch, onClick, holdingsToday }) {
-  const direction = watch.direction || "neutral";
-  const color = DIRECTION_COLORS[direction] || "#64748b";
-  const catalystColor = CATALYST_COLORS[watch.catalyst_type] || "#64748b";
-  const imp = watch.importance || "medium";
+  // Editorial-quiet rebuild: we used to render four colored chips per row
+  // (catalyst, direction, importance star, conviction %) and a direction-keyed
+  // border-left. All four chips communicated PREDICTION (positive/negative,
+  // conviction %, importance ★) which is the wrong shape for an unregistered
+  // platform. New row keeps the FACTS — ticker, sector, event type, event
+  // date — and drops everything that reads as a forecast.
+  const eventLabel = CATALYST_LABELS[watch.catalyst_type] || watch.catalyst_type;
+  const eventDate  = watch.event_date || null;        // backend ISO date if known
+  const daysAhead  = watch.days_to_event ?? null;     // optional days countdown
   return (
     <div
       role={onClick ? "button" : undefined}
       tabIndex={onClick ? 0 : undefined}
       onClick={onClick}
       onKeyDown={(e) => { if (onClick && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onClick(); } }}
-      onMouseEnter={(e) => { if (onClick) e.currentTarget.style.background = "rgba(99,102,241,0.04)"; }}
-      onMouseLeave={(e) => { if (onClick) e.currentTarget.style.background = "rgba(255,255,255,0.02)"; }}
+      onMouseEnter={(e) => { if (onClick) e.currentTarget.style.background = "var(--color-bg-card-hover, rgba(255,255,255,0.03))"; }}
+      onMouseLeave={(e) => { if (onClick) e.currentTarget.style.background = "transparent"; }}
       className={onClick ? "living-row" : undefined}
       style={{
-        padding: "14px 16px", background: "rgba(255,255,255,0.02)",
-        border: "1px solid var(--border-subtle)", borderRadius: "10px",
-        borderLeft: `3px solid ${color}`,
+        padding: "14px 16px", background: "transparent",
+        border: "1px solid var(--border-subtle)",
+        borderRadius: "var(--radius-card)",
         cursor: onClick ? "pointer" : "default",
-        transition: "transform 0.16s ease, background 0.15s",
+        transition: "background 0.15s, border-color 0.15s",
       }}>
       <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "8px", flexWrap: "wrap" }}>
-        <span style={{ fontSize: "14px", fontWeight: 700, color: "var(--color-text-primary)" }}>{watch.ticker}</span>
+        <span style={{
+          fontFamily: "var(--font-mono)", fontSize: "13.5px", fontWeight: 800,
+          color: "var(--color-text-primary)", letterSpacing: "0.01em",
+        }}>
+          {watch.ticker}
+        </span>
         {watch.sector && (
           <span style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>{watch.sector}</span>
         )}
-        <span style={{
-          padding: "3px 8px", borderRadius: "6px", fontSize: "10px", fontWeight: 700,
-          background: `${catalystColor}20`, color: catalystColor,
-          textTransform: "uppercase", letterSpacing: "0.5px",
-        }}>
-          {CATALYST_LABELS[watch.catalyst_type] || watch.catalyst_type}
-        </span>
-        <span style={{
-          padding: "3px 8px", borderRadius: "6px", fontSize: "10px", fontWeight: 700,
-          background: `${color}20`, color, textTransform: "uppercase", letterSpacing: "0.5px",
-        }}>
-          {direction}
-        </span>
-        {imp === "high" && (
+        {/* Event-type chip — neutral outlined, mono caps. Same vocabulary
+            as the rest of the editorial-quiet UI. Color carries NO meaning. */}
+        {eventLabel && (
           <span style={{
-            padding: "3px 8px", borderRadius: "6px", fontSize: "10px", fontWeight: 700,
-            background: "rgba(245,158,11,0.15)", color: "#f59e0b",
-            textTransform: "uppercase", letterSpacing: "0.5px",
+            padding: "2px 8px",
+            fontFamily: "var(--font-mono)",
+            fontSize: "9.5px", fontWeight: 700,
+            color: "var(--color-text-muted)",
+            border: "1px solid var(--border-subtle)",
+            borderRadius: "4px",
+            textTransform: "uppercase", letterSpacing: "0.14em",
           }}>
-            ★ High
+            {eventLabel}
           </span>
         )}
-        <ConvictionPill conviction={watch.conviction} />
+        {/* Date chip — when the event is scheduled. e.g. "MAY 22 · 5D". This
+            is the ACTUAL useful information; everything else was dressing. */}
+        {(eventDate || daysAhead != null) && (
+          <span style={{
+            padding: "2px 8px",
+            fontFamily: "var(--font-mono)",
+            fontSize: "9.5px", fontWeight: 700,
+            color: "var(--color-accent-primary)",
+            border: "1px solid color-mix(in srgb, var(--color-accent-primary) 28%, transparent)",
+            background: "color-mix(in srgb, var(--color-accent-primary) 8%, transparent)",
+            borderRadius: "4px",
+            textTransform: "uppercase", letterSpacing: "0.14em",
+          }}>
+            {eventDate && (() => {
+              try {
+                return new Date(eventDate).toLocaleDateString("en-IN", {
+                  day: "2-digit", month: "short", timeZone: "Asia/Kolkata",
+                }).toUpperCase().replace(".", "");
+              } catch { return eventDate; }
+            })()}
+            {eventDate && daysAhead != null && " · "}
+            {daysAhead != null && `${daysAhead}D`}
+          </span>
+        )}
       </div>
       {watch.what_to_watch && (
-        <p style={{ fontSize: "13px", color: "var(--color-text-secondary)", lineHeight: 1.5, margin: 0 }}>
+        <p style={{ fontSize: "13px", color: "var(--color-text-secondary)", lineHeight: 1.55, margin: 0 }}>
           {watch.what_to_watch}
         </p>
       )}
@@ -749,63 +844,83 @@ function WatchItemRow({ watch, onClick, holdingsToday }) {
 }
 
 function ThemeRow({ theme, onClick, holdingsToday }) {
-  const color = DIRECTION_COLORS[theme.direction] || "#64748b";
-  const importance = theme.importance || "medium";
+  // Same editorial-quiet treatment as WatchItemRow: drop sentiment +
+  // importance chips, drop direction-keyed border. Keep theme title +
+  // mechanism prose + affected holdings/sectors as neutral chips.
   return (
     <div
       role={onClick ? "button" : undefined}
       tabIndex={onClick ? 0 : undefined}
       onClick={onClick}
       onKeyDown={(e) => { if (onClick && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onClick(); } }}
-      onMouseEnter={(e) => { if (onClick) e.currentTarget.style.background = "rgba(99,102,241,0.04)"; }}
-      onMouseLeave={(e) => { if (onClick) e.currentTarget.style.background = "rgba(255,255,255,0.02)"; }}
+      onMouseEnter={(e) => { if (onClick) e.currentTarget.style.background = "var(--color-bg-card-hover, rgba(255,255,255,0.03))"; }}
+      onMouseLeave={(e) => { if (onClick) e.currentTarget.style.background = "transparent"; }}
       className={onClick ? "living-row" : undefined}
       style={{
-        padding: "14px 16px", background: "rgba(255,255,255,0.02)",
-        border: "1px solid var(--border-subtle)", borderRadius: "10px", borderLeft: `3px solid ${color}`,
+        padding: "14px 16px", background: "transparent",
+        border: "1px solid var(--border-subtle)",
+        borderRadius: "var(--radius-card)",
         cursor: onClick ? "pointer" : "default",
-        transition: "transform 0.16s ease, background 0.15s",
+        transition: "background 0.15s, border-color 0.15s",
       }}>
       <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "8px", flexWrap: "wrap" }}>
-        <span style={{ fontSize: "14px", fontWeight: 700, color: "var(--color-text-primary)" }}>{theme.theme}</span>
         <span style={{
-          padding: "3px 8px", borderRadius: "6px", fontSize: "10px", fontWeight: 700,
-          background: `${color}20`, color, textTransform: "uppercase", letterSpacing: "0.5px",
+          fontSize: "13.5px", fontWeight: 700,
+          color: "var(--color-text-primary)", letterSpacing: "-0.005em",
         }}>
-          {theme.direction}
+          {theme.theme}
         </span>
-        {importance === "high" && (
-          <span style={{
-            padding: "3px 8px", borderRadius: "6px", fontSize: "10px", fontWeight: 700,
-            background: "rgba(245,158,11,0.15)", color: "#f59e0b", textTransform: "uppercase", letterSpacing: "0.5px",
-          }}>
-            ★ High importance
-          </span>
-        )}
+        {/* Theme-type tag — neutral outlined "THEME" chip. Replaces the
+            colored direction chip; the row's "mechanism" prose carries the
+            actual content without pretending to be a forecast. */}
+        <span style={{
+          padding: "2px 8px",
+          fontFamily: "var(--font-mono)",
+          fontSize: "9.5px", fontWeight: 700,
+          color: "var(--color-text-muted)",
+          border: "1px solid var(--border-subtle)",
+          borderRadius: "4px",
+          textTransform: "uppercase", letterSpacing: "0.14em",
+        }}>
+          Theme
+        </span>
       </div>
       {theme.mechanism && (
-        <p title={claimSource(theme.mechanism) || ""} style={{ fontSize: "13px", color: "var(--color-text-secondary)", lineHeight: 1.5, marginBottom: "8px" }}>
+        <p title={claimSource(theme.mechanism) || ""} style={{ fontSize: "13px", color: "var(--color-text-secondary)", lineHeight: 1.55, marginBottom: "8px" }}>
           {claimText(theme.mechanism)}
         </p>
       )}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
-        {(theme.affected_holdings || []).map((t, i) => (
-          <span key={`h-${i}`} style={{
-            padding: "3px 8px", borderRadius: "6px", fontSize: "11px", fontWeight: 600,
-            background: "rgba(99,102,241,0.12)", color: "var(--color-accent-secondary)",
-          }}>
-            {t}
-          </span>
-        ))}
-        {(theme.affected_sectors || []).map((s, i) => (
-          <span key={`s-${i}`} style={{
-            padding: "3px 8px", borderRadius: "6px", fontSize: "11px", fontWeight: 600,
-            background: "rgba(6,182,212,0.12)", color: "var(--color-accent-cyan)",
-          }}>
-            {s}
-          </span>
-        ))}
-      </div>
+      {(theme.affected_holdings?.length > 0 || theme.affected_sectors?.length > 0) && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "4px" }}>
+          {(theme.affected_holdings || []).map((t, i) => (
+            <span key={`h-${i}`} style={{
+              padding: "2px 7px",
+              fontFamily: "var(--font-mono)",
+              fontSize: "10.5px", fontWeight: 700,
+              color: "var(--color-text-secondary)",
+              border: "1px solid var(--border-subtle)",
+              borderRadius: "4px",
+              letterSpacing: "0.04em",
+            }}>
+              {t}
+            </span>
+          ))}
+          {(theme.affected_sectors || []).map((s, i) => (
+            <span key={`s-${i}`} style={{
+              padding: "2px 7px",
+              fontFamily: "var(--font-mono)",
+              fontSize: "10px", fontWeight: 700,
+              color: "var(--color-text-muted)",
+              border: "1px dashed var(--border-subtle)",
+              borderRadius: "4px",
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+            }}>
+              {s}
+            </span>
+          ))}
+        </div>
+      )}
       {/* Personalization — aggregate stake across every holding this theme touches. */}
       <YourStake
         tickers={theme.affected_holdings}
@@ -816,27 +931,85 @@ function ThemeRow({ theme, onClick, holdingsToday }) {
   );
 }
 
-function DriverHeadline({ label, color, claim }) {
+function DriverHeadline({ label, direction = "up", claim }) {
+  // Direction is "up" or "down" — picks a single accent color for the glyph
+  // and label only. Card itself is hairline-bordered transparent (no fill
+  // tint) so it sits in the editorial vocabulary of the rest of the product.
+  const isUp = direction === "up";
+  const color = isUp ? "var(--color-accent-green)" : "var(--color-accent-red)";
+  const glyph = isUp ? "▲" : "▼";
   return (
-    <div title={claimSource(claim) || ""} style={{ padding: "10px 14px", borderRadius: "10px", background: `${color}0d`, borderLeft: `3px solid ${color}` }}>
-      <div style={{ fontSize: "10px", color: "var(--color-text-muted)", textTransform: "uppercase", letterSpacing: "1px", marginBottom: "4px" }}>{label}</div>
-      <div style={{ fontSize: "13px", color: "var(--color-text-primary)", lineHeight: 1.5 }}>{claimText(claim)}</div>
+    <div
+      title={claimSource(claim) || ""}
+      style={{
+        padding: "14px 16px",
+        background: "transparent",
+        border: "1px solid var(--border-subtle)",
+        borderLeft: `2px solid ${color}`,
+        borderRadius: "var(--radius-card)",
+      }}
+    >
+      <div style={{
+        display: "flex", alignItems: "center", gap: "8px",
+        marginBottom: "8px",
+      }}>
+        <span aria-hidden style={{ color, fontSize: "10px", lineHeight: 1 }}>{glyph}</span>
+        <span style={{
+          fontFamily: "var(--font-mono)",
+          fontSize: "9.5px", fontWeight: 700,
+          color, textTransform: "uppercase", letterSpacing: "0.18em",
+        }}>
+          {label}
+        </span>
+      </div>
+      <p style={{
+        fontSize: "13.5px",
+        color: "var(--color-text-primary)",
+        lineHeight: 1.55, margin: 0,
+        letterSpacing: "-0.003em",
+      }}>
+        {claimText(claim)}
+      </p>
     </div>
   );
 }
 
 function FooterMeta({ confidence, data_gaps }) {
   if (!confidence && (!data_gaps || data_gaps.length === 0)) return null;
+  const confColor =
+    confidence === "high"   ? "var(--color-accent-green)" :
+    confidence === "medium" ? "var(--color-accent-amber)" :
+                              "var(--color-accent-red)";
   return (
-    <div style={{ marginTop: "14px", padding: "10px 12px", background: "rgba(0,0,0,0.15)", borderRadius: "8px", display: "flex", flexWrap: "wrap", gap: "12px", alignItems: "center" }}>
+    <div style={{
+      marginTop: "14px", padding: "10px 14px",
+      background: "transparent",
+      border: "1px dashed var(--border-subtle)",
+      borderRadius: "var(--radius-control)",
+      display: "flex", flexWrap: "wrap", gap: "16px", alignItems: "center",
+      fontFamily: "var(--font-mono)",
+      fontSize: "10.5px",
+    }}>
       {confidence && (
-        <span style={{ fontSize: "11px", fontWeight: 700, color: "var(--color-text-muted)", textTransform: "uppercase", letterSpacing: "1px" }}>
-          Confidence: <span style={{ color: confidence === "high" ? "var(--color-accent-green)" : confidence === "medium" ? "#f59e0b" : "var(--color-accent-red)" }}>{confidence}</span>
+        <span style={{
+          fontWeight: 700, color: "var(--color-text-muted)",
+          textTransform: "uppercase", letterSpacing: "0.14em",
+        }}>
+          Confidence
+          <span style={{ marginLeft: "8px", color: confColor }}>
+            {confidence}
+          </span>
         </span>
       )}
       {data_gaps?.length > 0 && (
-        <span style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>
-          Gaps: {data_gaps.slice(0, 2).join(" · ")}
+        <span style={{ color: "var(--color-text-muted)", letterSpacing: "0.02em" }}>
+          <span style={{
+            textTransform: "uppercase", letterSpacing: "0.14em",
+            fontWeight: 700, marginRight: "8px",
+          }}>
+            Gaps
+          </span>
+          {data_gaps.slice(0, 2).join(" · ")}
         </span>
       )}
     </div>

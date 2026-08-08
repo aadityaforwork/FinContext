@@ -87,7 +87,7 @@ export default function PreTradeCheckModal({ ticker, onClose, onOpenDeepDive }) 
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        padding: "20px",
+        padding: "12px",
         animation: "ptc-fade-in 0.18s ease-out",
       }}
     >
@@ -97,14 +97,30 @@ export default function PreTradeCheckModal({ ticker, onClose, onOpenDeepDive }) 
           from { opacity: 0; transform: translateY(10px) scale(0.98); }
           to   { opacity: 1; transform: translateY(0)    scale(1);    }
         }
+        /* Mobile responsiveness — under 480px we tighten paddings, allow header
+           cluster to wrap, and switch CheckRow to a stacked layout so the
+           right-side PASS/CAUTION/FAIL pill never pushes off-screen. */
+        @media (max-width: 480px) {
+          .ptc-modal       { border-radius: 12px; }
+          .ptc-header      { padding: 14px 16px !important; }
+          .ptc-header-meta { gap: 6px !important; flex-wrap: wrap; }
+          .ptc-ticker      { font-size: 18px !important; }
+          .ptc-summary     { padding: 14px 16px !important; }
+          .ptc-list        { padding-left: 16px !important; padding-right: 16px !important; }
+          .ptc-row         { grid-template-columns: 20px 1fr !important; }
+          .ptc-row-pill    { grid-column: 2 !important; justify-self: start !important; margin-top: 2px !important; }
+          .ptc-footer      { padding: 14px 16px 18px !important; }
+          .ptc-cta         { width: 100%; justify-content: center; }
+        }
       `}</style>
 
       <div
         ref={cardRef}
         onClick={(e) => e.stopPropagation()}
+        className="ptc-modal"
         style={{
-          width: "min(560px, 96vw)",
-          maxHeight: "92vh",
+          width: "min(560px, 100%)",
+          maxHeight: "94vh",
           overflowY: "auto",
           background: "var(--color-bg-primary)",
           border: "1px solid var(--border-subtle)",
@@ -115,16 +131,18 @@ export default function PreTradeCheckModal({ ticker, onClose, onOpenDeepDive }) 
       >
         {/* HEADER */}
         <div
+          className="ptc-header"
           style={{
             display: "flex",
-            alignItems: "center",
+            alignItems: "flex-start",
             justifyContent: "space-between",
             padding: "16px 22px",
             borderBottom: "1px solid var(--border-subtle)",
             gap: "12px",
+            flexWrap: "wrap",
           }}
         >
-          <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.2 }}>
+          <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.2, minWidth: 0, flex: 1 }}>
             <span
               style={{
                 fontFamily: MONO,
@@ -138,8 +156,12 @@ export default function PreTradeCheckModal({ ticker, onClose, onOpenDeepDive }) 
             >
               Pre-trade check
             </span>
-            <div style={{ display: "flex", alignItems: "baseline", gap: "10px" }}>
+            <div
+              className="ptc-header-meta"
+              style={{ display: "flex", alignItems: "baseline", gap: "10px", flexWrap: "wrap" }}
+            >
               <span
+                className="ptc-ticker"
                 style={{
                   fontFamily: MONO,
                   fontSize: "20px",
@@ -170,7 +192,7 @@ export default function PreTradeCheckModal({ ticker, onClose, onOpenDeepDive }) 
               )}
             </div>
             {data?.company && (
-              <span style={{ fontSize: "12px", color: "var(--color-text-muted)", marginTop: "2px" }}>
+              <span style={{ fontSize: "12px", color: "var(--color-text-muted)", marginTop: "2px", overflow: "hidden", textOverflow: "ellipsis" }}>
                 {data.company}{data.sector ? ` · ${data.sector}` : ""}
               </span>
             )}
@@ -208,7 +230,7 @@ export default function PreTradeCheckModal({ ticker, onClose, onOpenDeepDive }) 
           <>
             <SummaryStrip summary={data.summary} />
 
-            <ul style={{ listStyle: "none", padding: "0 22px 4px", margin: 0 }}>
+            <ul className="ptc-list" style={{ listStyle: "none", padding: "0 22px 4px", margin: 0 }}>
               {data.checks.length === 0 && (
                 <li style={{ padding: "24px 0", textAlign: "center", color: "var(--color-text-muted)", fontStyle: "italic", fontSize: "13px" }}>
                   Not enough data to run checks on this ticker right now.
@@ -223,6 +245,7 @@ export default function PreTradeCheckModal({ ticker, onClose, onOpenDeepDive }) 
 
             {/* CTA — open the full LLM brief */}
             <div
+              className="ptc-footer"
               style={{
                 padding: "14px 22px 20px",
                 borderTop: "1px solid var(--border-subtle)",
@@ -241,7 +264,7 @@ export default function PreTradeCheckModal({ ticker, onClose, onOpenDeepDive }) 
                   fontStyle: "italic",
                   letterSpacing: "-0.003em",
                   flex: 1,
-                  minWidth: "200px",
+                  minWidth: "180px",
                 }}
               >
                 These are isolated checks — they don&rsquo;t add up to a verdict.
@@ -249,8 +272,11 @@ export default function PreTradeCheckModal({ ticker, onClose, onOpenDeepDive }) 
               <button
                 type="button"
                 onClick={() => { onOpenDeepDive?.(ticker); onClose?.(); }}
+                className="ptc-cta"
                 style={{
-                  padding: "8px 14px",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  padding: "9px 14px",
                   borderRadius: "var(--radius-control)",
                   border: "1px solid var(--color-accent-primary)",
                   background: "var(--color-accent-primary)",
@@ -282,6 +308,7 @@ function SummaryStrip({ summary }) {
   const { passes, cautions, fails, total } = summary;
   return (
     <div
+      className="ptc-summary"
       style={{
         padding: "16px 22px",
         borderBottom: "1px solid var(--border-subtle)",
@@ -352,6 +379,7 @@ function CheckRow({ check }) {
   const meta = STATUS_META[check.status] || STATUS_META.CAUTION;
   return (
     <li
+      className="ptc-row"
       style={{
         display: "grid",
         gridTemplateColumns: "24px 1fr auto",
@@ -397,6 +425,7 @@ function CheckRow({ check }) {
       </div>
 
       <span
+        className="ptc-row-pill"
         style={{
           fontFamily: MONO,
           fontSize: "9.5px",
