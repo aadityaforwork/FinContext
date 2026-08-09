@@ -33,6 +33,28 @@ class Settings:
 
     # --- Frontend / CORS ---
     FRONTEND_URL: str = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+    # Stable, public base URL of the deployed frontend — used anywhere we need
+    # to redirect a browser back to the SAME origin the user is signed into
+    # (Google OAuth callback, Zerodha Kite callback). Supabase's browser
+    # session lives in that origin's localStorage, so landing on the wrong
+    # origin looks like the user got logged out.
+    #
+    # Deliberately NOT read from FRONTEND_URL on Vercel: root vercel.json
+    # defines this project as a multi-service deployment (experimentalServices
+    # "frontend"/"backend"), and Vercel auto-injects a system env var named
+    # after each service key + "_URL" (i.e. FRONTEND_URL) pointing at that
+    # service's own ephemeral per-deployment URL — which changes on every
+    # deploy and silently shadows anything set with the same name. That's not
+    # visible in the dashboard's env var list, which is why it looks unset
+    # there while still resolving at runtime. PUBLIC_APP_URL sidesteps the
+    # collision; set it explicitly in Vercel prod env to the stable domain
+    # (e.g. https://fin-context.vercel.app). Falls back to FRONTEND_URL/
+    # localhost for local dev, where there's no such collision.
+    PUBLIC_APP_URL: str = (
+        os.environ.get("PUBLIC_APP_URL")
+        or os.environ.get("FRONTEND_URL")
+        or "http://localhost:3000"
+    )
     # Comma-separated list of exact allowed origins.
     # Note: with allow_credentials=True the browser rejects "*", so origins must be enumerated.
     CORS_ORIGINS: list[str] = [

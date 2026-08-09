@@ -235,7 +235,7 @@ async def google_callback(
     db: AsyncSession = Depends(get_db),
 ):
     """Handle Google's redirect back — exchange code, upsert user, set cookies, bounce to frontend."""
-    frontend_login = f"{settings.FRONTEND_URL.rstrip('/')}/login"
+    frontend_login = f"{settings.PUBLIC_APP_URL.rstrip('/')}/login"
 
     if error:
         return RedirectResponse(f"{frontend_login}?error={error}", status_code=302)
@@ -319,7 +319,7 @@ async def google_callback(
     await db.flush()
 
     # 4. Set cookies + redirect to frontend
-    redirect = RedirectResponse(url=settings.FRONTEND_URL, status_code=302)
+    redirect = RedirectResponse(url=settings.PUBLIC_APP_URL, status_code=302)
     access = create_access_token(user.id)
     refresh = create_refresh_token(user.id)
     set_auth_cookies(redirect, access, refresh)

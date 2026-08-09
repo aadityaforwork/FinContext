@@ -10,6 +10,8 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from fastapi.responses import RedirectResponse
 
+from app.core.config import settings
+
 try:
     from kiteconnect import KiteConnect
 except ImportError:
@@ -17,7 +19,10 @@ except ImportError:
 
 KITE_API_KEY = os.getenv("KITE_API_KEY")
 KITE_API_SECRET = os.getenv("KITE_API_SECRET")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+# See config.py's PUBLIC_APP_URL docstring — deliberately not FRONTEND_URL,
+# which Vercel's multi-service preset auto-injects with the wrong (ephemeral,
+# per-deployment) value on this project.
+FRONTEND_URL = settings.PUBLIC_APP_URL
 
 router = APIRouter(tags=["zerodha"])
 
