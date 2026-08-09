@@ -43,9 +43,9 @@ async def kite_callback(request_token: str | None = None, error: str | None = No
     The frontend is responsible for writing to Supabase.
     """
     if error:
-        return RedirectResponse(f"{FRONTEND_URL}/?nav=portfolio&error={error}")
+        return RedirectResponse(f"{FRONTEND_URL}/dashboard?nav=portfolio&error={error}")
     if not request_token:
-        return RedirectResponse(f"{FRONTEND_URL}/?nav=portfolio&error=No+request+token")
+        return RedirectResponse(f"{FRONTEND_URL}/dashboard?nav=portfolio&error=No+request+token")
 
     try:
         import json, base64
@@ -66,10 +66,10 @@ async def kite_callback(request_token: str | None = None, error: str | None = No
             })
 
         payload = base64.urlsafe_b64encode(json.dumps(positions).encode()).decode()
-        return RedirectResponse(f"{FRONTEND_URL}/?nav=portfolio&zerodha_import={payload}")
+        return RedirectResponse(f"{FRONTEND_URL}/dashboard?nav=portfolio&zerodha_import={payload}")
     except Exception as e:
         print(f"Kite connect error: {e}")
-        return RedirectResponse(f"{FRONTEND_URL}/?nav=portfolio&error=Zerodha+integration+failed")
+        return RedirectResponse(f"{FRONTEND_URL}/dashboard?nav=portfolio&error=Zerodha+integration+failed")
 
 
 @router.post("/api/zerodha/upload-csv")
