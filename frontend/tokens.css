@@ -1,0 +1,58 @@
+/* Hallmark · macrostructure: Narrative Workflow · genre: editorial (dark
+ * palette preserved) · theme: preserved (not a catalog pick) · nav: N9
+ * edge-aligned minimal · footer: Ft2 inline single line
+ *
+ * This file documents the token set the / landing page (frontend/src/app/page.js
+ * + frontend/src/app/components/landing/*) draws on. It is NOT imported by
+ * the app — Next.js loads frontend/src/app/globals.css, and every token
+ * below already lives there (colours/fonts/radii in the @theme block near
+ * the top; the --space-*/--ease-*/--dur-* additions this build introduced
+ * live in the "Landing page — additive tokens" block near the bottom).
+ * Kept here per Hallmark convention so the system is portable to the next
+ * build without re-deriving it from globals.css by hand.
+ */
+
+:root {
+  /* Colour — aliases to frontend/src/app/globals.css, not redeclarations.
+     Values are hex (this project's existing convention), not OKLCH — kept
+     as-is rather than converting a live, working palette mid-build. */
+  --color-bg-primary:      #0a0a0c;
+  --color-bg-secondary:    #121214;
+  --color-bg-card:         #151517;
+  --color-bg-card-hover:   #1c1c1f;
+  --color-accent-primary:  #6366f1;
+  --color-accent-secondary:#818cf8;
+  --color-text-primary:    #ededee;
+  --color-text-secondary:  #9a9aa3;
+  --color-text-muted:      #66666e;
+  --border-subtle:  rgba(255, 255, 255, 0.07);
+  --border-strong:  rgba(255, 255, 255, 0.12);
+
+  /* Type — Inter (body/UI, next/font) + Georgia-stack serif (display /
+     headline moments only) + system mono (numerals, stage labels,
+     wordmark accents). Pre-existing; not a fresh Hallmark pairing. */
+  --font-sans:  var(--font-inter, 'Inter', system-ui, -apple-system, sans-serif);
+  --font-serif: 'Georgia', 'Iowan Old Style', 'Apple Garamond', 'Times New Roman', serif;
+  --font-mono:  ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  --radius-card:    10px;
+  --radius-control: 8px;
+
+  /* Spacing + motion — new for this build; the rest of the app used raw
+     px until now. */
+  --space-2xs: 0.25rem;
+  --space-xs:  0.5rem;
+  --space-sm:  0.75rem;
+  --space-md:  1rem;
+  --space-lg:  1.5rem;
+  --space-xl:  2.5rem;
+  --space-2xl: 4rem;
+  --space-3xl: 6rem;
+
+  --ease-out:    cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in:     cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-micro: 120ms;
+  --dur-short: 220ms;
+  --dur-long:  420ms;
+}

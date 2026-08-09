@@ -40,7 +40,7 @@ export default function ResetPasswordPage() {
     try {
       await updatePassword(password);
       setInfo("Password updated. Redirecting…");
-      setTimeout(() => router.replace("/"), 1200);
+      setTimeout(() => router.replace("/dashboard"), 1200);
     } catch (err) {
       setError(err.message || "Could not update password");
     } finally {

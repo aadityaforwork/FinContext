@@ -768,3 +768,364 @@
     width: 95vw;
   }
 }
+
+/* ---------------------------------------------------------
+   Landing page (/) — additive tokens.
+   Colours, radii and fonts above already cover this page (it
+   references them by name, never inline). These are the two
+   token families the rest of the app never needed a name for:
+   a spacing scale and a motion vocabulary. Additive only —
+   nothing above this line changes.
+   --------------------------------------------------------- */
+:root {
+  --space-2xs: 0.25rem;   /*  4px */
+  --space-xs:  0.5rem;    /*  8px */
+  --space-sm:  0.75rem;   /* 12px */
+  --space-md:  1rem;      /* 16px */
+  --space-lg:  1.5rem;    /* 24px */
+  --space-xl:  2.5rem;    /* 40px */
+  --space-2xl: 4rem;      /* 64px */
+  --space-3xl: 6rem;      /* 96px */
+
+  --ease-out:    cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in:     cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-micro: 120ms;
+  --dur-short: 220ms;
+  --dur-long:  420ms;
+}
+
+/* Belt-and-braces against horizontal scroll on the new public route —
+   `clip` (not `hidden`) so it doesn't break `position: sticky` elsewhere
+   in the app. */
+html, body {
+  overflow-x: clip;
+}
+
+/* Landing hero/section reveal — same quiet fade the rest of the app already
+   uses (see .animate-fade-up above), staggered by DOM order via --i. */
+.landing-reveal {
+  opacity: 0;
+  transform: translateY(6px);
+  animation: fadeInUp var(--dur-long) var(--ease-out) forwards;
+  animation-delay: calc(var(--i, 0) * 60ms);
+}
+@media (prefers-reduced-motion: reduce) {
+  .landing-reveal { animation-duration: 0.001ms; }
+}
+
+.landing-cta-primary {
+  transition: transform var(--dur-short) var(--ease-out), filter var(--dur-short) var(--ease-out);
+}
+@media (hover: hover) and (pointer: fine) {
+  .landing-cta-primary:hover { transform: translateY(-1.5px); filter: brightness(1.08); }
+}
+.landing-cta-primary:active { transform: translateY(0); }
+
+/* Hero (H2 split diptych) and the track-record split collapse to one
+   column below 60rem — content stacks, proof column moves under the lede.
+   (Hero itself is single-column top-to-bottom now — the pipeline diagram
+   is a full-width strip, not a side-by-side split — so only the
+   track-record section still needs this.) */
+@media (max-width: 60rem) {
+  .landing-split {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+/* ---------------------------------------------------------
+   Pipeline diagram (hero enrichment) — hand-built SVG, Tier A/B.
+   Four boxes (Compute / Cite / Verify / Grade), connected by hairline
+   arrows. One arrow — the "grounding" transition — carries a live
+   travelling-dash flow via stroke-dashoffset, exactly the way a signal
+   would actually move through the real pipeline. Everything else is
+   static. `@property` gives the dash motion a typed, GPU-composited
+   interpolation with zero JS.
+   --------------------------------------------------------- */
+@property --pipe-dash {
+  syntax: "<number>";
+  initial-value: 0;
+  inherits: false;
+}
+
+/* The diagram's text is sized in SVG viewBox units — shrinking the whole
+   graphic to fit a phone would shrink the labels past legibility. Instead
+   the scroller holds it at a legible minimum width and scrolls
+   horizontally on narrow viewports (same pattern as a wide data table),
+   rather than the page itself scrolling — gate 34 is about the page. */
+.pipeline-scroller {
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+.pipeline {
+  width: 100%;
+  min-width: 620px;
+  height: auto;
+  display: block;
+  overflow: visible;
+}
+@media (min-width: 56rem) {
+  .pipeline-scroller { overflow-x: visible; }
+}
+.pipeline__box {
+  fill: var(--color-bg-card);
+  stroke: var(--border-strong);
+  stroke-width: 1.25;
+}
+.pipeline__box--live {
+  fill: var(--color-bg-card-hover);
+  stroke: var(--color-accent-primary);
+}
+.pipeline__num {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  fill: var(--color-accent-secondary);
+}
+.pipeline__label {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 700;
+  fill: var(--color-text-primary);
+  letter-spacing: -0.01em;
+}
+.pipeline__cap {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  fill: var(--color-text-muted);
+}
+.pipeline__arrow {
+  fill: none;
+  stroke: var(--border-strong);
+  stroke-width: 1.25;
+  stroke-linecap: round;
+}
+.pipeline__arrow--live {
+  stroke: var(--color-accent-primary);
+  stroke-dasharray: 5 5;
+  animation: pipeline-flow 4s linear infinite;
+}
+@keyframes pipeline-flow {
+  to { --pipe-dash: 20; stroke-dashoffset: -20; }
+}
+.pipeline__group--a { transform: rotate(-0.6deg); transform-origin: 100px 90px; }
+.pipeline__group--d { transform: rotate(0.5deg); transform-origin: 700px 90px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pipeline__arrow--live { animation: none; stroke-dasharray: 0; }
+}
+
+/* ---------------------------------------------------------
+   Markets ticker — studied from a reference "live departures board"
+   strip. Reuses the existing .pulse-dot @utility (defined near the top
+   of this file) for the live-dot animation rather than adding a new
+   primitive. Horizontal-scrolls on narrow viewports, hairline scrollbar
+   hidden — same "wide-content, contained scroll" pattern as the pipeline
+   diagram, so the page itself never scrolls sideways.
+   --------------------------------------------------------- */
+.markets-ticker {
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--color-bg-secondary);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.markets-ticker::-webkit-scrollbar { display: none; }
+.markets-ticker__track {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  padding: 9px clamp(1rem, 4vw, 2.5rem);
+  white-space: nowrap;
+  width: max-content;
+  min-width: 100%;
+}
+.markets-ticker__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+}
+.markets-ticker__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-accent-green);
+  flex-shrink: 0;
+}
+.markets-ticker__item {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+.markets-ticker__item::before {
+  content: "·";
+  margin-inline-end: var(--space-lg);
+  color: var(--border-strong);
+}
+
+/* ---------------------------------------------------------
+   Verified stamp — studied from the same reference (a rotated,
+   double-ruled ticket-stamp card breaking the hero's grid). Tier A pure
+   CSS: two nested hairline borders, mono caps, no asset. Decorative —
+   aria-hidden, hidden below 60rem (the claim it makes is stated in full,
+   accessibly, in TrackRecord.jsx).
+   --------------------------------------------------------- */
+.verified-stamp {
+  display: none;
+}
+@media (min-width: 60rem) {
+  .verified-stamp {
+    display: block;
+    position: absolute;
+    top: -18px;
+    right: 28px;
+    transform: rotate(-4deg);
+    z-index: var(--z-raised, 10);
+  }
+}
+.verified-stamp__inner {
+  border: 1.5px solid var(--color-accent-secondary);
+  border-radius: 3px;
+  padding: 9px 13px;
+  margin: 3px;
+  outline: 1px solid var(--color-accent-secondary);
+  outline-offset: 3px;
+  background: var(--color-bg-primary);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+.verified-stamp__line {
+  font-family: var(--font-mono);
+  letter-spacing: 0.06em;
+  color: var(--color-accent-secondary);
+  white-space: nowrap;
+}
+.verified-stamp__line--big { font-size: 12px; font-weight: 700; line-height: 1.15; }
+.verified-stamp__line--small { font-size: 9px; color: var(--color-text-muted); letter-spacing: 0.08em; }
+.verified-stamp__rule {
+  width: 60%;
+  height: 1px;
+  background: var(--color-accent-secondary);
+  opacity: 0.35;
+  margin: 1px 0;
+}
+
+/* ---------------------------------------------------------
+   Signal card — fills the hero's right-hand column. A clearly-labelled
+   illustrative sample (fictional ticker, fictional move), not a
+   screenshot and not a real claim — see the component's own comment.
+   --------------------------------------------------------- */
+.hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 21rem);
+  gap: var(--space-2xl);
+  align-items: center;
+}
+@media (max-width: 60rem) {
+  .hero-grid { grid-template-columns: 1fr; }
+}
+
+.signal-card {
+  background: var(--color-bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-card);
+  padding: var(--space-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+.signal-card__eyebrow {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  margin: 0 0 4px;
+}
+.signal-card__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+.signal-card__ticker {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  letter-spacing: 0.01em;
+}
+.signal-card__change {
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--color-accent-green);
+  font-variant-numeric: tabular-nums;
+}
+.signal-card__narrative {
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--color-text-primary);
+  margin: 0;
+}
+.signal-card__cite {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--color-text-muted);
+  padding-top: var(--space-xs);
+  border-top: 1px solid var(--border-subtle);
+}
+.signal-card__cite-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--color-accent-secondary);
+  flex-shrink: 0;
+}
+.signal-card__confidence {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.signal-card__confidence-label {
+  font-size: 10.5px;
+  color: var(--color-text-muted);
+}
+.signal-card__confidence-bar {
+  display: inline-flex;
+  gap: 3px;
+}
+.signal-card__confidence-seg {
+  width: 14px;
+  height: 4px;
+  border-radius: 1px;
+  background: var(--border-strong);
+}
+.signal-card__confidence-seg--on {
+  background: var(--color-accent-secondary);
+}
+.signal-card__confidence-value {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+.signal-card__note {
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--color-text-muted);
+  margin: 0;
+  padding-top: 2px;
+}

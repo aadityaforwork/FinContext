@@ -70,7 +70,7 @@ export function AuthProvider({ children }) {
   // login/signup useEffect guards.
   const googleLogin = useCallback(async () => {
     const redirectTo =
-      typeof window !== "undefined" ? `${window.location.origin}/` : undefined;
+      typeof window !== "undefined" ? `${window.location.origin}/dashboard` : undefined;
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
       options: {

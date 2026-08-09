@@ -23,7 +23,7 @@ function LoginForm() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    if (!loading && user) router.replace("/");
+    if (!loading && user) router.replace("/dashboard");
   }, [loading, user, router]);
 
   useEffect(() => {
@@ -37,7 +37,7 @@ function LoginForm() {
     setSubmitting(true);
     try {
       await login(email, password);
-      router.replace("/");
+      router.replace("/dashboard");
     } catch (err) {
       setError(err.message || "Login failed");
     } finally {

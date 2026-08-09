@@ -24,7 +24,7 @@ export default function SignupPage() {
   const [info, setInfo] = useState("");
 
   useEffect(() => {
-    if (!loading && user) router.replace("/");
+    if (!loading && user) router.replace("/dashboard");
   }, [loading, user, router]);
 
   async function onSubmit(e) {
@@ -40,7 +40,7 @@ export default function SignupPage() {
       if (!user) {
         setInfo("Check your email to confirm your account, then sign in.");
       } else {
-        router.replace("/");
+        router.replace("/dashboard");
       }
     } catch (err) {
       setError(err.message || "Signup failed");

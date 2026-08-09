@@ -1,0 +1,10 @@
+{
+  "scannedAt": "2026-08-09",
+  "fontStack": "Inter via next/font (frontend/package.json, frontend/src/app/layout.js:1-9) + Georgia-stack serif and system mono declared in frontend/src/app/globals.css @theme block",
+  "palette": "hex custom properties in frontend/src/app/globals.css @theme (not OKLCH) — near-black surfaces (#0a0a0c), single indigo accent (#6366f1), semantic green/red/amber, no gradients/glassmorphism/glow by explicit design-system comment",
+  "motion": "no framer-motion / gsap / motion / lenis in frontend/package.json — motion-cut project. Existing quiet keyframes already defined: fadeInUp, pulse-dot, shimmer, blink-caret",
+  "spacing": "no named --space-* scale before this build; ad-hoc px values across components",
+  "framework": "Next.js 16.1.7 App Router, React 19.2.3, Tailwind v4 (@tailwindcss/postcss), no component library",
+  "preserved": ["font stack", "colour palette (as hex, not converted to OKLCH)", "radii (--radius-card, --radius-control)", "no-gradient/no-glow/no-glassmorphism rule", "button visual language from AuthCard.jsx"],
+  "introduced": ["named --space-* scale", "named --ease-*/--dur-* motion tokens", "macrostructure + nav/footer archetype discipline", "slop-test gates"]
+}
