@@ -59,5 +59,16 @@ class Settings:
     def google_oauth_configured(self) -> bool:
         return bool(self.GOOGLE_CLIENT_ID and self.GOOGLE_CLIENT_SECRET)
 
+    # --- Error monitoring (Sentry) ---
+    # DSN for the `fincontext-backend` Sentry project (org `compute-ji`).
+    # Unset by default — sentry_sdk.init() is skipped entirely in main.py when
+    # this is empty, so local/dev runs never report anywhere.
+    SENTRY_DSN: str | None = os.environ.get("SENTRY_DSN") or None
+    SENTRY_ENVIRONMENT: str = os.environ.get("SENTRY_ENVIRONMENT", "development")
+    # Fraction of requests to capture full traces for (0.0-1.0). Low default —
+    # this API serves LLM/data-heavy endpoints, tracing every request is noisy
+    # and not worth the overhead.
+    SENTRY_TRACES_SAMPLE_RATE: float = float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0.1"))
+
 
 settings = Settings()

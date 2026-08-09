@@ -32,3 +32,6 @@ supabase>=2.0.0
 
 # Brokerage
 kiteconnect>=5.0.0
+
+# Error monitoring
+sentry-sdk[fastapi]>=2.0.0

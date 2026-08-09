@@ -8,6 +8,7 @@ Run with: uvicorn app.main:app --reload --port 8000
 
 import logging
 
+import sentry_sdk
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import (
@@ -34,6 +35,21 @@ logger = logging.getLogger("uvicorn.error")
 # "Access-Control-Allow-Origin missing" errors caused by env var typos.
 logger.info("CORS_ORIGINS loaded: %r", settings.CORS_ORIGINS)
 logger.info("CORS_ORIGIN_REGEX loaded: %r", settings.CORS_ORIGIN_REGEX)
+
+# Sentry — no-op locally/in CI unless SENTRY_DSN is set. Project:
+# fincontext-backend (org compute-ji) — see CLAUDE.md "MCP connectors".
+# Initialized before FastAPI app construction so import-time/startup errors
+# are captured too, not just request-time ones.
+if settings.SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=settings.SENTRY_DSN,
+        environment=settings.SENTRY_ENVIRONMENT,
+        traces_sample_rate=settings.SENTRY_TRACES_SAMPLE_RATE,
+        send_default_pii=False,  # portfolio/financial data — never auto-attach request bodies/user data
+    )
+    logger.info("Sentry initialized (env=%s)", settings.SENTRY_ENVIRONMENT)
+else:
+    logger.info("SENTRY_DSN not set — Sentry disabled")
 
 app = FastAPI(
     title="FinContext API",
