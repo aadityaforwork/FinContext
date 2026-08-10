@@ -1,5 +1,17 @@
 [
   {
+    "date": "2026-08-11",
+    "scope": "page",
+    "macrostructure": "Narrative Workflow (kept — the four-stage sequence is earned by the real pipeline; rotating it would have been change for its own sake)",
+    "theme": "preserved (dark, near-black paper #0a0a0c / indigo accent #6366f1 / Georgia-serif display + Inter body + mono numerals — existing app tokens, not a catalog pick)",
+    "enrichment": "none new (hero keeps the rev-1 E5 pipeline diagram; the two added sections are typographic — a second diagram would have repeated the enrichment archetype)",
+    "nav": "N12 banner + retracting bar (knobs: fill=tint+ink NOT gradient, dismiss=yes, bar-scroll=sticky, content=promo)",
+    "footer": "Ft1 mast-headed (knobs: wordmark=xl, tagline=roman body, links=two clusters)",
+    "new_sections": "ContextLayer (S2 hanging head) · MCPSection (F3 tabular spec sheet, knobs: columns=3, rules=every row, numbers=tabular)",
+    "brief": "FinContext landing rev 2 — market the MCP server (two read-only agent-callable tools) and the context-layer architecture; raise the premium feel while preserving the existing dark editorial theme and colours",
+    "notes": "N6 masthead was the editorial-genre default and was REJECTED: its own spec bans it on product / developer-tool pages, where it reads as costume. Nav rotated N9 -> N12 and footer Ft2 -> Ft1 per the diversification rule. N12's default gradient banner fill was swapped for the tint+ink knob because globals.css bans gradients outright. Typography deviates from typography.md (Inter + Georgia are both on its banned list) — preserved deliberately per pre-flight, not drift."
+  },
+  {
     "date": "2026-08-09",
     "macrostructure": "Narrative Workflow",
     "theme": "preserved (dark, near-black paper #0a0a0c / indigo accent #6366f1 / Georgia-serif display + Inter body + mono numerals — existing app tokens, not a catalog pick)",

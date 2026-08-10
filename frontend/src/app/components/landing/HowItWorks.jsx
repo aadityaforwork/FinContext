@@ -38,11 +38,13 @@ const STAGES = [
 export default function HowItWorks() {
   return (
     <section
+      id="how"
       style={{
         padding: "var(--space-2xl) clamp(1rem, 4vw, 2.5rem)",
         maxWidth: "1180px",
         margin: "0 auto",
         borderTop: "1px solid var(--border-subtle)",
+        scrollMarginTop: "calc(var(--bar-h) + var(--space-md))",
       }}
     >
       <h2

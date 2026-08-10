@@ -1129,3 +1129,561 @@ html, body {
   margin: 0;
   padding-top: 2px;
 }
+
+/* =========================================================
+   Landing rev 2 — MCP surface + premium pass.
+   Additive only; nothing above this line changes.
+
+   Token discipline: every colour below resolves through a
+   name declared in the @theme block or the two additions
+   here (--color-accent-tint, --z-header). No inline hex.
+
+   House rules still hold: no gradients, no glassmorphism,
+   no glow shadows. "Premium" here is carried by hairlines,
+   negative space, tracking and tabular figures — not by
+   effects the design system already banned.
+   ========================================================= */
+:root {
+  /* N12 geometry. --banner-h is zeroed from JS on dismiss so the
+     .landing-page calc() reflows with no leftover gap. */
+  --banner-h: 40px;
+  --bar-h: 60px;
+  --z-header: 500;
+
+  /* Indigo-tinted surface for the banner: --color-accent-primary at ~9%
+     over --color-bg-primary, pre-blended to a SOLID value. It has to be
+     opaque — the header is fixed, so a translucent fill would let the
+     page scroll visibly through it (and a see-through panel is the
+     glassmorphism this design system already rules out). Declared as a
+     token rather than inlined at the use site. */
+  --color-accent-tint: #121221;
+
+  /* Ink on the filled accent button. The rest of the app inlines #fff at
+     each CTA (Hero.jsx, CTASection.jsx, AuthCard.jsx); naming it here at
+     least gives new code one place to reference. */
+  --color-on-accent: #fff;
+}
+
+.landing-page {
+  background: var(--color-bg-primary);
+  min-height: 100vh;
+  padding-top: calc(var(--banner-h) + var(--bar-h));
+}
+
+/* ---------- N12 · banner + retracting bar ---------- */
+.landing-header {
+  position: fixed;
+  inset: 0 0 auto;
+  z-index: var(--z-header);
+  transform: translateY(0);
+  transition: transform var(--dur-long) var(--ease-out);
+}
+.landing-header.is-compact {
+  transform: translateY(calc(var(--banner-h) * -1));
+}
+.landing-header.is-dismissed {
+  transform: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .landing-header { transition-duration: 0.001ms; }
+}
+
+.landing-banner {
+  height: var(--banner-h);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+  padding-inline: clamp(0.75rem, 4vw, 2.5rem);
+  background: var(--color-accent-tint);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.landing-banner__text {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.landing-banner__tag {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-accent-secondary);
+  border: 1px solid var(--border-active);
+  border-radius: var(--radius-pill);
+  padding: 2px 6px;
+}
+.landing-banner__link {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--color-accent-secondary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  white-space: nowrap;
+}
+.landing-banner__x {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: color var(--dur-short) var(--ease-out),
+              background-color var(--dur-short) var(--ease-out);
+}
+@media (hover: hover) and (pointer: fine) {
+  .landing-banner__x:hover {
+    color: var(--color-text-primary);
+    background: var(--color-bg-card-hover);
+  }
+}
+.landing-banner__x:active { color: var(--color-text-primary); }
+
+.landing-bar {
+  height: var(--bar-h);
+  background: var(--color-bg-primary);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.landing-bar__inner {
+  height: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding-inline: clamp(1rem, 4vw, 2.5rem);
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+}
+.landing-bar__brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  flex-shrink: 0;
+}
+.landing-bar__mark {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-primary);
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: -0.03em;
+  background: var(--color-bg-card-hover);
+  border: 1px solid var(--border-strong);
+  flex-shrink: 0;
+}
+.landing-bar__name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+.landing-bar__links {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  margin-inline-start: var(--space-md);
+  min-width: 0;
+}
+.landing-bar__link {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color var(--dur-short) var(--ease-out);
+}
+@media (hover: hover) and (pointer: fine) {
+  .landing-bar__link:hover { color: var(--color-text-primary); }
+}
+.landing-bar__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  margin-inline-start: auto;
+  flex-shrink: 0;
+}
+.landing-bar__signin {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.landing-bar__cta {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-on-accent);
+  background: var(--color-accent-primary);
+  border: 1px solid var(--color-accent-primary);
+  border-radius: var(--radius-control);
+  padding: 8px 14px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+/* Anchor links must clear the docked bar. */
+.landing-section { scroll-margin-top: calc(var(--bar-h) + var(--space-md)); }
+
+/* ---------- Shared section voice ---------- */
+.landing-section {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: var(--space-3xl) clamp(1rem, 4vw, 2.5rem) var(--space-2xl);
+  border-top: 1px solid var(--border-subtle);
+}
+.landing-h2 {
+  font-family: var(--font-serif);
+  font-size: clamp(1.875rem, 2.5vw + 1rem, 2.75rem);
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+  color: var(--color-text-primary);
+  margin: 0 0 var(--space-md);
+  max-width: 24ch;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.landing-lede {
+  font-size: 15px;
+  line-height: 1.65;
+  color: var(--color-text-secondary);
+  max-width: 62ch;
+  margin: 0;
+}
+
+/* ---------- Context layer (S2 hanging head) ---------- */
+.context-layer__head { margin-bottom: var(--space-xl); }
+
+.context-layer__list {
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--border-subtle);
+}
+.context-layer__row {
+  display: grid;
+  grid-template-columns: minmax(0, 15rem) minmax(0, 1fr);
+  gap: var(--space-lg);
+  padding: var(--space-md) 0;
+  border-bottom: 1px solid var(--border-subtle);
+  align-items: baseline;
+}
+.context-layer__key {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-accent-secondary);
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+.context-layer__body {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+  max-width: 64ch;
+}
+.context-layer__note {
+  margin: var(--space-lg) 0 0;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--color-text-muted);
+  max-width: 62ch;
+}
+
+/* ---------- MCP (F3 tabular spec sheet) ---------- */
+.mcp__head { margin-bottom: var(--space-xl); }
+
+.mcp__spec {
+  border-top: 1px solid var(--border-strong);
+  font-variant-numeric: tabular-nums;
+}
+.mcp__spec-head,
+.mcp__spec-row {
+  display: grid;
+  grid-template-columns: minmax(0, 15rem) minmax(0, 1fr) minmax(0, 7rem);
+  gap: var(--space-lg);
+  padding: var(--space-md) 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.mcp__spec-head {
+  padding-block: var(--space-xs);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+.mcp__tool { display: flex; align-items: baseline; gap: 1px; min-width: 0; flex-wrap: wrap; }
+.mcp__tool-name {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  overflow-wrap: anywhere;
+}
+.mcp__tool-arg {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--color-text-muted);
+}
+.mcp__tool-returns {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+.mcp__tool-compute {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--color-accent-green);
+  white-space: nowrap;
+}
+
+.mcp__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+  gap: var(--space-2xl);
+  margin-top: var(--space-xl);
+  align-items: start;
+}
+
+/* Typographic frame — rule + label + rule around a plain <pre>.
+   Explicitly NOT re-drawn window chrome: no title bar, no traffic-light
+   dots. The user's terminal already is chrome. */
+.mcp__install { min-width: 0; }
+.mcp__frame-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding-bottom: var(--space-xs);
+  border-bottom: 1px solid var(--border-strong);
+}
+.mcp__frame-label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+  overflow-wrap: anywhere;
+}
+.mcp__copy {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--color-text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  padding: 4px 9px;
+  cursor: pointer;
+  transition: color var(--dur-short) var(--ease-out),
+              border-color var(--dur-short) var(--ease-out);
+}
+@media (hover: hover) and (pointer: fine) {
+  .mcp__copy:hover {
+    color: var(--color-text-primary);
+    border-color: var(--border-active);
+  }
+}
+.mcp__copy:active { color: var(--color-text-primary); }
+/* Silent success — the label swaps, nothing is announced, no toast. */
+.mcp__copy[data-state="copied"] {
+  color: var(--color-accent-green);
+  border-color: var(--color-accent-green);
+}
+.mcp__code {
+  margin: 0;
+  padding: var(--space-md) 0;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--color-text-secondary);
+  border-bottom: 1px solid var(--border-subtle);
+  -webkit-overflow-scrolling: touch;
+}
+.mcp__frame-foot {
+  margin: var(--space-sm) 0 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--color-text-muted);
+  max-width: 52ch;
+}
+
+.mcp__aside {
+  display: grid;
+  gap: var(--space-lg);
+  min-width: 0;
+}
+.mcp__aside-block {
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--border-subtle);
+}
+.mcp__aside-title {
+  margin: 0 0 4px;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  letter-spacing: -0.01em;
+}
+.mcp__aside-body {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+
+/* ---------- Ft1 · mast-headed footer ---------- */
+.landing-footer {
+  border-top: 1px solid var(--border-subtle);
+  margin-top: var(--space-xl);
+  padding: var(--space-2xl) clamp(1rem, 4vw, 2.5rem) var(--space-lg);
+}
+.landing-footer__inner {
+  max-width: 1180px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-2xl);
+  align-items: start;
+}
+.landing-footer__brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: var(--space-sm);
+}
+.landing-footer__mark {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-primary);
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: -0.03em;
+  background: var(--color-bg-card-hover);
+  border: 1px solid var(--border-strong);
+  flex-shrink: 0;
+}
+.landing-footer__name {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  letter-spacing: -0.02em;
+}
+.landing-footer__tagline {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+  max-width: 44ch;
+}
+.landing-footer__links {
+  display: flex;
+  gap: var(--space-2xl);
+  flex-wrap: wrap;
+}
+.landing-footer__group {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+.landing-footer__group-label {
+  margin: 0 0 2px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+.landing-footer__group a {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color var(--dur-short) var(--ease-out);
+}
+@media (hover: hover) and (pointer: fine) {
+  .landing-footer__group a:hover { color: var(--color-text-primary); }
+}
+.landing-footer__base {
+  max-width: 1180px;
+  margin: var(--space-xl) auto 0;
+  padding-top: var(--space-md);
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+.landing-footer__note { max-width: 52ch; }
+
+/* ---------- Responsive: 768 / 414 / 375 / 320 ---------- */
+@media (max-width: 60rem) {
+  .mcp__grid { grid-template-columns: minmax(0, 1fr); gap: var(--space-xl); }
+  .landing-footer__inner { grid-template-columns: minmax(0, 1fr); gap: var(--space-xl); }
+}
+
+@media (max-width: 52rem) {
+  /* The anchor row is the first thing to go — the CTA and wordmark stay,
+     per N12's mobile behaviour. Every destination in it is still reachable
+     from the footer, so nothing becomes unreachable. */
+  .landing-bar__links { display: none; }
+}
+
+@media (max-width: 48rem) {
+  .landing-banner__long { display: none; }
+
+  .context-layer__row,
+  .mcp__spec-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-2xs);
+  }
+  .mcp__spec-head { display: none; }
+  .mcp__tool-compute { justify-self: start; }
+  .landing-section { padding-top: var(--space-2xl); }
+}
+
+@media (max-width: 26rem) {
+  :root { --banner-h: 38px; }
+  .landing-banner { padding-inline: 0.75rem; gap: var(--space-2xs); }
+  .landing-banner__text { font-size: 11.5px; }
+  /* Below this width the banner can only carry one claim — the link is the
+     one that matters, and #mcp is still reachable from the footer. */
+  .landing-banner__link { display: none; }
+  .landing-bar__signin { display: none; }
+  .landing-bar__inner { gap: var(--space-sm); }
+  .landing-footer__links { gap: var(--space-xl); }
+}

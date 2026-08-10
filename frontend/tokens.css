@@ -1,6 +1,6 @@
 /* Hallmark · macrostructure: Narrative Workflow · genre: editorial (dark
- * palette preserved) · theme: preserved (not a catalog pick) · nav: N9
- * edge-aligned minimal · footer: Ft2 inline single line
+ * palette preserved) · theme: preserved (not a catalog pick) · nav: N12
+ * banner + retracting bar · footer: Ft1 mast-headed
  *
  * This file documents the token set the / landing page (frontend/src/app/page.js
  * + frontend/src/app/components/landing/*) draws on. It is NOT imported by
@@ -22,6 +22,11 @@
   --color-bg-card-hover:   #1c1c1f;
   --color-accent-primary:  #6366f1;
   --color-accent-secondary:#818cf8;
+  /* Accent at ~9% over --color-bg-primary, pre-blended to a solid value.
+     The N12 banner sits in a fixed header, so this must be opaque — a
+     translucent fill lets the page scroll through it. */
+  --color-accent-tint:     #121221;
+  --color-on-accent:       #fff;
   --color-text-primary:    #ededee;
   --color-text-secondary:  #9a9aa3;
   --color-text-muted:      #66666e;
@@ -55,4 +60,10 @@
   --dur-micro: 120ms;
   --dur-short: 220ms;
   --dur-long:  420ms;
+
+  /* Fixed-header geometry (rev 2, N12). --banner-h is set to 0px from JS
+     on dismiss so the page's padding-top calc() reflows with no gap. */
+  --banner-h: 40px;
+  --bar-h:    60px;
+  --z-header: 500;
 }

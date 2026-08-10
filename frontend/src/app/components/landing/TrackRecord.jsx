@@ -12,11 +12,13 @@ import Link from "next/link";
 export default function TrackRecord() {
   return (
     <section
+      id="record"
       style={{
-        padding: "var(--space-2xl) clamp(1rem, 4vw, 2.5rem)",
+        padding: "var(--space-3xl) clamp(1rem, 4vw, 2.5rem) var(--space-2xl)",
         maxWidth: "1180px",
         margin: "0 auto",
         borderTop: "1px solid var(--border-subtle)",
+        scrollMarginTop: "calc(var(--bar-h) + var(--space-md))",
       }}
     >
       <div
