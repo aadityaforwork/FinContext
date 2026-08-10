@@ -54,8 +54,16 @@ _earnings_neg_transient: TTLCache = TTLCache(maxsize=300, ttl=yf_safe.NEG_TTL_TR
 # Thread pool for parallelizing per-holding enrichment in build_movers_context.
 # 12 workers covers the typical 30-50 holding portfolio while staying gentle on
 # yfinance rate limits (Yahoo gets cranky beyond ~20 concurrent connections).
-from concurrent.futures import ThreadPoolExecutor as _Pool
+from concurrent.futures import ThreadPoolExecutor as _Pool, as_completed as _as_completed
 _movers_pool = _Pool(max_workers=12, thread_name_prefix="movers-enrich")
+
+# Thread pool for parallelizing the sector-peer fetch in _peer_stats. Capped
+# at 10 to match the peer-sample cap below. Deliberately separate from
+# yf_safe._yf_executor (16 workers): each _fetch_snapshot call blocks its
+# calling thread on an inner submission to that pool, so fanning the outer
+# per-peer calls out on the SAME pool risks exhausting it (10 outer + 10
+# inner > 16 workers) and stalling instead of parallelizing.
+_peer_pool = _Pool(max_workers=10, thread_name_prefix="peer-fetch")
 
 # Lightweight cache for the price-only path (fast_info). Separate from
 # _snapshot_cache so the heavy build_portfolio_context flow (which needs full
@@ -278,8 +286,13 @@ def _fetch_snapshot(ticker: str) -> dict:
             _snapshot_neg_perm[ticker] = True
         else:
             _snapshot_neg_transient[ticker] = True
+        # A bare timeout (FutTimeout) leaves exc=None — log it too, otherwise
+        # cold-path failures are invisible in prod logs (this was silent
+        # before: a call could return {} with no trace of why).
         if exc is not None:
             logger.warning("snapshot failed for %s: %s", ticker, exc)
+        else:
+            logger.warning("snapshot fetch for %s timed out after 8s", ticker)
         return {}
     if result is None:
         _snapshot_neg_perm[ticker] = True
@@ -305,11 +318,21 @@ def _peer_stats(sector: str, exclude_ticker: str) -> dict:
             "pe_ratio": [], "pb_ratio": [], "roe_pct": [],
             "profit_margin_pct": [], "debt_to_equity": [], "revenue_growth_pct": [],
         }
+        # Fetch peers concurrently on _peer_pool. This used to be a sequential
+        # loop — up to 10 peers x ~1s (occasionally the full 8s per-symbol
+        # timeout) each, measured as the single biggest contributor to
+        # cold-cache latency on this path (6-11s observed end-to-end for a
+        # single stock's pre-trade-check / context call).
+        futures = {_peer_pool.submit(_fetch_snapshot, pm["ticker"]): pm for pm in peer_meta}
         peers_data: list[dict] = []
-        for pm in peer_meta:
-            pt = pm["ticker"]
-            snap = _fetch_snapshot(pt)
-            peers_data.append({"ticker": pt, "name": pm.get("name", pt), "snapshot": snap})
+        for fut in _as_completed(futures):
+            pm = futures[fut]
+            try:
+                snap = fut.result()
+            except Exception as e:
+                logger.warning("peer snapshot fetch failed for %s: %s", pm["ticker"], e)
+                snap = {}
+            peers_data.append({"ticker": pm["ticker"], "name": pm.get("name", pm["ticker"]), "snapshot": snap})
             for k in collected:
                 v = snap.get(k)
                 if v is not None:
@@ -459,7 +482,15 @@ def build_stock_context(ticker: str, include_news: bool = True, news_k: int = 5)
         "news": news,
         "generated_at": datetime.utcnow().isoformat() + "Z",
     }
-    _context_cache[cache_key] = ctx
+    # Only positively cache a context built on a real snapshot. Caching an
+    # empty/failed snapshot here would serve a transient Yahoo hiccup as
+    # "no data" (still HTTP 200) to every caller for the full 10-minute TTL —
+    # verified live: a single failed fetch got replayed for 10 minutes with
+    # no error surfaced. _fetch_snapshot's own negative cache (60s transient /
+    # 24h permanent) already makes the retry cheap, so skipping this cache on
+    # failure costs nothing and fixes the poisoning.
+    if snap:
+        _context_cache[cache_key] = ctx
     return ctx
 
 

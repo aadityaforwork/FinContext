@@ -8,7 +8,7 @@ app.services.grounding. The model is instructed to cite context paths and mark
 unsupported fields as null — see services/ai_client.GROUNDING_CONTRACT.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import asyncio
@@ -19,6 +19,7 @@ from app.nse_universe import TICKER_TO_META
 from app.agents import base as agents_base
 from app.agents.crews import narrative as narrative_crew
 from app.core.compliance import with_disclaimer
+from app.core import rate_limit
 from app.services import ai_client, grounding, technicals
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,10 @@ class DeepDiveRequest(BaseModel):
 
 
 class PreTradeCheckRequest(BaseModel):
+    ticker: str
+
+
+class ContextRequest(BaseModel):
     ticker: str
 
 
@@ -831,7 +836,7 @@ def _compute_pretrade_checks(context: dict, tech: dict | None) -> list[dict]:
     return checks
 
 
-@router.post("/pre-trade-check")
+@router.post("/pre-trade-check", dependencies=[Depends(rate_limit.enforce)])
 async def pre_trade_check(req: PreTradeCheckRequest):
     """Fast, deterministic checklist. No LLM. Sub-2-second.
 
@@ -867,5 +872,46 @@ async def pre_trade_check(req: PreTradeCheckRequest):
         "change_percent": snap.get("change_percent"),
         "checks":   checks,
         "summary":  summary,
+        "generated_at": context.get("generated_at"),
+    })
+
+
+# ---------------------------------------------------------------------------
+# 7. Context Engine — raw grounded context, NO LLM
+# ---------------------------------------------------------------------------
+# Thin wrapper over grounding.build_stock_context(): snapshot + peer-percentile
+# benchmark + rule-based (non-LLM) signals + recent news, each numeric field
+# traceable to its own path per the GROUNDING_CONTRACT (see AGENTS.md rule 1).
+# No verdict, no narrative — this is the block every other grounded flow in
+# this router (Deep Dive, DD Agent, Simulator) is itself built from. Exposing
+# it directly lets a caller (a human, or another model reasoning over the
+# response) do its own synthesis instead of consuming ours.
+# ---------------------------------------------------------------------------
+@router.post("/context", dependencies=[Depends(rate_limit.enforce)])
+async def stock_context(req: ContextRequest):
+    """Raw grounded context for one ticker. No LLM call, no verdict.
+
+    Reuses the same build_stock_context() + peer-percentile scoring that
+    backs Deep Dive — see grounding.compute_financial_scores /
+    get_sector_alternatives, both pure functions over the already-fetched
+    context (no extra I/O).
+    """
+    ticker = req.ticker.upper()
+    meta = TICKER_TO_META.get(ticker)
+    if not meta:
+        raise HTTPException(status_code=404, detail=f"Ticker {ticker} not found in NSE universe")
+
+    context = await asyncio.to_thread(grounding.build_stock_context, ticker)
+
+    return with_disclaimer({
+        "ticker": ticker,
+        "company": meta.get("name", ticker),
+        "sector":  meta.get("sector", ""),
+        "snapshot": context.get("snapshot"),
+        "peer_benchmark": context.get("peer_benchmark"),
+        "scores": grounding.compute_financial_scores(context),
+        "signals": context.get("signals"),
+        "sector_alternatives": grounding.get_sector_alternatives(context, limit=2),
+        "news": context.get("news"),
         "generated_at": context.get("generated_at"),
     })

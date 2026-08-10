@@ -81,6 +81,18 @@ class Settings:
     def google_oauth_configured(self) -> bool:
         return bool(self.GOOGLE_CLIENT_ID and self.GOOGLE_CLIENT_SECRET)
 
+    # --- MCP / programmatic access ---
+    # Comma-separated list of shared API keys for the pre-trade-check and
+    # context routes (see core/rate_limit.py). Callers without a key still
+    # work — those routes are consumed by the logged-out web frontend today
+    # with zero auth — but get the lower "anon" rate-limit tier. A valid key
+    # bumps a caller to the higher "keyed" tier. Empty by default: with no
+    # keys configured, every caller falls into the anon tier and the header
+    # is simply ignored (no server-side keys to compare against).
+    FINCONTEXT_API_KEYS: list[str] = [
+        k.strip() for k in os.environ.get("FINCONTEXT_API_KEYS", "").split(",") if k.strip()
+    ]
+
     # --- Error monitoring (Sentry) ---
     # DSN for the `fincontext-backend` Sentry project (org `compute-ji`).
     # Unset by default — sentry_sdk.init() is skipped entirely in main.py when

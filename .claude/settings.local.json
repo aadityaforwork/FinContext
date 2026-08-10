@@ -17,7 +17,33 @@
       "Bash(git merge *)",
       "Bash(./venv/Scripts/python.exe -c \"from app.main import app; print\\('app import OK, routes:', len\\(app.routes\\)\\)\")",
       "Bash(./venv/Scripts/python.exe -m pytest tests/ -q)",
-      "Bash(git branch *)"
+      "Bash(git branch *)",
+      "mcp__claude_ai_Vercel__get_deployment_build_logs",
+      "mcp__claude_ai_Vercel__search_vercel_documentation",
+      "mcp__context7__resolve-library-id",
+      "Bash(uv --version)",
+      "Bash(echo \"exit:$?\")",
+      "Bash(python -m uv lock --python 3.12)",
+      "Bash(./.venv/Scripts/python.exe *)",
+      "mcp__claude_ai_Vercel__list_deployments",
+      "mcp__claude_ai_Vercel__get_deployment",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://127.0.0.1:8000/callback --max-time 3)",
+      "Bash(curl -s http://127.0.0.1:8000/ --max-time 3)",
+      "Bash(curl -s http://127.0.0.1:8000/docs --max-time 3 -o /dev/null -w \"%{http_code}\\\\n\")",
+      "Bash(curl -s -w \"\\\\n%{http_code}\\\\n\" \"http://127.0.0.1:8000/callback?request_token=test&action=login&type=login&status=success\" --max-time 3)",
+      "Bash(curl -s http://127.0.0.1:8000/openapi.json --max-time 3)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('\\\\n'.join\\(sorted\\(d.get\\('paths',{}\\).keys\\(\\)\\)\\)\\)\")",
+      "Bash(netstat -ano)",
+      "Bash(powershell -NoProfile -Command \"Get-Process -Id 2296 | Select-Object Id,ProcessName,Path,StartTime | Format-List\")",
+      "mcp__claude_ai_Vercel__get_project",
+      "mcp__claude_ai_Vercel__get_runtime_logs",
+      "mcp__claude_ai_Vercel__get_runtime_errors",
+      "Bash(curl *)",
+      "Bash(python -m py_compile app/routers/auth.py app/routers/zerodha.py app/core/config.py)"
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "kitesurf-browser"
+  ],
+  "enableAllProjectMcpServers": true
 }
