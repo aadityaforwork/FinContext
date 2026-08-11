@@ -192,9 +192,36 @@ frontend/src/app/components/
   `experimentalServices.backend`) would have kept running with agents
   permanently unavailable even after requirements.txt was fixed. Fixed in
   lockstep with requirements.txt, plus regenerated `backend/uv.lock` (`uv
-  lock`) and verified with `uv sync` into a throwaway `.venv`. If you change
-  one of requirements.txt / pyproject.toml, change both, then run `uv lock`
-  and re-verify — nothing enforces they stay matched.
+  lock`) and verified with `uv sync` into a throwaway `.venv`.
+  **⚠️ That lockstep "fix" then broke Vercel for every deploy after it —
+  see the next entry. The two manifests are intentionally NOT identical
+  now.** If you change one, think about the other, run `uv lock`, and
+  re-verify — but do not blindly mirror them.
+- **crewai must NOT be in `backend/pyproject.toml` (2026-08-11, second
+  incident).** Adding it there to "fix the drift" above pushed the Vercel
+  Python function bundle to **1058 MB against a hard 500 MB platform
+  limit**, so every production deploy from `8ec848f` onward failed with
+  `Total bundle size exceeds the maximum function size` — including the
+  *frontend*, since both services build in one deployment. The last green
+  deploy (`e61f5de`) was green precisely *because* pyproject.toml had no
+  crewai. The weight is crewai core's RAG/memory stack, which these crews
+  never touch: lancedb ~149 MB, googleapiclient ~103 MB, pyarrow ~85 MB,
+  chromadb_rust_bindings ~57 MB, onnxruntime ~40 MB, kubernetes ~40 MB.
+  `excludeFiles` does not help — it filters source files, not installed
+  site-packages. Resolution: crewai stays in `requirements.txt` (Render →
+  full agent surfaces) and stays out of `pyproject.toml` (Vercel → the
+  lazy `try/except` imports in `agents/base.py`/`registry.py`/`crews/`
+  make both crew endpoints fall back to the legacy `ai_client` path, which
+  `analysis.py:/narrative-impact` and `risk.py:/risk-brief` already catch
+  and log). Measured after the fix: **306.8 MB**, verified by `uv sync`
+  into a throwaway env plus a full `app.main` import in that crewai-less
+  env (53 routes, `openapi()` generates, `prewarm()` survives).
+  Also dropped `crewai-tools` from **both** manifests — nothing in this
+  repo ever imported it (`agents/tools.py` uses `crewai.tools`, a core
+  submodule, not the separate `crewai_tools` distribution).
+  If you want real agents on Vercel, it's an architecture change, not a
+  pin: drop `experimentalServices.backend` from `vercel.json` and serve
+  the API from Render only.
 - **Agent-path latency/TTFR fix (2026-08-11).** `agents/base.py`'s LLM
   singleton used to build lazily on the first real request, so SDK-import +
   client-construction cost landed inside that user's time-to-first-response.

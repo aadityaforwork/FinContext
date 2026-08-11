@@ -40,8 +40,32 @@ dependencies = [
     "kiteconnect>=5.0.0",
     "sentry-sdk[fastapi]>=2.0.0",
     "langfuse>=3.0.0",
-    "crewai[litellm]==1.15.14",
-    "crewai-tools==1.15.14",
+    # ---------------------------------------------------------------------
+    # crewai is DELIBERATELY ABSENT from this file. Do not "fix the drift" by
+    # adding it back — that is what broke every Vercel production deploy from
+    # 8ec848f (2026-08-11) onward.
+    #
+    # Vercel reads THIS file exclusively (uv builder) and bundles the result
+    # into a Python function with a hard 500 MB ceiling. crewai core's tree
+    # drags in its RAG/memory stack — lancedb (~149 MB), googleapiclient
+    # (~103 MB), pyarrow (~85 MB), chromadb_rust_bindings (~57 MB),
+    # onnxruntime (~40 MB), kubernetes (~40 MB) — none of which these crews
+    # touch (plain sequential Agent/Task chains, no memory, no knowledge
+    # sources). Measured bundle with crewai: ~1058 MB. The limit is a platform
+    # limit; there is no excludeFiles trick that strips installed
+    # site-packages.
+    #
+    # crewai STAYS in requirements.txt, which is what Render installs — so the
+    # agent surfaces run fully there. On Vercel the crewai imports in
+    # agents/base.py / registry.py / crews/ are all lazy and inside
+    # try/except, and prewarm() swallows its own failures, so the agent
+    # endpoints degrade to the legacy ai_client path instead of erroring.
+    # That is exactly the state the last GREEN Vercel deploy (e61f5de) ran in.
+    #
+    # If you need real agents on Vercel, the fix is architectural, not a pin:
+    # drop `experimentalServices.backend` from vercel.json and serve the API
+    # from Render only. See AGENTS.md.
+    # ---------------------------------------------------------------------
 ]
 
 [tool.uv]
