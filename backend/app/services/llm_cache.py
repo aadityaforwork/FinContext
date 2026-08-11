@@ -37,6 +37,25 @@ from app.services.cache import make_cache
 
 logger = logging.getLogger(__name__)
 
+
+def _utcnow_naive() -> datetime:
+    """Current UTC time as a NAIVE datetime.
+
+    `LLMCache.expires_at` / `created_at` are plain `DateTime` columns (no
+    `timezone=True`), so neither SQLite nor Postgres round-trips tzinfo — a
+    value written as aware comes back naive. Comparing the two raised
+    "can't compare offset-naive and offset-aware datetimes" on every read,
+    which `get()` swallowed and reported as a miss. Net effect: the persistent
+    tier never returned a single hit, so crew outputs were re-computed on every
+    cache lookup that missed the small in-process TTLCache.
+
+    Standardising on naive-UTC on both sides of the boundary fixes it without a
+    schema migration, and keeps the `expires_at < :now` comparison in
+    purge_expired() correct too (a bound aware datetime renders with a `+00:00`
+    suffix that breaks SQLite's lexicographic string comparison).
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 # In-process layer. Tuned small — DB layer is the source of truth across workers.
 _inproc = make_cache(maxsize=512, ttl_seconds=600)
 
@@ -58,7 +77,12 @@ async def get(cache_key: str) -> dict | None:
             row = await session.get(LLMCache, cache_key)
             if row is None:
                 return None
-            if row.expires_at < datetime.now(timezone.utc):
+            expires_at = row.expires_at
+            if expires_at.tzinfo is not None:
+                # Tolerate rows written before the naive-UTC standardisation,
+                # and any backend that does preserve tzinfo.
+                expires_at = expires_at.astimezone(timezone.utc).replace(tzinfo=None)
+            if expires_at < _utcnow_naive():
                 # Expired — delete lazily.
                 await session.delete(row)
                 await session.commit()
@@ -73,7 +97,7 @@ async def get(cache_key: str) -> dict | None:
 
 async def set(cache_key: str, payload: dict, ttl_seconds: int, scope: str = "global") -> None:
     """Upsert a cache row. Idempotent."""
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+    expires_at = _utcnow_naive() + timedelta(seconds=ttl_seconds)
     _inproc[cache_key] = payload
 
     try:
@@ -119,7 +143,7 @@ async def invalidate(cache_key: str) -> None:
 
 async def purge_expired(limit: int = 500) -> int:
     """Delete up to `limit` expired rows. Returns the row count deleted."""
-    now = datetime.now(timezone.utc)
+    now = _utcnow_naive()
     try:
         async with async_session() as session:
             stmt = (

@@ -1,9 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
-import { supabase } from "../lib/supabase";
-import { API_BASE } from "../lib/api";
-import { useAuth } from "../context/AuthContext";
+import { useState, useEffect } from "react";
+import { useUniverse } from "../context/UniverseContext";
 import { Spinner } from "./Loaders";
 import { SparkIcon, ChevronRight } from "./Icons";
 import { AnimatedNumber } from "./AnimatedNumber";
@@ -61,52 +59,43 @@ function Mover({ position, type }) {
 }
 
 export default function PortfolioTodayStrip({ onNavigate }) {
-  const { user } = useAuth();
-  const [loading, setLoading] = useState(true);
-  const [data, setData] = useState(null);
-  const [demoMode, setDemoMode] = useState(false);
+  // Portfolio rows and the /api/portfolio/enrich result both come from
+  // UniverseContext now. This pane used to run its own Supabase read and its
+  // own enrich POST — the latter byte-identical to UniverseRail's, so the
+  // dashboard issued it twice on every load.
+  // Aliased to `holdings`: the render scope below already binds `positions` to
+  // the *enriched* rows (which carry change_percent), and these are the raw
+  // portfolio rows.
+  const { positions: holdings, ready, getEnriched } = useUniverse();
+  const [enriched, setEnriched] = useState(null);
 
-  const fetchData = useCallback(async () => {
-    if (!user?.id) return;
-    setLoading(true);
-    try {
-      const { data: rows } = await supabase
-        .from("portfolio")
-        .select("ticker, quantity, buy_price")
-        .eq("user_id", user.id);
+  // demoMode / data / loading are derived during render rather than written
+  // into state from the effect — the empty-portfolio branch used to fire three
+  // setState calls synchronously in the effect body, costing an extra render
+  // pass on every demo-mode mount.
+  const hasHoldings = (holdings?.length || 0) > 0;
+  const demoMode = ready && !hasHoldings;
+  const data = demoMode ? DEMO_DATA : enriched;
+  const loading = !ready || (hasHoldings && enriched === null);
 
-      if (!rows || rows.length === 0) {
-        setData(DEMO_DATA);
-        setDemoMode(true);
-        return;
-      }
-      try {
-        const res = await fetch(`${API_BASE}/api/portfolio/enrich`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ positions: rows }),
-        });
-        if (res.ok) { setData(await res.json()); setDemoMode(false); }
-        else {
-          setData({
-            total_pnl: 0, total_pnl_percent: 0, current_value: 0,
-            positions: rows.map((r) => ({ ticker: r.ticker, change_percent: null })),
-          });
-          setDemoMode(false);
-        }
-      } catch {
-        setData({
+  useEffect(() => {
+    if (!ready || !hasHoldings) return undefined;
+    let cancelled = false;
+
+    getEnriched().then((res) => {
+      if (cancelled) return;
+      // getEnriched resolves null on any non-ok/failed response — same
+      // degraded shape the local try/catch used to build.
+      setEnriched(
+        res || {
           total_pnl: 0, total_pnl_percent: 0, current_value: 0,
-          positions: rows.map((r) => ({ ticker: r.ticker, change_percent: null })),
-        });
-        setDemoMode(false);
-      }
-    } finally {
-      setLoading(false);
-    }
-  }, [user?.id]);
+          positions: holdings.map((r) => ({ ticker: r.ticker, change_percent: null })),
+        }
+      );
+    });
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+    return () => { cancelled = true; };
+  }, [ready, hasHoldings, holdings, getEnriched]);
 
   if (loading) {
     return (

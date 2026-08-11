@@ -65,6 +65,21 @@ _movers_pool = _Pool(max_workers=12, thread_name_prefix="movers-enrich")
 # inner > 16 workers) and stalling instead of parallelizing.
 _peer_pool = _Pool(max_workers=10, thread_name_prefix="peer-fetch")
 
+# Thread pool for the market-context fan-out (index pulls + India/global/policy
+# RSS + FII/DII flows) and the per-ticker fan-out in
+# build_morning_brief_context. Same separate-pool rule as _peer_pool above: the
+# index and earnings fetches block on an inner yf_safe submit, so these must not
+# share yf_safe._yf_executor. 12 outer workers each holding at most one of that
+# pool's 16 slots leaves headroom for the other endpoints fanning out
+# concurrently.
+_market_pool = _Pool(max_workers=12, thread_name_prefix="market-ctx")
+
+# Thread pool for the per-ticker fan-out in build_morning_brief_context (news
+# pull + earnings lookup per holding/watchlist name). Separate from
+# _market_pool so the two phases never contend for the same workers; sized at 8
+# to stay within yf_safe's 16 slots given the earnings lookups nested inside.
+_brief_pool = _Pool(max_workers=8, thread_name_prefix="brief-enrich")
+
 # Lightweight cache for the price-only path (fast_info). Separate from
 # _snapshot_cache so the heavy build_portfolio_context flow (which needs full
 # fundamentals) and the light build_movers_context flow (which only needs
@@ -738,21 +753,65 @@ def build_market_context() -> dict:
     if "market_ctx" in _market_ctx_cache:
         return _market_ctx_cache["market_ctx"]
 
-    indices: dict[str, dict | None] = {
-        "nifty_50": _fetch_index_change("^NSEI"),
-        "nifty_midcap_100": _fetch_index_change("NIFTY_MIDCAP_100.NS"),
-        "sensex": _fetch_index_change("^BSESN"),
+    # Everything below is independent network I/O: ~12 yfinance index pulls plus
+    # 8 RSS/scrape calls. These used to run strictly one after another, on the
+    # critical path of /news-feed, /morning-brief and /market-summary — so the
+    # phase cost the SUM of every call's latency before the LLM even started.
+    # Fanning them out onto _market_pool cuts it to roughly the slowest single
+    # call. Output ordering stays deterministic: we index back into the
+    # submitted maps rather than consuming completion order.
+    index_symbols = {
+        "nifty_50": "^NSEI",
+        "nifty_midcap_100": "NIFTY_MIDCAP_100.NS",
+        "sensex": "^BSESN",
     }
-
-    sectors: list[dict] = []
-    seen: set[str] = set()
+    # Dedup sector symbols (several sectors share one index) but preserve
+    # SECTOR_INDEX_MAP's ordering for the output list.
+    sector_syms: list[tuple[str, str]] = []
+    _seen: set[str] = set()
     for sector_name, sym in SECTOR_INDEX_MAP.items():
-        if sym in seen:
+        if sym in _seen:
             continue
-        seen.add(sym)
-        data = _fetch_index_change(sym)
-        if data:
-            sectors.append({"sector": sector_name, "index": sym, **data})
+        _seen.add(sym)
+        sector_syms.append((sector_name, sym))
+
+    all_syms = list(dict.fromkeys([*index_symbols.values(), *(s for _, s in sector_syms)]))
+
+    def _settle(fut, default, label):
+        """Resolve a future, degrading to `default` on failure. Mirrors the
+        per-source isolation the serial version had via its try/except blocks —
+        one dead upstream must never fail the whole context build."""
+        try:
+            return fut.result()
+        except Exception as e:
+            logger.warning("market context: %s fetch failed: %s", label, e)
+            return default
+
+    idx_futs = {sym: _market_pool.submit(_fetch_index_change, sym) for sym in all_syms}
+    india_pool_fut = _market_pool.submit(news_sources.fetch_india_market_pool, n=12)
+    india_google_fut = _market_pool.submit(
+        news_sources.google_news_for_query,
+        "India economy stock market finance when:1d",
+        hl="en-IN", gl="IN", ceid="IN:en", n=6,
+    )
+    policy_fut = _market_pool.submit(policy_feeds.fetch_all_policy_items, limit_per_source=15)
+    flows_fut = _market_pool.submit(market_flows.fetch_latest_flows)
+    global_futs = [
+        (src, _market_pool.submit(
+            _fetch_rss_headlines, src["query"], hl="en-US", gl="US", ceid="US:en", n=3
+        ))
+        for src in _GLOBAL_SOURCES
+    ]
+
+    index_results = {sym: _settle(f, None, f"index {sym}") for sym, f in idx_futs.items()}
+    indices: dict[str, dict | None] = {
+        name: index_results.get(sym) for name, sym in index_symbols.items()
+    }
+    sectors: list[dict] = [
+        {"sector": name, "index": sym, **data}
+        for name, sym in sector_syms
+        if (data := index_results.get(sym))
+    ]
 
     # India headlines — multi-source pool (Moneycontrol, ET, Mint, BS, Hindu
     # BusinessLine) + Google News. Earlier this was a single Google query which
@@ -760,12 +819,9 @@ def build_market_context() -> dict:
     # — UI felt stuck on yesterday's news. The pool gives genuine variety; we
     # take 6 from the pool and 3 from Google as supplement, dedup, and freshness-
     # sort. Per-source failures are isolated inside news_sources.
-    india_pool = news_sources.fetch_india_market_pool(n=12)
-    india_query = "India economy stock market finance when:1d"
-    india_google = news_sources.google_news_for_query(
-        india_query, hl="en-IN", gl="IN", ceid="IN:en", n=6
+    india_merged = news_sources.dedup_items(
+        _settle(india_pool_fut, [], "india pool") + _settle(india_google_fut, [], "india google")
     )
-    india_merged = news_sources.dedup_items(india_pool + india_google)
     # Keep the top 10 — more variety than the old 6 since we have real source diversity now.
     india_news = [
         {"id": f"india_news[{i}]", **n} for i, n in enumerate(india_merged[:10])
@@ -775,22 +831,15 @@ def build_market_context() -> dict:
     # the Indian-wedge data global tools don't surface. Items carry sector tags
     # (banking, auto, defence, ...) so the LLM annotator can map them onto the
     # user's holdings even when the headline names no specific company.
-    policy_items_raw: list[dict] = []
-    try:
-        policy_items_raw = policy_feeds.fetch_all_policy_items(limit_per_source=15)
-    except Exception as e:
-        logger.warning("policy feed fetch failed: %s", e)
     policy_items = [
-        {"id": f"policy_news[{i}]", **n} for i, n in enumerate(policy_items_raw)
+        {"id": f"policy_news[{i}]", **n}
+        for i, n in enumerate(_settle(policy_fut, [], "policy feeds") or [])
     ]
 
     global_news: list[dict] = []
     idx = 0
-    for src in _GLOBAL_SOURCES:
-        items = _fetch_rss_headlines(
-            src["query"], hl="en-US", gl="US", ceid="US:en", n=3
-        )
-        for n in items:
+    for src, fut in global_futs:
+        for n in _settle(fut, [], f"global {src['code']}"):
             global_news.append({
                 "id": f"global_news[{idx}]",
                 "country": src["code"],
@@ -800,11 +849,7 @@ def build_market_context() -> dict:
             idx += 1
 
     # FII/DII daily flows (moneycontrol). Best-effort — None if scrape fails.
-    flows = None
-    try:
-        flows = market_flows.fetch_latest_flows()
-    except Exception as e:
-        logger.warning("market_flows fetch failed: %s", e)
+    flows = _settle(flows_fut, None, "market flows")
 
     from datetime import datetime
     ctx = {
@@ -1218,56 +1263,76 @@ def build_morning_brief_context(
         else []
     )
 
+    # Per-ticker enrichment used to run strictly serially — for a 15-holding
+    # portfolio plus 8 watchlist names that was ~46 sequential network
+    # round-trips (one multi-source RSS pull + one yfinance earnings lookup
+    # each) before the LLM call could even start. Both fan out across
+    # _brief_pool now; results are reassembled in the original holdings /
+    # watchlist order below so the context dict is byte-identical in shape.
+    #
+    # Runs after build_market_context() rather than alongside it, deliberately:
+    # that call has its own fan-out on _market_pool and both bottom out in
+    # yf_safe's 16-slot executor. Keeping the two phases sequential stops them
+    # oversubscribing it, which would burn the per-call timeout budget on queue
+    # wait and negative-cache perfectly good tickers.
+    watch_slice = watch_only[:8]   # cap so context stays small
+    brief_tickers = list(dict.fromkeys([*held_tickers, *watch_slice]))
+
+    news_futs = {
+        t: _brief_pool.submit(
+            data_ingestion.retrieve_context, t, top_k=(2 if t in held_set else 1)
+        )
+        for t in brief_tickers
+    }
+    # Upcoming earnings (≤14 days). Without this the LLM has no concrete event
+    # to cite for `watch_today` / `tomorrow_setup` and falls back to filler —
+    # "investors should keep an eye on upcoming data releases".
+    earn_futs = {
+        t: _brief_pool.submit(_upcoming_earnings, t, max_days=14)
+        for t in brief_tickers
+    }
+
+    def _news_for(t: str) -> list[dict]:
+        try:
+            raw = news_futs[t].result() or []
+        except Exception as e:
+            logger.warning("morning brief: news fetch failed for %s: %s", t, e)
+            return []
+        return [
+            {"id": f"{t}_news[{i}]", "source": n.get("source"), "headline": n.get("headline")}
+            for i, n in enumerate(raw)
+        ]
+
+    def _earnings_for(t: str) -> dict | None:
+        try:
+            return earn_futs[t].result()
+        except Exception as e:
+            logger.warning("morning brief: earnings fetch failed for %s: %s", t, e)
+            return None
+
     holdings_summary: list[dict] = []
     for h in holdings:
         t = (h.get("ticker") or "").upper()
         if not t:
             continue
         meta = TICKER_TO_META.get(t, {"name": t, "sector": "Unknown"})
-        news_items: list[dict] = []
-        try:
-            raw = data_ingestion.retrieve_context(t, top_k=2)
-            for i, n in enumerate(raw):
-                news_items.append({
-                    "id": f"{t}_news[{i}]",
-                    "source": n.get("source"),
-                    "headline": n.get("headline"),
-                })
-        except Exception as e:
-            logger.warning("morning brief: news fetch failed for %s: %s", t, e)
-        # Upcoming earnings (≤14 days). Without this the LLM has no concrete
-        # event to cite for `watch_today` / `tomorrow_setup` and falls back to
-        # filler — "investors should keep an eye on upcoming data releases".
-        earnings = _upcoming_earnings(t, max_days=14)
         holdings_summary.append({
             "ticker": t,
             "name": meta.get("name"),
             "sector": meta.get("sector"),
-            "news": news_items,
-            "upcoming_earnings": earnings,
+            "news": _news_for(t),
+            "upcoming_earnings": _earnings_for(t),
         })
 
     watchlist_summary: list[dict] = []
-    for t in watch_only[:8]:  # cap so context stays small
+    for t in watch_slice:
         meta = TICKER_TO_META.get(t, {"name": t, "sector": "Unknown"})
-        news_items: list[dict] = []
-        try:
-            raw = data_ingestion.retrieve_context(t, top_k=1)
-            for i, n in enumerate(raw):
-                news_items.append({
-                    "id": f"{t}_news[{i}]",
-                    "source": n.get("source"),
-                    "headline": n.get("headline"),
-                })
-        except Exception as e:
-            logger.warning("morning brief: news fetch failed for watch %s: %s", t, e)
-        earnings = _upcoming_earnings(t, max_days=14)
         watchlist_summary.append({
             "ticker": t,
             "name": meta.get("name"),
             "sector": meta.get("sector"),
-            "news": news_items,
-            "upcoming_earnings": earnings,
+            "news": _news_for(t),
+            "upcoming_earnings": _earnings_for(t),
         })
 
     from datetime import datetime

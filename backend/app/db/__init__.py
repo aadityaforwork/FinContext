@@ -47,7 +47,30 @@ async def get_db():
 # Create all tables on startup
 # ---------------------------------------------------------------------------
 async def init_db():
-    """Create all tables if they don't exist."""
+    """Create the tables this app actually owns.
+
+    On Postgres that is ONLY `llm_cache`.
+
+    The User / WatchlistItem / PortfolioPosition models in db/models.py are
+    legacy SQLAlchemy definitions — in production those tables are owned by
+    supabase/migrations/*.sql and carry RLS policies, and they're read through
+    the supabase client, not this engine. An unscoped `create_all` is dangerous
+    there for one specific reason: Supabase keeps auth in `auth.users`, so
+    `public.users` does NOT exist, and `checkfirst` would happily CREATE it —
+    a new table in the PostgREST-exposed `public` schema with no RLS enabled.
+    That is exactly the exposure migration 001 was written to close, so we
+    never hand `create_all` the full metadata against Postgres.
+
+    On SQLite (local dev — the default when DATABASE_URL is unset) there's no
+    Supabase behind the engine, so creating everything is safe and convenient.
+    """
     from app.db import models  # noqa: F401 — import so models register with Base
+
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        if engine.dialect.name == "sqlite":
+            await conn.run_sync(Base.metadata.create_all)
+        else:
+            await conn.run_sync(
+                Base.metadata.create_all,
+                tables=[models.LLMCache.__table__],
+            )

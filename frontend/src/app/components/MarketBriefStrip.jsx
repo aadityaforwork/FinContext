@@ -33,9 +33,8 @@
  */
 
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { supabase } from "../lib/supabase";
 import { API_BASE } from "../lib/api";
-import { useAuth } from "../context/AuthContext";
+import { useUniverse } from "../context/UniverseContext";
 import { Spinner } from "./Loaders";
 
 const SERIF = "var(--font-serif)";
@@ -82,34 +81,33 @@ function estimateReadMinutes(sections) {
 // Trigger strip — unchanged behaviour, slightly cleaner styling.
 // ---------------------------------------------------------------------------
 export default function MarketBriefStrip({ onNavigate }) {
-  const { user } = useAuth();
+  const { positions, watchlistTickers, ready } = useUniverse();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [data, setData] = useState(null);
   const [open, setOpen] = useState(false);
   const drawerRef = useRef(null);
 
+  // Universe comes from the shared context — this pane used to issue its own
+  // portfolio + watchlist reads, which gated the market-summary POST behind
+  // two Supabase round-trips it was duplicating from three other panes.
   const fetchSummary = useCallback(async (force = false) => {
-    if (!user?.id) return;
+    if (!ready) return;
     if (force) setRefreshing(true); else setLoading(true);
     try {
-      const [{ data: positions }, { data: watchRows }] = await Promise.all([
-        supabase.from("portfolio").select("ticker, quantity, buy_price").eq("user_id", user.id),
-        supabase.from("watchlist").select("ticker").eq("user_id", user.id),
-      ]);
       const res = await fetch(`${API_BASE}/api/intelligence/market-summary`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           positions: positions || [],
-          watchlist_tickers: (watchRows || []).map((r) => r.ticker),
+          watchlist_tickers: watchlistTickers || [],
           force_refresh: force,
         }),
       });
       if (res.ok) setData(await res.json());
     } catch { /* drawer shows error state */ }
     finally { setLoading(false); setRefreshing(false); }
-  }, [user?.id]);
+  }, [ready, positions, watchlistTickers]);
 
   useEffect(() => { fetchSummary(false); }, [fetchSummary]);
 

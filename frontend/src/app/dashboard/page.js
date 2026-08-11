@@ -26,6 +26,7 @@ import FirstInsightCard from "../components/FirstInsightCard";
 import OnboardingTour from "../components/OnboardingTour";
 import PreTradeCheckModal from "../components/PreTradeCheckModal";
 import { useAuth } from "../context/AuthContext";
+import { UniverseProvider } from "../context/UniverseContext";
 import { supabase } from "../lib/supabase";
 import { useToast } from "../components/Toast";
 import BrandedSplash from "../components/BrandedSplash";
@@ -238,6 +239,7 @@ export default function App() {
   };
 
   return (
+    <UniverseProvider>
     <div className="app-shell">
       <Sidebar
         activeNav={activeNav}
@@ -331,6 +333,7 @@ export default function App() {
           has been fully loaded since before the FirstInsightCard opened. */}
       <OnboardingTour trigger={tourTrigger} userId={user?.id} />
     </div>
+    </UniverseProvider>
   );
 }
 

@@ -142,6 +142,64 @@ async def serve(
     return value, "miss"
 
 
+# ---------------------------------------------------------------------------
+# Cross-worker tier
+# ---------------------------------------------------------------------------
+# Everything above this line is per-process. That is a real problem in prod:
+# the dashboard's three heavy endpoints (news-feed, market-summary,
+# morning-brief) each keep their own module-level TTLCache, and those die with
+# the worker. On Render's free tier the instance sleeps after ~15 min idle, and
+# any multi-worker or serverless deployment hands each process its own empty
+# copy — so the 60-min TTL was close to decorative and nearly every real user
+# session paid a full cold recompute (RSS fan-out + yfinance + a full LLM call).
+#
+# llm_cache is the existing shared tier (in-process TTL + SQLAlchemy row,
+# already used for crew outputs). These helpers put the dashboard endpoints on
+# it too. Both degrade to the in-process behaviour on any DB error, so a cache
+# outage can never break a request — worst case we recompute exactly as before.
+#
+# NOTE: llm_cache's persistent half only actually persists when DATABASE_URL
+# points at Postgres. Unset, app/db falls back to SQLite on an ephemeral disk
+# and this tier is a no-op — see the deploy note in AGENTS.md.
+_SHARED_PREFIX = "respcache:"
+
+
+async def get_shared(key: str, max_ttl_s: int = DEFAULT_MAX_TTL_S) -> Any | None:
+    """Two-tier read: in-process first, then the cross-worker llm_cache tier."""
+    cached, _status = get(key, max_ttl_s=max_ttl_s)
+    if cached is not None:
+        return cached
+
+    try:
+        from app.services import llm_cache
+
+        row = await llm_cache.get(_SHARED_PREFIX + key)
+    except Exception as e:
+        logger.warning("shared cache read failed for %s: %s", key, e)
+        return None
+
+    if not isinstance(row, dict) or "v" not in row:
+        return None
+    value = row["v"]
+    # Re-seed the in-process tier so later hits in this worker skip the DB
+    # entirely. Age restarts here, which is intentional: it bounds how often a
+    # warm worker re-reads a row it already has.
+    put(key, value)
+    return value
+
+
+async def put_shared(key: str, value: Any, ttl_s: int = DEFAULT_MAX_TTL_S) -> None:
+    """Write through to both tiers. Never raises."""
+    put(key, value)
+    try:
+        from app.services import llm_cache
+
+        # Wrapped in {"v": ...} so non-dict payloads survive the JSON column.
+        await llm_cache.set(_SHARED_PREFIX + key, {"v": value}, ttl_s)
+    except Exception as e:
+        logger.warning("shared cache write failed for %s: %s", key, e)
+
+
 def stats() -> dict:
     """Diagnostic — peek at cache size + age distribution. Useful from admin
     endpoints to verify the cache is actually warming the way you expect."""
