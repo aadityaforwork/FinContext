@@ -35,6 +35,7 @@ from any service without circular imports.
 from __future__ import annotations
 
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutTimeout
 from typing import Any, Callable, Literal
 
@@ -46,6 +47,30 @@ logger = logging.getLogger(__name__)
 # also fan out 12 threads in parallel. Was 32 — dropped to 16 to save ~150 MB
 # of idle-thread overhead on Render Starter's 512 MB cap.
 _yf_executor = ThreadPoolExecutor(max_workers=16, thread_name_prefix="yf-safe")
+
+
+def fanout_workers(default: int) -> int:
+    """Size for an OUTER fan-out pool (market context, brief enrichment,
+    technicals batch), overridable via FETCH_POOL_WORKERS.
+
+    These pools trade memory for latency: every concurrent worker is holding a
+    pandas DataFrame from yfinance, so peak RSS scales with the width. On
+    Render's 512 MB Starter box that is the difference between serving a
+    request and getting OOM-killed — which is exactly what happened on
+    2026-08-11 after these fan-outs were first introduced at 12/8/8 wide.
+
+    Keep the defaults conservative and tune with the env var rather than
+    editing call sites. Clamped to [2, 16]; the upper bound also keeps the
+    outer pools from oversubscribing _yf_executor above, which every one of
+    them blocks on.
+    """
+    raw = os.getenv("FETCH_POOL_WORKERS")
+    if raw:
+        try:
+            return max(2, min(16, int(raw)))
+        except ValueError:
+            logger.warning("FETCH_POOL_WORKERS=%r is not an int — using default %d", raw, default)
+    return default
 
 # Per-call wall ceiling. Beyond this, yfinance is almost certainly stuck on
 # a slow Yahoo response or a delisted-symbol retry storm. Bail and cache.

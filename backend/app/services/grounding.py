@@ -72,13 +72,16 @@ _peer_pool = _Pool(max_workers=10, thread_name_prefix="peer-fetch")
 # share yf_safe._yf_executor. 12 outer workers each holding at most one of that
 # pool's 16 slots leaves headroom for the other endpoints fanning out
 # concurrently.
-_market_pool = _Pool(max_workers=12, thread_name_prefix="market-ctx")
+# Wider than the two below on purpose: these tasks are cheap to hold — index
+# fast_info lookups and RSS text, no OHLCV DataFrames — so width buys latency
+# here without meaningfully moving peak RSS.
+_market_pool = _Pool(max_workers=yf_safe.fanout_workers(12), thread_name_prefix="market-ctx")
 
 # Thread pool for the per-ticker fan-out in build_morning_brief_context (news
 # pull + earnings lookup per holding/watchlist name). Separate from
 # _market_pool so the two phases never contend for the same workers; sized at 8
 # to stay within yf_safe's 16 slots given the earnings lookups nested inside.
-_brief_pool = _Pool(max_workers=8, thread_name_prefix="brief-enrich")
+_brief_pool = _Pool(max_workers=yf_safe.fanout_workers(5), thread_name_prefix="brief-enrich")
 
 # Lightweight cache for the price-only path (fast_info). Separate from
 # _snapshot_cache so the heavy build_portfolio_context flow (which needs full
