@@ -39,6 +39,11 @@ load_dotenv()
 CREWAI_TIMEOUT_SECONDS = float(os.getenv("CREWAI_TIMEOUT_SECONDS", "20"))
 CREWAI_MAX_ITER = int(os.getenv("CREWAI_MAX_ITER", "6"))
 
+# Eager prewarming of the CrewAI LLM singletons. Default OFF — it costs ~196 MB
+# resident, which does not fit alongside request handling on a 512 MB box.
+# See the prewarm() docstring for the full measurement and rationale.
+PREWARM_ENABLED = os.getenv("CREWAI_PREWARM", "").strip().lower() in {"1", "true", "yes", "on"}
+
 
 # The same hard rules used by services/ai_client.GROUNDING_CONTRACT, restated
 # here as agent backstory text. Any new agent in registry.py should append
@@ -155,7 +160,31 @@ def prewarm() -> None:
 
     Safe to call when crews are disabled — swallows and logs, never raises, so a
     missing GROQ_API_KEY or crewai install can't block app startup.
+
+    OFF BY DEFAULT since 2026-08-11. Measured on this codebase: importing
+    app.main costs ~203 MB resident, and prewarm() pulls crewai -> litellm ->
+    chromadb/lancedb for a further **~196 MB, taking idle RSS to ~399 MB**.
+    Render's Starter box caps at 512 MB, so that left ~113 MB to actually serve
+    a request — and the dashboard's pandas/yfinance work does not fit in it. The
+    instance OOM-killed repeatedly ("Ran out of memory (used over 512MB)").
+
+    Nothing on the dashboard path (news-feed, market-summary, movers) needs
+    crewai; only /narrative-impact and /risk-brief do. Leaving this off keeps
+    idle RSS at ~203 MB and hands those requests ~309 MB of headroom instead.
+    The agent endpoints still work — they just pay the import on first use, and
+    both already fall back to the legacy ai_client path on any failure.
+
+    Set CREWAI_PREWARM=true to restore eager prewarming (the original TTFR win)
+    once running somewhere with real memory headroom.
     """
+    if not PREWARM_ENABLED:
+        logger.info(
+            "agents.prewarm skipped — CREWAI_PREWARM not set "
+            "(avoids ~196 MB resident; agent endpoints import lazily instead)."
+        )
+        return
+    # NB: the is_available() check below must stay AFTER the flag check — it
+    # does `import crewai` itself, which is the very cost we're avoiding.
     if not is_available():
         logger.info("agents.prewarm skipped — GROQ_API_KEY unset or crewai not installed.")
         return

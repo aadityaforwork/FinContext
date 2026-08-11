@@ -33,7 +33,10 @@ logger = logging.getLogger(__name__)
 # on an inner submit that can never be scheduled — a textbook thread-pool
 # deadlock. 8 workers each holding at most one yf_safe slot leaves headroom
 # inside that pool's 16 for the other endpoints fanning out concurrently.
-_batch_pool = _Pool(max_workers=8, thread_name_prefix="tech-batch")
+# Kept deliberately narrow: each worker holds a `history(period="3mo")` OHLCV
+# DataFrame, so this pool's width is the one that really drives peak RSS —
+# and a real portfolio here is 50+ tickers, not the 15 this was tuned against.
+_batch_pool = _Pool(max_workers=yf_safe.fanout_workers(5), thread_name_prefix="tech-batch")
 
 _tech_cache: TTLCache = TTLCache(maxsize=300, ttl=1800)   # 30 min positive
 # Two-tier neg cache: delisted/no-data symbols hold 24h; transient errors 60s.
