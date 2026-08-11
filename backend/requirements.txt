@@ -1,6 +1,17 @@
-fastapi==0.109.2
-uvicorn[standard]==0.27.1
-pydantic==2.6.1
+# fastapi/uvicorn/pydantic were exact-pinned (0.109.2/0.27.1/2.6.1) until
+# 2026-08-11, when adding crewai broke every Render deploy: crewai 1.15.14
+# hard-requires pydantic>=2.11.9,<2.13, and its `mcp` dependency pulls a
+# starlette/uvicorn far newer than fastapi 0.109.2 supports — pip's resolver
+# can't satisfy an exact old pin against those floors, so `pip install -r
+# requirements.txt` failed outright (ResolutionImpossible) and the build
+# never produced a deployable image. Loosened to floors so pip can resolve
+# a consistent set; verified end-to-end (app import, OpenAPI schema gen,
+# full test suite, live narrative-crew call against Groq) against whatever
+# pip actually resolves before pushing — do the same after any future
+# `pip install` of a new top-level dependency, not just a dry-run/guess.
+fastapi>=0.109.2
+uvicorn[standard]>=0.27.1
+pydantic>=2.11.9,<2.13
 pydantic[email]
 python-multipart>=0.0.9
 python-dotenv>=1.0.0
@@ -10,7 +21,7 @@ httpx>=0.27.0
 yfinance>=0.2.36
 feedparser>=6.0.0
 cachetools>=5.3.0
-pandas>=2.0.0
+pandas>=2.0.0,<3  # was unpinned; a fresh resolve was free to pick pandas 3.x (breaking changes) — capped defensively while fixing the crewai conflict below
 numpy>=1.26.0
 
 # Database (async SQLAlchemy + SQLite driver — swap aiosqlite for asyncpg if you move to Postgres)

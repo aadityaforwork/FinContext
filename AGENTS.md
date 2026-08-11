@@ -165,6 +165,36 @@ frontend/src/app/components/
   broken `Crew`/`Task`/`LLM` kwargs before, and this specific bug's fix
   status should be rechecked before any bump) and re-run the eval harness in
   `backend/tests/evals/` before moving it.
+- **Adding crewai broke the Render build entirely (2026-08-11, same day as
+  the fix above).** Pinning `crewai[litellm]==1.15.14` alongside the
+  pre-existing exact pins `fastapi==0.109.2` / `pydantic==2.6.1` made `pip
+  install -r requirements.txt` fail with `ResolutionImpossible`: crewai
+  requires `pydantic>=2.11.9,<2.13`, and its `mcp` dependency pulls a
+  starlette/uvicorn far newer than fastapi 0.109.2 tolerates. A fresh
+  `pip install` of just the new package (what got tested before the previous
+  fix shipped) doesn't catch this — it silently upgrades pydantic in your
+  existing venv instead of failing, which is exactly how this got missed.
+  **Always validate a new pin with a full, clean `pip install -r
+  requirements.txt` into a fresh venv** (or `uv sync` — see below), not
+  `pip install <new-package>` on top of an existing one. Fixed by loosening
+  `fastapi`/`uvicorn`/`pydantic` to floors (`pydantic>=2.11.9,<2.13` to stay
+  inside crewai's window) and capping `pandas>=2.0.0,<3` (was unpinned and a
+  fresh resolve could land on breaking pandas 3.x — same failure shape,
+  fixed preemptively). Verified: clean install succeeds, `app.main` imports,
+  `app.openapi()` generates, full test suite passes, live narrative-crew
+  call against Groq still works, all under the new versions.
+  **`backend/pyproject.toml` is a second, separate dependency manifest that
+  must be kept in sync by hand** — its own header comment explains why: it
+  exists only so Vercel's Python builder (`uv`) has a `[project]` table, and
+  once present, Vercel's builder reads *pyproject.toml exclusively*, ignoring
+  requirements.txt. It had drifted — still had the exact old pins and never
+  got crewai added — so the Vercel backend deploy (`vercel.json`
+  `experimentalServices.backend`) would have kept running with agents
+  permanently unavailable even after requirements.txt was fixed. Fixed in
+  lockstep with requirements.txt, plus regenerated `backend/uv.lock` (`uv
+  lock`) and verified with `uv sync` into a throwaway `.venv`. If you change
+  one of requirements.txt / pyproject.toml, change both, then run `uv lock`
+  and re-verify — nothing enforces they stay matched.
 - **Agent-path latency/TTFR fix (2026-08-11).** `agents/base.py`'s LLM
   singleton used to build lazily on the first real request, so SDK-import +
   client-construction cost landed inside that user's time-to-first-response.
