@@ -42,14 +42,24 @@ logger.info("CORS_ORIGIN_REGEX loaded: %r", settings.CORS_ORIGIN_REGEX)
 # fincontext-backend (org compute-ji) — see CLAUDE.md "MCP connectors".
 # Initialized before FastAPI app construction so import-time/startup errors
 # are captured too, not just request-time ones.
+#
+# enable_logs=True: without it, Sentry's Logs product stays empty forever
+# regardless of traffic — it defaults to False (sentry_sdk >=2.35) and isn't
+# implied by setting a DSN. Once on, every stdlib `logging` call at INFO+
+# across the app (this file, llm_trace.py, ai_client.py, etc.) ships to
+# Sentry Logs via the auto-enabled logging integration — no per-call-site
+# changes needed. Diagnosed 2026-08-11: DSN/ingestion/errors were already
+# working end-to-end (verified with a live test event), this flag was the
+# actual reason "no logs" specifically.
 if settings.SENTRY_DSN:
     sentry_sdk.init(
         dsn=settings.SENTRY_DSN,
         environment=settings.SENTRY_ENVIRONMENT,
         traces_sample_rate=settings.SENTRY_TRACES_SAMPLE_RATE,
         send_default_pii=False,  # portfolio/financial data — never auto-attach request bodies/user data
+        enable_logs=True,
     )
-    logger.info("Sentry initialized (env=%s)", settings.SENTRY_ENVIRONMENT)
+    logger.info("Sentry initialized (env=%s, logs enabled)", settings.SENTRY_ENVIRONMENT)
 else:
     logger.info("SENTRY_DSN not set — Sentry disabled")
 

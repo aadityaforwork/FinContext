@@ -1,11 +1,24 @@
 """
 LLM call tracing
 ================
-Lightweight, dependency-free observability for every LLM/agent call in the
-app. Not a replacement for a real tracing product (Helicone, LangSmith,
-etc.) — it's the minimum viable version: one structured log line per call,
-plus an in-process ring buffer so the most recent calls are inspectable
-without a log aggregator.
+Lightweight observability for every LLM/agent call in the app: one
+structured log line per call, an in-process ring buffer so the most recent
+calls are inspectable without a log aggregator, and — when configured — a
+Langfuse generation observation per call (latency, tokens, model, provider,
+confidence/data_gaps) so calls are queryable/graphable as real traces
+instead of grep-only log lines.
+
+Deliberately does NOT send prompt/completion body text to Langfuse. Call
+sites only ever pass structured metadata (ticker, model, provider, token
+counts, confidence, data_gaps) into `meta`/`record()` — never the raw
+prompt or CONTEXT block, which routinely contains a user's portfolio/
+financial data. Same reasoning as `send_default_pii=False` on the Sentry
+init in main.py: this is a financial app, the LLM observability vendor is a
+third-party US-hosted service, and there's no signed DPA/compliance review
+backing a decision to ship raw prompt bodies there. If you want full
+prompt/response capture for debugging model quality, that's a deliberate
+follow-up decision to make explicitly (see AGENTS.md compliance posture),
+not a side effect of adding tracing.
 
 Why this exists: with 7+ AI surfaces (direct ai_client.py calls + CrewAI
 crews) and no captured history of prompt/context/completion, there was no
@@ -21,11 +34,23 @@ output" after the fact. This gives every call site a one-line integration:
 Design notes:
   - Never raises on its own bookkeeping. If the wrapped call raises, that
     exception propagates untouched — tracing only adds an `error` field to
-    the emitted record, it never swallows or alters control flow.
-  - In-process only (like _inproc in llm_cache.py) — resets on restart, not
-    shared across uvicorn workers. Good enough for local debugging. Wire
-    `recent()` to a real store (a Postgres table, Helicone, etc.) before you
-    need cross-worker or cross-restart history.
+    the emitted record, it never swallows or alters control flow. Same goes
+    for the Langfuse side: any SDK failure is logged and swallowed.
+  - In-process ring buffer (like _inproc in llm_cache.py) — resets on
+    restart, not shared across workers. Langfuse is the durable, cross-
+    worker/cross-restart store; `recent()` stays for cheap local debugging.
+  - Langfuse is opt-in and no-op unless LANGFUSE_PUBLIC_KEY is set (same
+    pattern as SENTRY_DSN in main.py) — local/CI runs with no key configured
+    behave exactly as before this was added.
+  - The backend runs as a Vercel serverless function (see root vercel.json
+    experimentalServices), not a long-lived process — the function can be
+    frozen the instant a response is sent, before the SDK's background
+    batching thread gets scheduled. So each span flushes synchronously
+    instead of relying on Langfuse's default background flush. That costs a
+    bit of per-call latency but avoids silently losing every trace, which
+    is the actual point of wiring this up. Revisit if this ever moves to a
+    persistent host (Render, etc.) — background flush would be strictly
+    better there.
   - The emitted log line is a single `logger.info("llm_trace %s", json)` —
     grep-able locally, and shippable to any log drain (Render logs, etc.)
     without extra plumbing.
@@ -35,6 +60,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 import uuid
 from collections import deque
@@ -48,6 +74,29 @@ logger = logging.getLogger("llm_trace")
 
 _RECENT_MAXLEN = 200
 _recent: deque[dict] = deque(maxlen=_RECENT_MAXLEN)
+
+_langfuse_checked = False
+_langfuse_client = None
+
+
+def _get_langfuse():
+    """Lazy, cached Langfuse client. Returns None (and stays None) if
+    LANGFUSE_PUBLIC_KEY isn't set or the SDK/init fails — tracing is always
+    additive, never a hard dependency for the AI surfaces to function."""
+    global _langfuse_checked, _langfuse_client
+    if _langfuse_checked:
+        return _langfuse_client
+    _langfuse_checked = True
+    if not os.environ.get("LANGFUSE_PUBLIC_KEY"):
+        return None
+    try:
+        from langfuse import get_client
+        _langfuse_client = get_client()
+        logger.info("Langfuse client initialized.")
+    except Exception:
+        logger.exception("Langfuse client init failed — tracing to Langfuse disabled")
+        _langfuse_client = None
+    return _langfuse_client
 
 
 @dataclass
@@ -77,6 +126,14 @@ def span(name: str, **meta: Any) -> Iterator[_Span]:
     """
     s = _Span(name=name, meta=dict(meta))
     error: str | None = None
+    lf = _get_langfuse()
+    lf_obs = None
+    if lf is not None:
+        try:
+            lf_obs = lf.start_observation(name=name, as_type="generation", input=meta, metadata=meta)
+        except Exception:
+            logger.exception("Langfuse start_observation failed for %s", name)
+            lf_obs = None
     try:
         yield s
     except Exception as e:
@@ -98,6 +155,29 @@ def span(name: str, **meta: Any) -> Iterator[_Span]:
         except Exception:
             logger.info("llm_trace %s (fields unserializable, dropped from log)", name)
         _recent.append(record)
+
+        if lf_obs is not None:
+            try:
+                usage = {}
+                if record.get("tokens_in") is not None:
+                    usage["input"] = record["tokens_in"]
+                if record.get("tokens_out") is not None:
+                    usage["output"] = record["tokens_out"]
+                output = {
+                    k: v for k, v in s.extra.items()
+                    if k not in ("tokens_in", "tokens_out", "model")
+                } or None
+                lf_obs.update(
+                    output=output,
+                    model=record.get("model"),
+                    usage_details=usage or None,
+                    level="ERROR" if error else "DEFAULT",
+                    status_message=error,
+                )
+                lf_obs.end()
+                lf.flush()  # see module docstring — serverless, can't rely on background flush
+            except Exception:
+                logger.exception("Langfuse observation update/flush failed for %s", name)
 
 
 def recent(limit: int = 50) -> list[dict]:
