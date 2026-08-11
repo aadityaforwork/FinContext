@@ -125,6 +125,61 @@ frontend/src/app/components/
 
 ## Known gaps — don't rediscover these, fix them or work around them deliberately
 
+- **Both live crews were silently failing on every single request before
+  2026-08-11** — not a latency problem, a correctness one that *presented*
+  as latency. Three independent bugs stacked:
+  1. `crewai`/`crewai-tools` weren't pinned in `requirements.txt` at all
+     despite `agents/base.py` hard-requiring them.
+  2. The `[litellm]` extra wasn't installed either — crewai 1.x's `LLM`
+     class only talks to a short list of "native" providers out of the box,
+     and Groq isn't one of them, so without litellm every kickoff raised
+     `ImportError` before even reaching the network.
+  3. Even with both installed, crewai 1.15.14 has an **unfixed upstream bug**
+     ([crewAIInc/crewAI#5886](https://github.com/crewAIInc/crewAI/issues/5886),
+     PR #6355 still open) — every message gets tagged with a
+     `cache_breakpoint` key for Anthropic-style prompt caching, but only the
+     Anthropic-native adapter strips it back out. The LiteLLM-fallback path
+     every non-native provider (Groq included) goes through does not, so the
+     raw key reaches Groq's API and Groq's schema validation rejects the
+     whole request with a 400.
+  Net effect: `narrative_crew.run()` / `risk_brief_crew.run()` would make a
+  real network round-trip to Groq, get a 400, get caught by the router's
+  `except Exception`, and silently fall back to the legacy `ai_client`
+  single-call path — which then made a *second* real LLM call. Every
+  narrative-impact/risk-brief request was paying for a failed crew attempt
+  **plus** the full legacy call, invisibly, on top of whatever the
+  legitimate LLM latency was. This is very likely the real source of "high
+  latency" complaints, more so than anything fixable by tuning the crew
+  itself. Fixed: `requirements.txt` now pins `crewai[litellm]==1.15.14` +
+  `crewai-tools==1.15.14`; `agents/base.py._patch_cache_breakpoint_bug()`
+  applies the workaround from the issue thread (no-ops
+  `crewai.llms.cache.mark_cache_breakpoint`) — remove it once a released
+  crewai version ships the real fix. Verified end-to-end against live Groq:
+  narrative crew ~7s, risk-brief crew ~22s, both correctly grounded. Also
+  found and fixed a stray `(optional override)` string appended to
+  `CREWAI_MODEL` in the local `.env` (not committed — python-dotenv had been
+  reading it as part of the model name, which alone was enough to break
+  every kickoff independent of the three bugs above; worth checking your own
+  `.env` for similar drift if this ever recurs).
+  Bump the crewai pin deliberately going forward (major version jumps have
+  broken `Crew`/`Task`/`LLM` kwargs before, and this specific bug's fix
+  status should be rechecked before any bump) and re-run the eval harness in
+  `backend/tests/evals/` before moving it.
+- **Agent-path latency/TTFR fix (2026-08-11).** `agents/base.py`'s LLM
+  singleton used to build lazily on the first real request, so SDK-import +
+  client-construction cost landed inside that user's time-to-first-response.
+  `main.py`'s startup hook now calls `agents_base.prewarm()` so that cost is
+  paid once at boot. `registry._agent()` now also sets `max_iter`/
+  `max_execution_time` (`CREWAI_TIMEOUT_SECONDS`/`CREWAI_MAX_ITER`) on every
+  agent so a stuck call can't blow up p99, and `make_narrative_extractor`
+  opts into `get_llm(fast=True)` (`CREWAI_FAST_MODEL`) since it's a narrow
+  extraction step sitting on the critical path of the narrative crew's
+  2-call sequential chain. Both live router endpoints
+  (`analysis.py:/narrative-impact`, `risk.py:/risk-brief`) still `await` the
+  full crew before returning anything — no partial/streaming response yet.
+  That's the next lever if TTFR still isn't low enough; it needs a frontend
+  contract change (SSE or chunked JSON), not just a backend tweak, so treat
+  it as a separate piece of work.
 - **No runtime LLM provider fallback.** `ai_client.py` picks OpenAI-or-Groq
   once at import; `agents/base.py` hard-requires `GROQ_API_KEY`. A single
   provider outage currently takes the whole AI surface down. If you're
@@ -163,7 +218,13 @@ outcome ledger, telegram, or social/peer-pulse.
 
 - Cache keys: `llm_cache.make_key(prefix, *parts)` — deterministic, colon-joined.
 - New CrewAI agent: add a `make_<role>()` factory to `agents/registry.py`,
-  never instantiate `Agent(...)` inline in a crew file.
+  never instantiate `Agent(...)` inline in a crew file. If the agent is a
+  narrow extraction/classification step (no synthesis, no final verdict)
+  and sits on the critical path of a sequential crew, consider
+  `_agent(fast=True, ...)` for TTFR — see `agents/base.py` CREWAI_FAST_MODEL.
+- New crew whose LLM needs prewarming: it already is — `main.py`'s startup
+  hook calls `agents_base.prewarm()`, which builds both the default and
+  `fast=True` singletons. Nothing to do per-crew.
 - New grounded LLM call outside the agent framework: use
   `ai_client.generate_grounded_json()`, not a raw `chat.completions.create`.
 - New AI call site, either system: wrap it in `llm_trace.span("<flow>.<step>", ...)`.

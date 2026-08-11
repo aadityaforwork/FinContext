@@ -6,6 +6,7 @@ AI-powered contextual analysis for Indian equities.
 Run with: uvicorn app.main:app --reload --port 8000
 """
 
+import asyncio
 import logging
 
 import sentry_sdk
@@ -28,6 +29,7 @@ from app.routers import (
     telegram as telegram_router,
     onboarding as onboarding_router,
 )
+from app.agents import base as agents_base
 from app.core.config import settings
 
 logger = logging.getLogger("uvicorn.error")
@@ -93,6 +95,21 @@ app.include_router(embeddings_router.router)
 app.include_router(outcomes_router.router)
 app.include_router(telegram_router.router)
 app.include_router(onboarding_router.router)
+
+
+@app.on_event("startup")
+async def _prewarm_agents():
+    """Build the CrewAI LLM singleton(s) at boot instead of on the first request.
+
+    Without this, agents/base.py's lazy singleton pays SDK-import + client-
+    construction cost inside whichever user's request happens to hit
+    narrative-impact or risk-brief first — directly inflating that request's
+    time-to-first-response. Runs on a worker thread so a slow/misbehaving
+    import can't stall the event loop past startup; never raises (prewarm()
+    already swallows and logs internally) so a missing GROQ_API_KEY or
+    crewai install can't block boot.
+    """
+    await asyncio.to_thread(agents_base.prewarm)
 
 
 @app.get("/health", tags=["system"])

@@ -15,21 +15,40 @@ Convention:
 
 from __future__ import annotations
 
-from app.agents.base import GROUNDING_CONTRACT, get_llm
+from app.agents.base import CREWAI_MAX_ITER, CREWAI_TIMEOUT_SECONDS, GROUNDING_CONTRACT, get_llm
 from app.agents.tools import get_tools
 
 
-def _agent(**kwargs):
-    """Lazy-import Agent so missing crewai doesn't break this module's import."""
+def _agent(*, fast: bool = False, **kwargs):
+    """Lazy-import Agent so missing crewai doesn't break this module's import.
+
+    fast=True puts the agent on the smaller/quicker CREWAI_FAST_MODEL (see
+    agents/base.py) — opt in per-role for narrow tasks where that model's
+    accuracy is enough. Every agent gets max_iter/max_execution_time from
+    base.py so one slow or looping call can't blow up request latency.
+    """
     from crewai import Agent  # type: ignore
-    return Agent(llm=get_llm(), verbose=False, allow_delegation=False, **kwargs)
+    return Agent(
+        llm=get_llm(fast=fast),
+        verbose=False,
+        allow_delegation=False,
+        max_iter=CREWAI_MAX_ITER,
+        max_execution_time=CREWAI_TIMEOUT_SECONDS,
+        **kwargs,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Narrative-to-Numbers crew (Phase A)
 # ---------------------------------------------------------------------------
 def make_narrative_extractor():
+    # fast=True: pure extraction from a short block of prose, no tools, no
+    # synthesis — the accuracy delta from the default 70B model over the fast
+    # tier is negligible here, and this agent runs first in the narrative
+    # crew's sequential chain, so its latency is 100% on the critical path
+    # for time-to-first-response. See agents/base.py CREWAI_FAST_MODEL.
     return _agent(
+        fast=True,
         role="Financial Narrative Extractor",
         goal=(
             "Read the user's free-text narrative and extract sentiment, severity, and the "

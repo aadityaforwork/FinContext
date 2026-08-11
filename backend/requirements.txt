@@ -35,3 +35,19 @@ kiteconnect>=5.0.0
 
 # Error monitoring
 sentry-sdk[fastapi]>=2.0.0
+
+# LLM observability (traces every ai_client.py / CrewAI call — see services/llm_trace.py)
+langfuse>=3.0.0
+
+# CrewAI multi-agent framework (backend/app/agents/) — narrative + risk-brief
+# crews. Pinned (not >=) because crew/task/LLM behavior across major versions
+# is not backward compatible; bump deliberately and re-test agents/ + the
+# eval harness in backend/tests/evals/ before moving this pin.
+# [litellm] extra is required, not optional: crewai 1.x's LLM class only
+# talks to a short list of "native" providers out of the box and Groq isn't
+# one of them — without litellm installed, every crew kickoff raises
+# ImportError and both live crews silently fall back to the legacy path
+# (found + fixed 2026-08-11; agents/base.py has no code-level guard against
+# this, so don't drop the extra on a future bump without re-verifying).
+crewai[litellm]==1.15.14
+crewai-tools==1.15.14
