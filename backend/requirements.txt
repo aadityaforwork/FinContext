@@ -66,5 +66,17 @@ langfuse>=3.0.0
 # ImportError and both live crews silently fall back to the legacy path
 # (found + fixed 2026-08-11; agents/base.py has no code-level guard against
 # this, so don't drop the extra on a future bump without re-verifying).
+# NOTE: this pin lives in requirements.txt ONLY, deliberately. It is NOT in
+# pyproject.toml and must not be re-added there — Vercel reads that file
+# exclusively and crewai's tree busts its hard 500 MB function bundle limit.
+# See the long comment in pyproject.toml. Render installs this file, so the
+# agent surfaces run fully there.
 crewai[litellm]==1.15.14
-crewai-tools==1.15.14
+# crewai-tools was REMOVED 2026-08-11. It was never imported: agents/tools.py
+# does `from crewai.tools import tool`, which is a submodule of crewai core —
+# not the separate `crewai_tools` distribution (underscore), which nothing in
+# this repo references. It was pulling lancedb, chromadb, onnxruntime,
+# googleapiclient, pymupdf, kubernetes, twisted and friends: ~650 MB that blew
+# the Vercel Python function past its hard 500 MB bundle ceiling, failing every
+# production deploy since crewai was introduced. Don't re-add it unless you
+# actually import `crewai_tools`, and check the bundle size if you do.
