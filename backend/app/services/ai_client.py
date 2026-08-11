@@ -160,7 +160,14 @@ def generate_grounded_json(
     if not _client:
         raise _missing_key_error()
 
-    context_json = json.dumps(context, indent=2, default=str)
+    # Compact separators, not indent=2. The CONTEXT block is the largest part of
+    # every grounded prompt (the news-feed annotation ships ~40 candidates plus
+    # per-ticker technicals), and pretty-printing it spends ~15-20% of those
+    # tokens on whitespace that carries no signal — the model reads the same
+    # structure either way. Cuts prefill latency and per-call cost on every
+    # grounded surface. If a grounding eval regresses after this, this line is
+    # the first thing to revert.
+    context_json = json.dumps(context, separators=(",", ":"), default=str)
     user_prompt = (
         f"TASK:\n{task}\n\n"
         f"REQUIRED SCHEMA:\n{schema_description}\n\n"

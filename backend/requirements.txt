@@ -24,9 +24,15 @@ cachetools>=5.3.0
 pandas>=2.0.0,<3  # was unpinned; a fresh resolve was free to pick pandas 3.x (breaking changes) — capped defensively while fixing the crewai conflict below
 numpy>=1.26.0
 
-# Database (async SQLAlchemy + SQLite driver — swap aiosqlite for asyncpg if you move to Postgres)
+# Database (async SQLAlchemy). Both drivers ship: app/db picks by DATABASE_URL
+# scheme, so aiosqlite covers the local/unset default and asyncpg covers the
+# Postgres (Supabase) prod path. They are NOT alternatives to install by hand —
+# app/db/__init__.py builds the engine at import time and main.py imports it, so
+# a DATABASE_URL whose driver is missing takes the whole API down at boot, not
+# just the cache layer.
 sqlalchemy>=2.0.0,<3
 aiosqlite>=0.19.0
+asyncpg>=0.30.0,<0.31   # >=0.30 for Postgres 17 support (Supabase is on 17.6)
 
 # Auth — JWT + password hashing
 python-jose[cryptography]>=3.3.0

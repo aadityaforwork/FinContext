@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import time as _time
+from concurrent.futures import ThreadPoolExecutor as _Pool, as_completed as _as_completed
 
 import yfinance as yf
 from cachetools import TTLCache
@@ -23,6 +24,16 @@ from app.nse_universe import TICKER_TO_YF, resolve_yf_symbol
 from app.services import yf_safe
 
 logger = logging.getLogger(__name__)
+
+# Outer fan-out pool for compute_signals_batch.
+#
+# MUST stay separate from yf_safe._yf_executor: compute_signals() submits its
+# own work there via run_with_timeout, so fanning out the batch on that same
+# pool would let outer tasks occupy every worker while each one blocks waiting
+# on an inner submit that can never be scheduled — a textbook thread-pool
+# deadlock. 8 workers each holding at most one yf_safe slot leaves headroom
+# inside that pool's 16 for the other endpoints fanning out concurrently.
+_batch_pool = _Pool(max_workers=8, thread_name_prefix="tech-batch")
 
 _tech_cache: TTLCache = TTLCache(maxsize=300, ttl=1800)   # 30 min positive
 # Two-tier neg cache: delisted/no-data symbols hold 24h; transient errors 60s.
@@ -171,10 +182,32 @@ def compute_signals(ticker: str) -> dict | None:
 
 
 def compute_signals_batch(tickers: list[str]) -> dict[str, dict]:
-    """Convenience: compute signals for many tickers. Skips unknown/failures."""
+    """Compute signals for many tickers concurrently. Skips unknown/failures.
+
+    Was a serial for-loop, which put one yfinance round-trip per ticker on the
+    critical path of every news-feed / movers request — a 20-name universe cost
+    20 sequential fetches (each up to the 6s ceiling in compute_signals). Cache
+    hits still short-circuit inside compute_signals before any submit, so a warm
+    batch stays effectively free.
+
+    Dedups the input first: callers build the universe from holdings + watchlist
+    and those overlap.
+    """
+    uniq = list(dict.fromkeys(t for t in tickers if t))
+    if not uniq:
+        return {}
+
     out: dict[str, dict] = {}
-    for t in tickers:
-        sig = compute_signals(t)
+    futures = {_batch_pool.submit(compute_signals, t): t for t in uniq}
+    for fut in _as_completed(futures):
+        t = futures[fut]
+        try:
+            sig = fut.result()
+        except Exception as e:
+            # compute_signals swallows its own errors, but a pool-level failure
+            # shouldn't take down the whole batch.
+            logger.warning("technical signals batch failed for %s: %s", t, e)
+            continue
         if sig is not None:
             out[t] = sig
     return out

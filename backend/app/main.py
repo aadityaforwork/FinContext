@@ -31,6 +31,7 @@ from app.routers import (
 )
 from app.agents import base as agents_base
 from app.core.config import settings
+from app.db import init_db
 
 logger = logging.getLogger("uvicorn.error")
 # Print loaded CORS config at boot — visible in Render logs. Helps diagnose
@@ -105,6 +106,33 @@ app.include_router(embeddings_router.router)
 app.include_router(outcomes_router.router)
 app.include_router(telegram_router.router)
 app.include_router(onboarding_router.router)
+
+
+@app.on_event("startup")
+async def _init_cache_tables():
+    """Create the SQLAlchemy-managed tables — in practice, `llm_cache`.
+
+    `init_db()` existed but was never called from anywhere, so the `llm_cache`
+    table was never created. Every `llm_cache.get`/`set` therefore raised, got
+    swallowed by that module's own try/except, and logged a warning — meaning
+    the "persistent, shared across workers, survives restart" cache tier has
+    been a silent no-op for the crew paths, and would have been for the
+    dashboard endpoints now routed through response_cache.put_shared too.
+
+    `create_all` is `checkfirst=True`, so it only creates what's missing and
+    never alters an existing table — the Supabase-managed `users` / `watchlist`
+    / `portfolio` tables (owned by supabase/migrations/*.sql, with RLS) are left
+    untouched. Never raises: a cache-table failure must not block boot, since
+    every caller already degrades to recomputing.
+
+    NOTE: this only buys real persistence when DATABASE_URL points at Postgres.
+    Unset, app/db falls back to SQLite on an ephemeral disk.
+    """
+    try:
+        await init_db()
+        logger.info("DB tables ready (llm_cache persistent tier available)")
+    except Exception as e:
+        logger.warning("init_db failed — llm_cache falls back to in-process only: %s", e)
 
 
 @app.on_event("startup")

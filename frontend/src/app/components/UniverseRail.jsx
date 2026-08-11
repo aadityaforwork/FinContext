@@ -1,9 +1,8 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
-import { supabase } from "../lib/supabase";
+import { useState, useEffect } from "react";
 import { API_BASE } from "../lib/api";
-import { useAuth } from "../context/AuthContext";
+import { useUniverse } from "../context/UniverseContext";
 import { Spinner } from "./Loaders";
 import { SearchIcon, TargetIcon } from "./Icons";
 
@@ -97,97 +96,91 @@ export default function UniverseRail({
   onOpenScreener,
   onOpenPortfolio,
 }) {
-  const { user } = useAuth();
-  const [holdings, setHoldings] = useState([]);
-  const [watchlist, setWatchlist] = useState([]);
+  const { positions, watchlistTickers, ready, getEnriched } = useUniverse();
+  const [enrichedHoldings, setEnrichedHoldings] = useState(null);
+  const [pricedWatchlist, setPricedWatchlist] = useState(null);
   const [sectors, setSectors] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [demoMode, setDemoMode] = useState(false);
   const [tab, setTab] = useState("holdings");
 
-  const fetchAll = useCallback(async () => {
-    if (!user?.id) return;
-    setLoading(true);
-    try {
-      const [{ data: holdRows }, { data: watchRows }] = await Promise.all([
-        supabase.from("portfolio").select("ticker, quantity, buy_price").eq("user_id", user.id),
-        supabase.from("watchlist").select("ticker").eq("user_id", user.id),
-      ]);
+  const hasHoldings = (positions?.length || 0) > 0;
+  const hasWatchlist = (watchlistTickers?.length || 0) > 0;
 
-      const isEmpty = (!holdRows || holdRows.length === 0) && (!watchRows || watchRows.length === 0);
-      if (isEmpty) {
-        setHoldings(DEMO_HOLDINGS);
-        setWatchlist(DEMO_WATCHLIST);
-        setDemoMode(true);
-      } else {
-        setDemoMode(false);
+  // demoMode / holdings / watchlist / loading are all derived during render
+  // rather than pushed into state from the effect below. The demo branch used
+  // to fire four setState calls synchronously inside the effect body, which
+  // costs an extra render pass on every empty-universe mount for no benefit.
+  const demoMode = ready && !hasHoldings && !hasWatchlist;
+  const holdings = demoMode ? DEMO_HOLDINGS : enrichedHoldings ?? [];
+  const watchlist = demoMode ? DEMO_WATCHLIST : pricedWatchlist ?? [];
+  const loading =
+    !ready ||
+    (!demoMode &&
+      ((hasHoldings && enrichedHoldings === null) ||
+        (hasWatchlist && pricedWatchlist === null)));
 
-        if (holdRows && holdRows.length > 0) {
-          try {
-            const res = await fetch(`${API_BASE}/api/portfolio/enrich`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ positions: holdRows }),
-            });
-            if (res.ok) {
-              const data = await res.json();
-              setHoldings(
-                (data.positions || []).map((p) => ({
-                  ticker: p.ticker,
-                  change_percent: p.change_percent ?? null,
-                }))
-              );
-            } else {
-              setHoldings(holdRows.map((r) => ({ ticker: r.ticker, change_percent: null })));
-            }
-          } catch {
-            setHoldings(holdRows.map((r) => ({ ticker: r.ticker, change_percent: null })));
-          }
-        } else {
-          setHoldings([]);
-        }
+  // Holdings + watchlist come from UniverseContext (one shared Supabase read
+  // for the whole dashboard). The two backend calls below are independent of
+  // each other but used to run strictly in sequence inside one async function
+  // — the watchlist prices could not start until holdings enrichment had
+  // finished. They race now, so this pane costs max(a, b) instead of a + b.
+  useEffect(() => {
+    if (!ready || (!hasHoldings && !hasWatchlist)) return undefined;
+    let cancelled = false;
 
-        if (watchRows && watchRows.length > 0) {
-          try {
-            const res = await fetch(`${API_BASE}/api/watchlist/prices`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ tickers: watchRows.map((r) => r.ticker) }),
-            });
-            const priceMap = res.ok ? await res.json() : {};
-            setWatchlist(
-              watchRows.map((r) => ({
-                ticker: r.ticker,
-                change_percent: priceMap[r.ticker]?.change_percent ?? null,
-              }))
-            );
-          } catch {
-            setWatchlist(watchRows.map((r) => ({ ticker: r.ticker, change_percent: null })));
-          }
-        } else {
-          setWatchlist([]);
-        }
-      }
-    } finally {
-      setLoading(false);
-    }
-  }, [user?.id]);
+    // Shared with PortfolioTodayStrip — resolves the same single request.
+    const holdingsP = hasHoldings
+      ? getEnriched().then((data) =>
+          (data?.positions || positions).map((p) => ({
+            ticker: p.ticker,
+            change_percent: p.change_percent ?? null,
+          }))
+        )
+      : Promise.resolve([]);
 
-  const fetchSectors = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_BASE}/api/market/indices`);
-      if (res.ok) {
-        const data = await res.json();
-        const sectorLikely = (data || []).filter(
-          (idx) => idx.label && !["INR/USD"].includes(idx.label)
+    const watchP = hasWatchlist
+      ? fetch(`${API_BASE}/api/watchlist/prices`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tickers: watchlistTickers }),
+        })
+          .then((res) => (res.ok ? res.json() : {}))
+          .catch(() => ({}))
+          .then((priceMap) =>
+            watchlistTickers.map((t) => ({
+              ticker: t,
+              change_percent: priceMap?.[t]?.change_percent ?? null,
+            }))
+          )
+      : Promise.resolve([]);
+
+    Promise.all([holdingsP, watchP]).then(([h, w]) => {
+      if (cancelled) return;
+      setEnrichedHoldings(h);
+      setPricedWatchlist(w);
+    });
+
+    return () => { cancelled = true; };
+  }, [ready, hasHoldings, hasWatchlist, positions, watchlistTickers, getEnriched]);
+
+  // Sector strip — independent of the user's universe, so it fires immediately
+  // rather than waiting behind the holdings/watchlist work above. Inlined into
+  // the effect (was a useCallback + effect pair) so the only setState happens
+  // in the resolved callback, and added cancellation on unmount.
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_BASE}/api/market/indices`)
+      .then((res) => (res.ok ? res.json() : []))
+      .catch(() => [])
+      .then((data) => {
+        if (cancelled) return;
+        setSectors(
+          (data || [])
+            .filter((idx) => idx.label && !["INR/USD"].includes(idx.label))
+            .slice(0, 6)
         );
-        setSectors(sectorLikely.slice(0, 6));
-      }
-    } catch { /* optional */ }
+      });
+    return () => { cancelled = true; };
   }, []);
-
-  useEffect(() => { fetchAll(); }, [fetchAll]);
-  useEffect(() => { fetchSectors(); }, [fetchSectors]);
 
   const tabs = [
     { id: "holdings",  label: "Holdings",  count: holdings.length  },

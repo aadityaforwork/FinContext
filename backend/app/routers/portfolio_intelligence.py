@@ -1122,12 +1122,14 @@ async def portfolio_movers(req: MoversRequest):
 # ---------------------------------------------------------------------------
 # Morning Brief — personalized "what matters for YOUR portfolio today"
 # ---------------------------------------------------------------------------
-from cachetools import TTLCache
 from datetime import datetime, timezone
 
 # Cached for 4 hours, keyed by content (date + holdings tickers + watchlist tickers).
 # Two users with identical universes share the cached brief — saves AI cost dramatically.
-_morning_brief_cache: TTLCache = TTLCache(maxsize=200, ttl=4 * 60 * 60)
+# Storage moved from a module-level TTLCache to response_cache.get_shared /
+# put_shared so the entry survives a worker restart and is visible to every
+# worker — see the "Cross-worker tier" note in services/response_cache.py.
+_BRIEF_TTL_S = 4 * 60 * 60
 
 # Sample portfolio used when a user has no holdings + empty watchlist (cold start).
 # Lets the startup demo viewer see the value in <2 seconds without needing data.
@@ -1174,9 +1176,14 @@ async def morning_brief(req: MorningBriefRequest):
         ]
         watchlist = list(req.watchlist_tickers)
 
-    cache_key = _brief_cache_key(raw_positions, watchlist)
-    if not req.force_refresh and cache_key in _morning_brief_cache:
-        return _morning_brief_cache[cache_key]
+    # Namespaced: _brief_cache_key / _summary_cache_key / _news_feed_cache_key
+    # all emit the same "bucket|holdings|watchlist" shape, so they would collide
+    # in the shared store without a per-endpoint prefix.
+    cache_key = f"morning_brief|{_brief_cache_key(raw_positions, watchlist)}"
+    if not req.force_refresh:
+        hit = await response_cache.get_shared(cache_key, max_ttl_s=_BRIEF_TTL_S)
+        if hit is not None:
+            return hit
 
     if not ai_client.is_available():
         return with_disclaimer({
@@ -1290,7 +1297,7 @@ async def morning_brief(req: MorningBriefRequest):
         "data_gaps": data.get("data_gaps", []),
     })
 
-    _morning_brief_cache[cache_key] = payload
+    await response_cache.put_shared(cache_key, payload, ttl_s=_BRIEF_TTL_S)
     return payload
 
 
@@ -1302,7 +1309,7 @@ async def morning_brief(req: MorningBriefRequest):
 # at what impact level, and why. That's what nobody else in the Indian market
 # does on the front page.
 # ---------------------------------------------------------------------------
-_news_feed_cache: TTLCache = TTLCache(maxsize=200, ttl=60 * 60)  # 1 hour
+_NEWS_FEED_TTL_S = 60 * 60  # 1 hour — see _BRIEF_TTL_S for why this isn't a TTLCache
 
 
 class NewsFeedRequest(BaseModel):
@@ -1577,9 +1584,11 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
         ]
         watchlist = list(req.watchlist_tickers)
 
-    cache_key = _news_feed_cache_key(raw_positions, watchlist)
-    if not req.force_refresh and cache_key in _news_feed_cache:
-        return _news_feed_cache[cache_key]
+    cache_key = f"news_feed|{_news_feed_cache_key(raw_positions, watchlist)}"
+    if not req.force_refresh:
+        hit = await response_cache.get_shared(cache_key, max_ttl_s=_NEWS_FEED_TTL_S)
+        if hit is not None:
+            return hit
 
     if not ai_client.is_available():
         return with_disclaimer({
@@ -1849,7 +1858,7 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
         "holdings_today": holdings_today,
         "data_gaps": data.get("data_gaps", []),
     })
-    _news_feed_cache[cache_key] = payload
+    await response_cache.put_shared(cache_key, payload, ttl_s=_NEWS_FEED_TTL_S)
     return payload
 
 
@@ -1857,7 +1866,7 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
 # Market Summary — 60+ line narrative giving the user the day's full story
 # in plain English. Sits to the LEFT of the news feed in the dashboard.
 # ---------------------------------------------------------------------------
-_market_summary_cache: TTLCache = TTLCache(maxsize=200, ttl=4 * 60 * 60)  # 4 hours
+_SUMMARY_TTL_S = 4 * 60 * 60  # 4 hours
 
 
 def _slim_summary_context(ctx: dict) -> dict:
@@ -1977,9 +1986,11 @@ async def market_summary(req: MarketSummaryRequest):
         ]
         watchlist = list(req.watchlist_tickers)
 
-    cache_key = _summary_cache_key(raw_positions, watchlist)
-    if not req.force_refresh and cache_key in _market_summary_cache:
-        return _market_summary_cache[cache_key]
+    cache_key = f"market_summary|{_summary_cache_key(raw_positions, watchlist)}"
+    if not req.force_refresh:
+        hit = await response_cache.get_shared(cache_key, max_ttl_s=_SUMMARY_TTL_S)
+        if hit is not None:
+            return hit
 
     if not ai_client.is_available():
         return with_disclaimer({
@@ -2156,7 +2167,7 @@ async def market_summary(req: MarketSummaryRequest):
         "confidence": data.get("confidence", "low"),
         "data_gaps": data.get("data_gaps", []),
     })
-    _market_summary_cache[cache_key] = payload
+    await response_cache.put_shared(cache_key, payload, ttl_s=_SUMMARY_TTL_S)
     return payload
 
 

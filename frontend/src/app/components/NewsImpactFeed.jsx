@@ -1,10 +1,10 @@
 "use client";
 
 import { useState, useCallback, useMemo } from "react";
-import { supabase } from "../lib/supabase";
 import { API_BASE } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
-import { useCache } from "../lib/useCache";
+import { useUniverse } from "../context/UniverseContext";
+import { useCache, makeCacheVersion } from "../lib/useCache";
 import { Spinner } from "./Loaders";
 import NewsWireLoader from "./NewsWireLoader";
 import Modal from "./Modal";
@@ -296,6 +296,7 @@ function NewsRow({ item, onTickerClick, onOpen, holdingsToday }) {
 
 export default function NewsImpactFeed({ onNavigate }) {
   const { user } = useAuth();
+  const { positions, watchlistTickers, ready } = useUniverse();
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState("all");
   const [activeItem, setActiveItem] = useState(null); // click-through detail modal
@@ -305,22 +306,18 @@ export default function NewsImpactFeed({ onNavigate }) {
   // bypasses the SWR window and recomputes; localStorage is overwritten either way.
   const fetchFeed = useCallback(async (force = false) => {
     if (!user?.id) throw new Error("Not signed in");
-    const [{ data: positions }, { data: watchRows }] = await Promise.all([
-      supabase.from("portfolio").select("ticker, quantity, buy_price").eq("user_id", user.id),
-      supabase.from("watchlist").select("ticker").eq("user_id", user.id),
-    ]);
     const res = await fetch(`${API_BASE}/api/intelligence/news-feed`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         positions: positions || [],
-        watchlist_tickers: (watchRows || []).map((r) => r.ticker),
+        watchlist_tickers: watchlistTickers || [],
         force_refresh: force,
       }),
     });
     if (!res.ok) throw new Error(`Feed request failed (${res.status})`);
     return await res.json();
-  }, [user?.id]);
+  }, [user?.id, positions, watchlistTickers]);
 
   // Cache by user.id with a 30-min local window — second-visit-onwards is instant.
   // Background refresh keeps it fresh; portfolio changes within the window
@@ -333,8 +330,18 @@ export default function NewsImpactFeed({ onNavigate }) {
     error: fetchError,
     refresh,
   } = useCache(`news-feed:${user?.id || "anon"}`, fetchFeed, {
-    enabled: !!user?.id,
+    // Gate on `ready` so the first fetch goes out with the real universe rather
+    // than an empty one (which the backend would treat as demo mode).
+    enabled: !!user?.id && ready,
     maxAgeMs: 30 * 60 * 1000,
+    // useCache's docs ask for a hash of the request inputs here; this call site
+    // never passed one, so a cached feed built for the old portfolio kept
+    // painting after the user added or removed a holding until the 30-min
+    // window lapsed. Now a universe change is a cache miss.
+    version: makeCacheVersion(
+      (positions || []).map((p) => p.ticker),
+      watchlistTickers || []
+    ),
   });
 
   // Surface either a fetch error OR a payload-level error from the backend.
