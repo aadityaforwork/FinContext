@@ -60,7 +60,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 import uuid
 from collections import deque
@@ -70,33 +69,20 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from app.services import langfuse_client
+
 logger = logging.getLogger("llm_trace")
 
 _RECENT_MAXLEN = 200
 _recent: deque[dict] = deque(maxlen=_RECENT_MAXLEN)
 
-_langfuse_checked = False
-_langfuse_client = None
-
 
 def _get_langfuse():
-    """Lazy, cached Langfuse client. Returns None (and stays None) if
+    """Lazy, cached Langfuse client — see langfuse_client.get_client() (shared
+    with prompt_registry.py). Returns None (and stays None) if
     LANGFUSE_PUBLIC_KEY isn't set or the SDK/init fails — tracing is always
     additive, never a hard dependency for the AI surfaces to function."""
-    global _langfuse_checked, _langfuse_client
-    if _langfuse_checked:
-        return _langfuse_client
-    _langfuse_checked = True
-    if not os.environ.get("LANGFUSE_PUBLIC_KEY"):
-        return None
-    try:
-        from langfuse import get_client
-        _langfuse_client = get_client()
-        logger.info("Langfuse client initialized.")
-    except Exception:
-        logger.exception("Langfuse client init failed — tracing to Langfuse disabled")
-        _langfuse_client = None
-    return _langfuse_client
+    return langfuse_client.get_client()
 
 
 @dataclass

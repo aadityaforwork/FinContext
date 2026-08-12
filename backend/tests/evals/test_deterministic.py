@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from app.agents.crews.narrative import NarrativeOutput
 from app.agents.explainers.risk_brief import RiskBriefOutput
 from app.core.compliance import DISCLAIMER_TEXT, with_disclaimer
-from app.services import signal_ensemble, track_record
+from app.services import prompt_registry, signal_ensemble, track_record
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +222,89 @@ def test_track_record_calibrate_never_raises_on_backend_failure(monkeypatch):
     out = track_record.calibrate(ensemble, source="news_feed", catalyst_type="earnings")
     assert out["conviction"] == 50
     assert out["calibration_pair_n"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Prompt registry — path-back signal #2 (Langfuse-managed prompts, leg 3b).
+# langfuse_client.get_client() is monkeypatched everywhere here -- no real
+# Langfuse SDK/network call happens in any of these tests.
+# ---------------------------------------------------------------------------
+class _FakePromptClient:
+    """Stands in for langfuse.model.TextPromptClient."""
+
+    def __init__(self, prompt: str, version: int | None = None, is_fallback: bool = False):
+        self.prompt = prompt
+        self.version = version
+        self.is_fallback = is_fallback
+
+
+class _FakeLangfuseClient:
+    """Stands in for the Langfuse SDK client — records the kwargs it was
+    called with so tests can assert the production label / cache TTL /
+    fallback text were passed through correctly, and can be told to return
+    a canned prompt or raise."""
+
+    def __init__(self, *, returns: _FakePromptClient | None = None, raises: Exception | None = None):
+        self._returns = returns
+        self._raises = raises
+        self.calls: list[dict] = []
+
+    def get_prompt(self, name, **kwargs):
+        self.calls.append({"name": name, **kwargs})
+        if self._raises is not None:
+            raise self._raises
+        return self._returns
+
+
+def test_prompt_registry_no_langfuse_configured_returns_fallback(monkeypatch):
+    monkeypatch.setattr(prompt_registry.langfuse_client, "get_client", lambda: None)
+    result = prompt_registry.get_prompt("portfolio.tomorrow_watch", "FALLBACK TEXT")
+    assert result.text == "FALLBACK TEXT"
+    assert result.version is None
+    assert result.source == "fallback_no_client"
+
+
+def test_prompt_registry_returns_langfuse_prompt_when_available(monkeypatch):
+    fake = _FakeLangfuseClient(returns=_FakePromptClient("LANGFUSE TEXT", version=3))
+    monkeypatch.setattr(prompt_registry.langfuse_client, "get_client", lambda: fake)
+    result = prompt_registry.get_prompt("portfolio.tomorrow_watch", "FALLBACK TEXT")
+    assert result.text == "LANGFUSE TEXT"
+    assert result.version == 3
+    assert result.source == "langfuse"
+
+
+def test_prompt_registry_requests_production_label_by_default(monkeypatch):
+    """Code must never read the `candidate` label directly -- promotion to
+    production is the human/eval review gate (see module docstring)."""
+    fake = _FakeLangfuseClient(returns=_FakePromptClient("X", version=1))
+    monkeypatch.setattr(prompt_registry.langfuse_client, "get_client", lambda: fake)
+    prompt_registry.get_prompt("portfolio.news_feed_annotation", "FALLBACK")
+    assert fake.calls[0]["label"] == "production"
+    assert fake.calls[0]["fallback"] == "FALLBACK"
+    assert fake.calls[0]["cache_ttl_seconds"] == prompt_registry.PROMPT_CACHE_TTL_SECONDS
+
+
+def test_prompt_registry_sdk_level_fallback_is_labeled_distinctly(monkeypatch):
+    """When Langfuse is configured but the fetch itself fails, the SDK's own
+    `fallback=` kwarg returns a synthesized client with is_fallback=True --
+    make sure that's distinguishable from a real fetch in the audit trail."""
+    fake = _FakeLangfuseClient(returns=_FakePromptClient("FALLBACK TEXT", version=0, is_fallback=True))
+    monkeypatch.setattr(prompt_registry.langfuse_client, "get_client", lambda: fake)
+    result = prompt_registry.get_prompt("portfolio.tomorrow_watch", "FALLBACK TEXT")
+    assert result.source == "fallback_sdk"
+    assert result.version is None  # not a real version, don't record it as one
+
+
+def test_prompt_registry_client_raising_outside_sdk_fallback_is_caught(monkeypatch):
+    """The SDK raises unconditionally (before its own fallback logic) if the
+    client itself isn't correctly initialized -- this module's own
+    try/except is the outer safety net for that case."""
+    fake = _FakeLangfuseClient(raises=RuntimeError("SDK is not correctly initialized"))
+    monkeypatch.setattr(prompt_registry.langfuse_client, "get_client", lambda: fake)
+    result = prompt_registry.get_prompt("portfolio.tomorrow_watch", "FALLBACK TEXT")
+    assert result.text == "FALLBACK TEXT"
+    assert result.version is None
+    assert result.source == "fallback_error"
 
 
 # ---------------------------------------------------------------------------

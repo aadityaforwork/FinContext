@@ -92,6 +92,16 @@ backend/app/
     llm_trace.py         Structured per-call tracing (added — see below).
                         Wrap any new LLM/agent call site with
                         `llm_trace.span(...)`.
+    langfuse_client.py   Shared lazy Langfuse client (opt-in on
+                        LANGFUSE_PUBLIC_KEY, never raises) — used by both
+                        llm_trace.py and prompt_registry.py so the client
+                        lazy-init lives in one place.
+    prompt_registry.py   Path-back leg 3b: fetches Langfuse-managed prompts
+                        by `production` label with a hardcoded fallback,
+                        never raises. Only wired to the two prompts that
+                        produce judged predictions (portfolio_intelligence.py
+                        tomorrow-watch + news-feed annotation) — see its
+                        module docstring before adding a third call site.
     vector_store.py     pgvector-backed semantic news retrieval
                         (match_news_for_tickers RPC) — surfaces news that
                         affects a ticker even when the headline never names
@@ -105,6 +115,11 @@ backend/app/
                         /accuracy page. This is the eval loop — see
                         scripts/compute_outcomes.py for the cron job that
                         keeps it fed.
+    track_record.py      Path-back leg 1: hierarchical-shrinkage calibration
+                        factor from outcome_ledger's judged history, applied
+                        to signal_ensemble's conviction. See its module
+                        docstring for the shrinkage rationale and the
+                        deliberate 1d-horizon trade-off.
   agents/               CrewAI multi-agent framework. PARTIALLY migrated —
                         only 2 of ~7 AI flows run through here:
     registry.py           make_<role>() factories — Agent definitions.

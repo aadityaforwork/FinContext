@@ -23,6 +23,7 @@ from app.services import (
     grounding,
     market_data,
     outcome_ledger,
+    prompt_registry,
     response_cache,
     signal_ensemble,
     track_record,
@@ -564,13 +565,19 @@ def _apply_ensemble_to_news_items(
 # by test_track_record_logging.py — don't "clean this up" without reading
 # that test first.
 # ---------------------------------------------------------------------------
-def _log_tomorrow_predictions(tomorrow_data: dict, movers_ctx: dict) -> None:
+def _log_tomorrow_predictions(tomorrow_data: dict, movers_ctx: dict, prompt_meta: dict | None = None) -> None:
     """Persist Tomorrow per_holding watch items as forward-looking predictions.
 
     Each row is dedup-keyed `tomorrow:{ticker}:{date}` so re-running the Context
     Engine the same day replaces the latest call instead of accumulating dupes.
     Logs every item, including ones hidden from the user for low conviction —
     see the TRAP-STATE INVARIANT note above.
+
+    `prompt_meta` (optional): {"name", "version", "source"} from
+    prompt_registry.get_prompt() for the prompt that produced this batch —
+    written into metadata.prompt alongside the calibration snapshot so a past
+    prediction's text is traceable to the exact Langfuse prompt version that
+    generated it (path-back leg 3b — see prompt_registry.py docstring).
     """
     items = (tomorrow_data or {}).get("per_holding") or []
     if not items:
@@ -619,19 +626,25 @@ def _log_tomorrow_predictions(tomorrow_data: dict, movers_ctx: dict) -> None:
                     "source_n": w.get("calibration_source_n"),
                     "global_n": w.get("calibration_global_n"),
                 },
+                "prompt": prompt_meta,
             },
         })
     if rows:
         outcome_ledger.log_predictions(rows)
 
 
-def _log_news_feed_predictions(cleaned_items: list[dict], tech_by_ticker: dict) -> None:
+def _log_news_feed_predictions(
+    cleaned_items: list[dict], tech_by_ticker: dict, prompt_meta: dict | None = None,
+) -> None:
     """Persist annotated News Impact items as predictions — one row per
     (item × affected_ticker). Skip 'mixed' direction (not scoreable). Dedup key
     `news_feed:{ticker}:{news_id}:{date}` so concurrent users hitting the
     same endpoint replace instead of duplicate. Logs every item, including
     ones hidden from the user for low conviction — see the TRAP-STATE
     INVARIANT note above _log_tomorrow_predictions.
+
+    `prompt_meta`: see _log_tomorrow_predictions' docstring — same audit-trail
+    purpose, this endpoint's news-feed annotation prompt instead.
     """
     if not cleaned_items:
         return
@@ -674,6 +687,7 @@ def _log_news_feed_predictions(cleaned_items: list[dict], tech_by_ticker: dict) 
                         "source_n": it.get("calibration_source_n"),
                         "global_n": it.get("calibration_global_n"),
                     },
+                    "prompt": prompt_meta,
                 },
             })
     if rows:
@@ -849,7 +863,13 @@ async def _movers_generator(raw_holdings: list[dict]):
     # advice. Keep direction/importance in the schema for the backend's
     # filtering logic, but the user-facing `what_to_watch` prose must be pure
     # observation — no "may", "could", "expected to".
-    tomorrow_task = (
+    # Prompt text is Langfuse-managed (path-back leg 3b — see prompt_registry.py
+    # module docstring): production label wins if configured, this literal
+    # string is both the cold-start fallback AND the seed text for Langfuse
+    # version 1, so wiring this in changes nothing until someone edits the
+    # prompt in Langfuse. Version/source captured for the audit trail — see
+    # _log_tomorrow_predictions' metadata below.
+    _tomorrow_task_fallback = (
         "Build a FACTUAL, HOLDING-CENTRIC radar of upcoming events and observable "
         "state changes for the user's holdings. This is NOT a forecast — every "
         "sentence should describe something CONCRETE that already exists in CONTEXT: "
@@ -896,6 +916,8 @@ async def _movers_generator(raw_holdings: list[dict]):
         "  • Default direction to 'neutral' when in doubt. The frontend no longer shows the\n"
         "    direction chip so this matters less for UX, but it still controls filtering.\n"
     )
+    _tomorrow_prompt = prompt_registry.get_prompt("portfolio.tomorrow_watch", _tomorrow_task_fallback)
+    tomorrow_task = _tomorrow_prompt.text
     tomorrow_schema = """{
   "per_holding": [
     {
@@ -1088,6 +1110,7 @@ async def _movers_generator(raw_holdings: list[dict]):
         try:
             await asyncio.to_thread(
                 _log_tomorrow_predictions, tomorrow_data, movers_ctx,
+                {"name": "portfolio.tomorrow_watch", "version": _tomorrow_prompt.version, "source": _tomorrow_prompt.source},
             )
         except Exception as e:
             logger.warning("outcome_ledger logging failed: %s", e)
@@ -1753,7 +1776,11 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
         "candidate_news": candidates,
     }
 
-    task = (
+    # See the matching comment above tomorrow_task — same Langfuse-managed
+    # prompt mechanism (path-back leg 3b), this endpoint's news-annotation
+    # prompt instead. This literal string is the cold-start fallback + the
+    # seed text for Langfuse version 1.
+    _news_task_fallback = (
         "For EACH item in CONTEXT.candidate_news, decide whether it materially affects "
         "the user's portfolio (CONTEXT.user_holdings + CONTEXT.user_watchlist). For items "
         "that DO affect the portfolio, output an annotation. SKIP items that don't.\n\n"
@@ -1798,6 +1825,8 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
         "news, call it 'mixed'. The system will then drop low-conviction calls — better to under-"
         "promise than to issue a confident wrong direction. BANNED words: 'will', 'should', 'expected to'."
     )
+    _news_prompt = prompt_registry.get_prompt("portfolio.news_feed_annotation", _news_task_fallback)
+    task = _news_prompt.text
     schema = """{
   "items": [
     {
@@ -1897,7 +1926,10 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
     # direction items are skipped inside the helper. UPSERT keyed by
     # news_feed:{ticker}:{news_id}:{date} so concurrent users don't duplicate.
     if outcome_ledger.is_available():
-        background.add_task(_log_news_feed_predictions, cleaned, tech_by_ticker)
+        background.add_task(
+            _log_news_feed_predictions, cleaned, tech_by_ticker,
+            {"name": "portfolio.news_feed_annotation", "version": _news_prompt.version, "source": _news_prompt.source},
+        )
 
     # Filter for the user-facing list AFTER logging (so the ledger sees everything).
     user_items = [it for it in cleaned if not it.get("hidden_low_conviction")]

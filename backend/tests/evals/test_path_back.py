@@ -53,7 +53,10 @@ def test_log_tomorrow_predictions_logs_hidden_items_too(monkeypatch):
         {"ticker": "INFY", "current_price": 1500, "technicals": {}},
     ]}
 
-    pi._log_tomorrow_predictions(tomorrow_data, movers_ctx)
+    # path-back leg 3b: caller passes the Langfuse prompt's audit-trail info;
+    # every logged row must carry it, hidden or not, same as calibration.
+    prompt_meta = {"name": "portfolio.tomorrow_watch", "version": 4, "source": "langfuse"}
+    pi._log_tomorrow_predictions(tomorrow_data, movers_ctx, prompt_meta)
 
     assert "rows" in captured, "log_predictions was never called"
     tickers_logged = {r["ticker"] for r in captured["rows"]}
@@ -64,6 +67,32 @@ def test_log_tomorrow_predictions_logs_hidden_items_too(monkeypatch):
     assert cal["factor"] == 0.7
     assert cal["pair_n"] == 12
     assert cal["hit_rate_pct"] == 20.0
+    assert infy_row["metadata"]["prompt"] == prompt_meta
+    # TCS (not hidden) gets the same prompt_meta -- it's a property of the
+    # batch/call, not of whether an individual item was hidden.
+    tcs_row = next(r for r in captured["rows"] if r["ticker"] == "TCS")
+    assert tcs_row["metadata"]["prompt"] == prompt_meta
+
+
+def test_log_tomorrow_predictions_prompt_meta_defaults_to_none(monkeypatch):
+    """Back-compat: an omitted prompt_meta (e.g. a future call site that
+    hasn't been wired to prompt_registry yet) must not raise or silently
+    drop the row -- it just logs metadata.prompt = None."""
+    captured: dict = {}
+    monkeypatch.setattr(
+        pi.outcome_ledger, "log_predictions",
+        lambda rows: captured.setdefault("rows", rows),
+    )
+    tomorrow_data = {"per_holding": [{
+        "ticker": "TCS", "direction": "positive", "catalyst_type": "earnings",
+        "importance": "high", "what_to_watch": "x", "sources": [], "sector": "IT",
+        "conviction": 70,
+    }]}
+    movers_ctx = {"holdings": [{"ticker": "TCS", "current_price": 3500, "technicals": {}}]}
+
+    pi._log_tomorrow_predictions(tomorrow_data, movers_ctx)  # no prompt_meta passed
+
+    assert captured["rows"][0]["metadata"]["prompt"] is None
 
 
 def test_log_news_feed_predictions_logs_hidden_items_too(monkeypatch):
@@ -91,7 +120,8 @@ def test_log_news_feed_predictions_logs_hidden_items_too(monkeypatch):
         },
     ]
 
-    pi._log_news_feed_predictions(cleaned, {})
+    prompt_meta = {"name": "portfolio.news_feed_annotation", "version": 2, "source": "langfuse"}
+    pi._log_news_feed_predictions(cleaned, {}, prompt_meta)
 
     assert "rows" in captured, "log_predictions was never called"
     tickers_logged = {r["ticker"] for r in captured["rows"]}
@@ -101,3 +131,4 @@ def test_log_news_feed_predictions_logs_hidden_items_too(monkeypatch):
     cal = infy_row["metadata"]["calibration"]
     assert cal["factor"] == 0.75
     assert cal["pair_n"] == 15
+    assert infy_row["metadata"]["prompt"] == prompt_meta
