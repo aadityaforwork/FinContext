@@ -427,6 +427,35 @@ def accuracy_summary(
     }
 
 
+def scored_rows(horizon: str = "1d", days: int = 90) -> list[dict]:
+    """Raw {source, catalyst_type, hit} rows for the given horizon — feeds
+    track_record.py's calibration segments. Deliberately minimal (no
+    aggregation, no impact_level) so it stays cheap to call from a cache
+    refresh. Excludes ungraded/pending rows (hit IS NULL) via the view join.
+    Best-effort — returns [] on any failure, never raises.
+    """
+    if not _client:
+        return []
+    today = datetime.now(timezone.utc).date()
+    from_date = (today - timedelta(days=days)).isoformat()
+    try:
+        rows = (
+            _client.table("prediction_results")
+            .select("source,catalyst_type,hit")
+            .eq("horizon", horizon)
+            .gte("prediction_date", from_date)
+            .not_.is_("hit", "null")
+            .limit(10000)
+            .execute()
+            .data
+            or []
+        )
+        return rows
+    except Exception as e:
+        logger.warning("scored_rows fetch failed: %s", e)
+        return []
+
+
 def recent_results(limit: int = 30, horizon: str = "1d") -> list[dict]:
     """Most recent (prediction, outcome) rows for the chosen horizon. Used for
     the "Recent calls" table on the Accuracy page so visitors can eyeball the

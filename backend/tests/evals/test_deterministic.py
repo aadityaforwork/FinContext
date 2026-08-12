@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from app.agents.crews.narrative import NarrativeOutput
 from app.agents.explainers.risk_brief import RiskBriefOutput
 from app.core.compliance import DISCLAIMER_TEXT, with_disclaimer
-from app.services import signal_ensemble
+from app.services import signal_ensemble, track_record
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +94,134 @@ def test_ensemble_missing_news_caps_conviction_at_65():
         flows={"fii_net_cr": 3000, "dii_net_cr": 3000},
     )
     assert result["conviction"] <= 65
+
+
+# ---------------------------------------------------------------------------
+# Track record calibration — path-back signal #1 (fastest + most specific).
+# outcome_ledger.scored_rows() is monkeypatched everywhere here — no Supabase
+# client needed, and the module-level segment cache is cleared around every
+# test so results from one test can't leak into the next.
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _clear_track_record_cache():
+    track_record._cache.clear()
+    yield
+    track_record._cache.clear()
+
+
+def _scored_rows(n_hits: int, n_total: int, source="news_feed", catalyst_type="earnings"):
+    rows = [{"source": source, "catalyst_type": catalyst_type, "hit": True} for _ in range(n_hits)]
+    rows += [{"source": source, "catalyst_type": catalyst_type, "hit": False} for _ in range(n_total - n_hits)]
+    return rows
+
+
+def test_track_record_no_data_anywhere_is_a_noop(monkeypatch):
+    """Zero-data limit of the shrinkage formula must reproduce the old
+    cold-start behavior exactly: no history anywhere -> factor 1.0."""
+    monkeypatch.setattr(track_record.outcome_ledger, "scored_rows", lambda **kw: [])
+    cal = track_record.calibration_factor("news_feed", "earnings")
+    assert cal["factor"] == 1.0
+    assert cal["pair_n"] == 0
+    assert cal["source_n"] == 0
+    assert cal["global_n"] == 0
+
+
+def test_track_record_pair_level_good_history_boosts_factor(monkeypatch):
+    monkeypatch.setattr(track_record.outcome_ledger, "scored_rows", lambda **kw: _scored_rows(18, 20))  # 90% hits
+    cal = track_record.calibration_factor("news_feed", "earnings")
+    assert cal["pair_n"] == 20
+    assert 1.0 < cal["factor"] <= track_record.FACTOR_CEIL
+
+
+def test_track_record_pair_level_bad_history_discounts_factor(monkeypatch):
+    monkeypatch.setattr(track_record.outcome_ledger, "scored_rows", lambda **kw: _scored_rows(2, 20))  # 10% hits
+    cal = track_record.calibration_factor("news_feed", "earnings")
+    assert track_record.FACTOR_FLOOR <= cal["factor"] < 1.0
+
+
+def test_track_record_coin_flip_hit_rate_is_neutral(monkeypatch):
+    monkeypatch.setattr(track_record.outcome_ledger, "scored_rows", lambda **kw: _scored_rows(10, 20))  # 50%
+    cal = track_record.calibration_factor("news_feed", "earnings")
+    assert cal["factor"] == 1.0
+
+
+def test_track_record_thin_sample_is_pulled_toward_parent_not_taken_at_face_value(monkeypatch):
+    """3/10 (30%) is an ordinary result for a truly 50%-skill segment. With the
+    old hard-cliff design this got a real discount off pure noise. Shrinkage
+    must pull it most of the way back toward the parent tiers' rate.
+
+    Background rows on a *different* catalyst_type (roughly coin-flip) keep
+    source/global near-neutral, isolating what the pair-level shrink alone
+    does to the thin, noisy 30% sample — without this, source/global would
+    just collapse onto the same 10 noisy rows since they'd be the only data
+    in the fixture, and the test would stop isolating what it claims to.
+    """
+    background = _scored_rows(50, 100, catalyst_type="technical")  # stable ~50%
+    thin_noisy_pair = _scored_rows(3, 10, catalyst_type="earnings")
+    monkeypatch.setattr(track_record.outcome_ledger, "scored_rows", lambda **kw: background + thin_noisy_pair)
+    cal = track_record.calibration_factor("news_feed", "earnings")
+    raw_factor = track_record._factor_from_rate(0.30)
+    assert cal["factor"] > raw_factor
+    assert cal["factor"] > 0.9  # pulled back close to neutral, not left at the noisy raw estimate
+
+
+def test_track_record_no_cliff_at_old_threshold_boundary(monkeypatch):
+    """Same hit-rate (~30%) at n=9 vs n=11 — straddling the old hard
+    MIN_SAMPLE=10 cutoff — must produce close, monotonically-ordered
+    factors, not a jump. Background rows (see previous test) keep the
+    parent tiers stable so this isolates the pair-level cliff specifically."""
+    background = _scored_rows(50, 100, catalyst_type="technical")
+    monkeypatch.setattr(
+        track_record.outcome_ledger, "scored_rows",
+        lambda **kw: background + _scored_rows(3, 9, catalyst_type="earnings"),
+    )
+    factor_below = track_record.calibration_factor("news_feed", "earnings")["factor"]
+    track_record._cache.clear()
+    monkeypatch.setattr(
+        track_record.outcome_ledger, "scored_rows",
+        lambda **kw: background + _scored_rows(3, 11, catalyst_type="earnings"),
+    )
+    factor_above = track_record.calibration_factor("news_feed", "earnings")["factor"]
+    assert abs(factor_above - factor_below) < 0.03  # smooth, not a cliff
+    assert factor_above <= factor_below  # more (still-losing) data -> at least as discounted
+
+
+def test_track_record_falls_back_toward_source_when_pair_thin(monkeypatch):
+    """Pair (news_feed, earnings) is sparse; the source overall (earnings +
+    technical combined) is healthy and good. The pair's blended estimate
+    should sit between its own raw rate and the source's rate — pulled
+    toward the source, not stuck at the tiny pair sample alone."""
+    rows = (
+        _scored_rows(2, 3, catalyst_type="earnings")   # pair: 2/3, noisy
+        + _scored_rows(18, 20, catalyst_type="technical")  # source-wide: mostly this, strong
+    )
+    monkeypatch.setattr(track_record.outcome_ledger, "scored_rows", lambda **kw: rows)
+    cal = track_record.calibration_factor("news_feed", "earnings")
+    assert cal["pair_n"] == 3
+    assert cal["source_n"] == 23
+    # pulled up from the pair's raw 2/3 toward the strong source-wide rate
+    assert cal["factor"] > track_record._factor_from_rate(2 / 3)
+
+
+def test_track_record_calibrate_preserves_direction_only_scales_conviction(monkeypatch):
+    monkeypatch.setattr(track_record.outcome_ledger, "scored_rows", lambda **kw: _scored_rows(2, 20))  # bad history
+    ensemble = {"consensus_direction": "positive", "conviction": 80, "breakdown": {}}
+    out = track_record.calibrate(ensemble, source="news_feed", catalyst_type="earnings")
+    assert out["consensus_direction"] == "positive"  # calibration never touches direction
+    assert out["raw_conviction"] == 80
+    assert out["conviction"] < 80
+    assert 0 <= out["conviction"] <= 95
+
+
+def test_track_record_calibrate_never_raises_on_backend_failure(monkeypatch):
+    def _boom(**kw):
+        raise RuntimeError("supabase down")
+
+    monkeypatch.setattr(track_record.outcome_ledger, "scored_rows", _boom)
+    ensemble = {"consensus_direction": "neutral", "conviction": 50, "breakdown": {}}
+    out = track_record.calibrate(ensemble, source="news_feed", catalyst_type="earnings")
+    assert out["conviction"] == 50
+    assert out["calibration_pair_n"] == 0
 
 
 # ---------------------------------------------------------------------------

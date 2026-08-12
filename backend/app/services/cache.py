@@ -24,6 +24,9 @@ DEFAULT_TTL_SECONDS = {
     "news": 900,          # 15 min — news feeds
     "context": 600,       # 10 min — grounding context
     "fundamentals": 1800, # 30 min — generic fundamentals
+    "track_record": 1800, # 30 min — outcome-ledger calibration segments (see track_record.py).
+                           # Underlying data only changes once/trading day (daily cron), so this
+                           # is purely about not hitting Supabase on every request, not freshness.
 }
 
 

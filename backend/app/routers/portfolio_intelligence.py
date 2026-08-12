@@ -25,6 +25,7 @@ from app.services import (
     outcome_ledger,
     response_cache,
     signal_ensemble,
+    track_record,
     vector_store,
 )
 from concurrent.futures import ThreadPoolExecutor
@@ -461,11 +462,22 @@ def _apply_ensemble_to_per_holding(tomorrow_data: dict, movers_ctx: dict) -> int
             sector_change_pct=sector_chg,
             flows=flows,
         )
+        # Path-back: discount/boost conviction using this (source, catalyst_type)
+        # segment's real judged track record (outcome_ledger, 1d horizon). No-op
+        # (factor 1.0) until the segment has enough scored history — see
+        # track_record.py.
+        ens = track_record.calibrate(ens, source="tomorrow_per_holding", catalyst_type=w.get("catalyst_type"))
         # Preserve the LLM's original call so the modal can show "AI said X
         # but ensemble flipped to Y" — useful for investor-facing transparency.
         w["llm_direction"] = llm_dir
         w["direction"] = ens["consensus_direction"]
         w["conviction"] = ens["conviction"]
+        w["raw_conviction"] = ens["raw_conviction"]
+        w["calibration_factor"] = ens["calibration_factor"]
+        w["calibration_hit_rate_pct"] = ens["calibration_hit_rate_pct"]
+        w["calibration_pair_n"] = ens["calibration_pair_n"]
+        w["calibration_source_n"] = ens["calibration_source_n"]
+        w["calibration_global_n"] = ens["calibration_global_n"]
         w["signal_breakdown"] = ens["breakdown"]
         w["agreeing_signals"] = ens["agreeing_signals"]
         w["conflicting_signals"] = ens["conflicting_signals"]
@@ -513,9 +525,19 @@ def _apply_ensemble_to_news_items(
             sector_change_pct=sector_chg,
             flows=flows,
         )
+        # Path-back — see _apply_ensemble_to_per_holding. News items are logged
+        # to the ledger with catalyst_type = the item's `category` field
+        # (_log_news_feed_predictions), so calibrate against that same key.
+        ens = track_record.calibrate(ens, source="news_feed", catalyst_type=it.get("category"))
         it["llm_direction"] = llm_dir
         it["direction"] = ens["consensus_direction"]
         it["conviction"] = ens["conviction"]
+        it["raw_conviction"] = ens["raw_conviction"]
+        it["calibration_factor"] = ens["calibration_factor"]
+        it["calibration_hit_rate_pct"] = ens["calibration_hit_rate_pct"]
+        it["calibration_pair_n"] = ens["calibration_pair_n"]
+        it["calibration_source_n"] = ens["calibration_source_n"]
+        it["calibration_global_n"] = ens["calibration_global_n"]
         it["signal_breakdown"] = ens["breakdown"]
         it["agreeing_signals"] = ens["agreeing_signals"]
         it["conflicting_signals"] = ens["conflicting_signals"]
@@ -529,12 +551,26 @@ def _apply_ensemble_to_news_items(
 # Outcome-ledger helpers — log forward-looking AI calls so /accuracy can grade
 # them later. Both helpers are best-effort: any failure is swallowed by the
 # fire-and-forget task that calls them.
+#
+# TRAP-STATE INVARIANT — DO NOT filter on `hidden_low_conviction` here.
+# track_record.py's calibration factor is itself derived from these logged
+# outcomes: a segment that gets discounted, hidden from the user, and then
+# *stops being logged* would stop accumulating new scored outcomes and could
+# never earn its way back — a one-way door that freezes a bad (or unlucky)
+# track record forever. Both helpers below log every item unconditionally;
+# only the response payload (built separately, see the list comprehensions
+# filtering on hidden_low_conviction near the end of each endpoint) hides
+# low-conviction items from the user. Show less, measure everything. Covered
+# by test_track_record_logging.py — don't "clean this up" without reading
+# that test first.
 # ---------------------------------------------------------------------------
 def _log_tomorrow_predictions(tomorrow_data: dict, movers_ctx: dict) -> None:
     """Persist Tomorrow per_holding watch items as forward-looking predictions.
 
     Each row is dedup-keyed `tomorrow:{ticker}:{date}` so re-running the Context
     Engine the same day replaces the latest call instead of accumulating dupes.
+    Logs every item, including ones hidden from the user for low conviction —
+    see the TRAP-STATE INVARIANT note above.
     """
     items = (tomorrow_data or {}).get("per_holding") or []
     if not items:
@@ -568,7 +604,22 @@ def _log_tomorrow_predictions(tomorrow_data: dict, movers_ctx: dict) -> None:
             "technical_state": slim_tech,
             "price_at_call": h.get("current_price"),
             "dedup_key": f"tomorrow:{t}:{today_iso}",
-            "metadata": {"sector": w.get("sector")},
+            # calibration snapshot — audit trail for track_record.py. conviction
+            # depends on history and drifts over time for reasons that live in
+            # Supabase, not in code; without this, a past call's conviction is
+            # not reconstructable after the segment's track record has moved on.
+            "metadata": {
+                "sector": w.get("sector"),
+                "calibration": {
+                    "raw_conviction": w.get("raw_conviction"),
+                    "conviction": w.get("conviction"),
+                    "factor": w.get("calibration_factor"),
+                    "hit_rate_pct": w.get("calibration_hit_rate_pct"),
+                    "pair_n": w.get("calibration_pair_n"),
+                    "source_n": w.get("calibration_source_n"),
+                    "global_n": w.get("calibration_global_n"),
+                },
+            },
         })
     if rows:
         outcome_ledger.log_predictions(rows)
@@ -578,7 +629,9 @@ def _log_news_feed_predictions(cleaned_items: list[dict], tech_by_ticker: dict) 
     """Persist annotated News Impact items as predictions — one row per
     (item × affected_ticker). Skip 'mixed' direction (not scoreable). Dedup key
     `news_feed:{ticker}:{news_id}:{date}` so concurrent users hitting the
-    same endpoint replace instead of duplicate.
+    same endpoint replace instead of duplicate. Logs every item, including
+    ones hidden from the user for low conviction — see the TRAP-STATE
+    INVARIANT note above _log_tomorrow_predictions.
     """
     if not cleaned_items:
         return
@@ -606,10 +659,21 @@ def _log_news_feed_predictions(cleaned_items: list[dict], tech_by_ticker: dict) 
                 # snapshots inline for every news item.
                 "price_at_call": None,
                 "dedup_key": f"news_feed:{tkr}:{news_id}:{today_iso}",
+                # calibration snapshot — see the matching comment in
+                # _log_tomorrow_predictions for why this is here.
                 "metadata": {
                     "headline": (it.get("headline") or "")[:240] or None,
                     "semantic_match_ticker": it.get("semantic_match_ticker"),
                     "semantic_similarity": it.get("semantic_similarity"),
+                    "calibration": {
+                        "raw_conviction": it.get("raw_conviction"),
+                        "conviction": it.get("conviction"),
+                        "factor": it.get("calibration_factor"),
+                        "hit_rate_pct": it.get("calibration_hit_rate_pct"),
+                        "pair_n": it.get("calibration_pair_n"),
+                        "source_n": it.get("calibration_source_n"),
+                        "global_n": it.get("calibration_global_n"),
+                    },
                 },
             })
     if rows:
