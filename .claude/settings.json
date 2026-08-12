@@ -3,5 +3,20 @@
     "allow": [
       "Bash(python -c ' *)"
     ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/post_edit_ruff.py",
+            "timeout": 30,
+            "statusMessage": "Running ruff check..."
+          }
+        ]
+      }
+    ]
   }
 }

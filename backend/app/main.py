@@ -28,6 +28,7 @@ from app.routers import (
     outcomes as outcomes_router,
     telegram as telegram_router,
     onboarding as onboarding_router,
+    prompt_monitor as prompt_monitor_router,
 )
 from app.agents import base as agents_base
 from app.core.config import settings
@@ -106,6 +107,7 @@ app.include_router(embeddings_router.router)
 app.include_router(outcomes_router.router)
 app.include_router(telegram_router.router)
 app.include_router(onboarding_router.router)
+app.include_router(prompt_monitor_router.router)
 
 
 @app.on_event("startup")

@@ -39,11 +39,19 @@
       "mcp__claude_ai_Vercel__get_runtime_logs",
       "mcp__claude_ai_Vercel__get_runtime_errors",
       "Bash(curl *)",
-      "Bash(python -m py_compile app/routers/auth.py app/routers/zerodha.py app/core/config.py)"
+      "Bash(python -m py_compile app/routers/auth.py app/routers/zerodha.py app/core/config.py)",
+      "Bash(python3 -c ' *)",
+      "mcp__context7__query-docs",
+      "Bash(git check-ignore *)",
+      "Bash(pip index *)",
+      "Bash(./venv/Scripts/python.exe -m pip install --quiet langfuse)",
+      "Bash(ruff --version)",
+      "Bash(jq --version)",
+      "mcp__claude_ai_Notion__notion-create-pages"
     ]
   },
+  "enableAllProjectMcpServers": true,
   "enabledMcpjsonServers": [
     "kitesurf-browser"
-  ],
-  "enableAllProjectMcpServers": true
+  ]
 }

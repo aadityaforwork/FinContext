@@ -8,11 +8,21 @@ predicted direction matched the actual price move 1d / 5d / 20d later.
 Backed by Supabase tables `ai_predictions` + `prediction_outcomes`
 (migration 004_outcome_ledger.sql). Reads/writes via the service-role key.
 
+Also owns `prompt_call_log` (migration 008_prompt_call_log.sql) — a
+call-grained (not prediction-grained) log of every Langfuse-managed-prompt
+call, feeding prompt_monitor.py's Phase 3 online comparison. Lives in this
+module rather than a new one: same Supabase client, same best-effort
+posture, same "ledger of AI-call telemetry" theme as everything else here —
+see log_call_metrics()'s docstring for why it can't just be derived from
+ai_predictions.
+
 Public functions:
     log_predictions(items)              — bulk-upsert prediction rows
     compute_pending_outcomes()          — fill in outcomes for due predictions
     accuracy_summary(...)               — aggregate hit-rate breakdowns
     recent_results(limit)               — recent (prediction, outcome) rows
+    log_call_metrics(...)               — log one LLM call's deterministic metrics
+    call_metrics_rows(prompt_name, days) — raw metric rows for a prompt
 
 Every call is best-effort. Failures are logged + swallowed so the rest of the
 app keeps working with no ledger (just no accuracy page).
@@ -477,4 +487,85 @@ def recent_results(limit: int = 30, horizon: str = "1d") -> list[dict]:
         return rows or []
     except Exception as e:
         logger.warning("recent_results fetch failed: %s", e)
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Prompt call log — path-back leg 3b, Phase 3 (prompt_monitor.py). Backed by
+# `prompt_call_log` (migration 008_prompt_call_log.sql).
+# ---------------------------------------------------------------------------
+def log_call_metrics(
+    prompt_name: str,
+    prompt_version: int | None,
+    prompt_source: str,
+    *,
+    confidence: str | None = None,
+    data_gaps_count: int | None = None,
+    parse_error: bool = False,
+    tokens_in: int | None = None,
+    tokens_out: int | None = None,
+    duration_ms: float | None = None,
+) -> bool:
+    """Best-effort log of one LLM call's deterministic metrics.
+
+    One row per ai_client.generate_grounded_json() call — deliberately NOT
+    derived from ai_predictions rows, for two reasons: (1) a single call can
+    produce many prediction rows (e.g. 15 per_holding items from one
+    tomorrow-watch call), so averaging over prediction rows would
+    over-weight calls that happened to produce more items; (2) a call whose
+    JSON fails to parse produces ZERO prediction rows (log_predictions is
+    never even called), so ai_predictions structurally can't represent
+    "how often does this prompt fail to produce valid output" — exactly
+    the schema_validation_failure_rate prompt_monitor.py needs. This table
+    makes every attempted call visible, success or failure.
+
+    Never raises; returns False (no-op) if the ledger is unavailable or the
+    insert fails — same posture as log_predictions().
+    """
+    if not _client:
+        return False
+    try:
+        _client.table("prompt_call_log").insert({
+            "prompt_name": prompt_name,
+            "prompt_version": prompt_version,
+            "prompt_source": prompt_source,
+            "confidence": confidence,
+            "data_gaps_count": data_gaps_count,
+            "parse_error": bool(parse_error),
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "duration_ms": duration_ms,
+        }).execute()
+        return True
+    except Exception as e:
+        logger.warning("log_call_metrics failed: %s", e)
+        return False
+
+
+def call_metrics_rows(prompt_name: str, days: int = 30) -> list[dict]:
+    """Raw per-call metric rows for `prompt_name` in the last `days` days,
+    newest first. Feeds prompt_monitor.py's version comparison. Best-effort
+    — returns [] on any failure, never raises.
+    """
+    if not _client:
+        return []
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        rows = (
+            _client.table("prompt_call_log")
+            .select(
+                "prompt_version,prompt_source,confidence,data_gaps_count,"
+                "parse_error,tokens_in,tokens_out,duration_ms,created_at"
+            )
+            .eq("prompt_name", prompt_name)
+            .gte("created_at", cutoff)
+            .order("created_at", desc=True)
+            .limit(5000)
+            .execute()
+            .data
+            or []
+        )
+        return rows
+    except Exception as e:
+        logger.warning("call_metrics_rows fetch failed: %s", e)
         return []

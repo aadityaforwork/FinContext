@@ -34,6 +34,108 @@ from concurrent.futures import ThreadPoolExecutor
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/intelligence", tags=["portfolio-intelligence"])
 
+# ---------------------------------------------------------------------------
+# Prompt fallback text — path-back leg 3b (prompt_registry.py). Module-level
+# (not inline in the endpoint) so the SAME literal string that's the
+# cold-start fallback and the Langfuse-seed text for version 1 is also the
+# single source of truth for tests/evals/prompt_gate_cases.py + the Phase 1
+# live pass-rate eval (test_prompt_gate_live.py) — no second copy to drift
+# out of sync with what's actually shipped.
+# ---------------------------------------------------------------------------
+NEWS_FEED_ANNOTATION_FALLBACK_PROMPT = (
+    "For EACH item in CONTEXT.candidate_news, decide whether it materially affects "
+    "the user's portfolio (CONTEXT.user_holdings + CONTEXT.user_watchlist). For items "
+    "that DO affect the portfolio, output an annotation. SKIP items that don't.\n\n"
+    "STRICT RULES:\n"
+    "1. affected_tickers MUST be a subset of CONTEXT.user_holdings + CONTEXT.user_watchlist. "
+    "Never invent tickers.\n"
+    "2. impact_level: 'high' if it directly hits a held name or a sector with >20% portfolio "
+    "weight, 'medium' if mild sector/macro effect, 'low' if tangential. Skip if no impact.\n"
+    "3. direction: 'positive' (tailwind for affected tickers), 'negative' (headwind), 'mixed' "
+    "(some up some down).\n"
+    "4. reason: ONE concrete sentence (<200 chars). MUST cite both (a) the news mechanism AND "
+    "(b) a relevant technical fact from CONTEXT.user_universe_technicals for at least one "
+    "affected ticker. Example: 'PSB profits beat — HDFCBANK is below SMA50 with momentum "
+    "extending_down, so this could trigger a sector-led mean-reversion bounce.' BANNED phrases: "
+    "'may enhance sentiment', 'could affect', 'positive movement enhances'. Be specific.\n"
+    "5. technical_context: short string (<120 chars) summarizing the technical state of the "
+    "PRIMARY affected ticker (rsi_zone + vol_zone + momentum_state + sma_state). If no "
+    "technicals available for that ticker, set to null. Example: 'RSI overbought; vol 1.8x avg; "
+    "extending_up; above SMA50.'\n"
+    "6. category: 'stock_specific' (single ticker news), 'sector' (sector-wide), 'macro' "
+    "(India macro), 'global' (overseas event with India impact).\n"
+    "7. Order output by impact_level (high → medium → low). Cap at 20 items — "
+    "the top 20 most relevant beat a long tail every time.\n"
+    "8. For users with 20+ holdings, lean toward keeping items even at 'low' impact — "
+    "the user wants breadth of coverage across their portfolio, not just headline events.\n"
+    "9. Some candidates carry `semantic_match_ticker` + `semantic_similarity` (0-1). "
+    "These are surfaced by vector search — they're news that doesn't NAME the ticker but "
+    "is semantically close to its business. Treat these as valid signal: include the named "
+    "ticker in affected_tickers if the transmission mechanism is real. Higher similarity "
+    "(>0.7) = stronger signal.\n"
+    "9b. POLICY ITEMS — if a candidate has scope='policy_pib' or 'policy_rbi' it carries "
+    "`affected_sectors`. These items are government press releases / RBI notifications and "
+    "rarely name specific companies. Map them to the user's holdings by intersecting the "
+    "item's affected_sectors with CONTEXT.user_holdings_by_sector — every matched ticker "
+    "goes into affected_tickers. Set category='macro'. Example: a PIB release with "
+    "affected_sectors=['Banking & Finance'] should set affected_tickers to ALL user "
+    "holdings under Banking. If no sector overlap with the user's portfolio, SKIP the item.\n"
+    "10. DIRECTION DISCIPLINE — DEFAULT TO 'mixed' when in doubt. Only emit 'positive' or "
+    "'negative' when (a) the news is unambiguously directional AND (b) the affected ticker's "
+    "technical state in CONTEXT.user_universe_technicals is consistent with the direction "
+    "(e.g. positive news + momentum extending_up + above SMA50). If technicals contradict the "
+    "news, call it 'mixed'. The system will then drop low-conviction calls — better to under-"
+    "promise than to issue a confident wrong direction. BANNED words: 'will', 'should', 'expected to'."
+)
+
+TOMORROW_WATCH_FALLBACK_PROMPT = (
+    "Build a FACTUAL, HOLDING-CENTRIC radar of upcoming events and observable "
+    "state changes for the user's holdings. This is NOT a forecast — every "
+    "sentence should describe something CONCRETE that already exists in CONTEXT: "
+    "a scheduled earnings date, a current RSI reading, a published news catalyst, "
+    "a measured volume surge.\n\n"
+    "OUTPUT TWO LAYERS:\n"
+    "  A) per_holding[] — for EACH holding in CONTEXT.holdings that has at least ONE of: "
+    "     an upcoming_earnings entry, a semantic_news match with similarity ≥ 0.6, OR a "
+    "     stretched technical state (rsi_zone overbought/oversold, vol_zone surge, "
+    "     momentum_state extending_*, or pct_from_20d_high within ±2%). "
+    "     Build a 'watch_item' object with:\n"
+    "       - ticker, sector\n"
+    "       - catalyst_type: 'earnings' | 'news' | 'technical' | 'sector_flow' | 'mixed'\n"
+    "       - event_date: ISO date 'YYYY-MM-DD' when there is a known scheduled event\n"
+    "         (earnings date from upcoming_earnings). null if no dated event.\n"
+    "       - days_to_event: integer days from today to event_date. null if no event.\n"
+    "       - what_to_watch: ONE concrete OBSERVATIONAL sentence — describe the\n"
+    "         current state plus the upcoming event, WITHOUT predicting the outcome.\n"
+    "         Good:  'Earnings 22 May (5 days); RSI 72 — extended; volume 1.4x 20d avg.'\n"
+    "         Bad:   'May pull back from current levels' / 'could lead to a price correction'\n"
+    "         The user reads facts and decides — we do not.\n"
+    "       - direction: 'positive' | 'negative' | 'mixed' | 'neutral' (used by\n"
+    "         backend filters; NOT rendered as a sentiment chip in the UI anymore)\n"
+    "       - importance: 'high' | 'medium' | 'low' (used by backend filters)\n"
+    "       - sources: list of ids from {TICKER}_news[i] / {TICKER}_sem[i] / 'technicals' / 'upcoming_earnings'\n"
+    "  B) macro_themes[] — 1-3 cross-cutting macro themes from global/india headlines that\n"
+    "     are CURRENTLY visible in CONTEXT and touch MULTIPLE holdings (e.g. crude spike,\n"
+    "     Fed decision, FII outflow). Each theme must list the affected_holdings explicitly.\n"
+    "     `mechanism` describes the channel of impact in OBSERVATIONAL language — what's\n"
+    "     happening and which holdings are exposed — not a directional bet.\n\n"
+    "STRICT RULES:\n"
+    "  • At least 60% of output items must be per_holding[], NOT macro_themes[]. The user\n"
+    "    wants 'what's scheduled on MY stocks', not 'general market commentary'.\n"
+    "  • If FII/DII flows in CONTEXT.market.flows are large (|net_inr_cr| > 1000), surface\n"
+    "    that in a macro_theme with the specific number cited.\n"
+    "  • If a holding has NO catalyst, do NOT include it. Empty radar is fine.\n"
+    "  • BANNED forecast phrases (zero tolerance — these are advice, not education):\n"
+    "      'may pull back', 'could lead to', 'expected to', 'should rise', 'poised to',\n"
+    "      'will likely', 'price correction', 'face downward pressure', 'further upside',\n"
+    "      'profit-taking', 'breakout candidate', 'a beat could push to', 'if the print misses'.\n"
+    "    If you find yourself wanting to use one, REWRITE as observation: instead of\n"
+    "    'OLAELEC may face downward pressure if momentum shifts', write 'OLAELEC RSI 70,\n"
+    "    momentum_state consolidating; earnings 30 May (12 days).'\n"
+    "  • Default direction to 'neutral' when in doubt. The frontend no longer shows the\n"
+    "    direction chip so this matters less for UX, but it still controls filtering.\n"
+)
+
 
 class PositionIn(BaseModel):
     ticker: str
@@ -548,6 +650,23 @@ def _apply_ensemble_to_news_items(
     return hidden
 
 
+def _log_call_metrics_best_effort(prompt_meta: dict | None, metrics: dict) -> None:
+    """Best-effort log of one generate_grounded_json call's deterministic
+    metrics into outcome_ledger's prompt_call_log (path-back leg 3b, Phase 3
+    — feeds prompt_monitor.py). No-op if `prompt_meta` is None (call site
+    not wired to a versioned prompt) or the ledger is unavailable. Swallows
+    its own failures — this must never be why a request fails."""
+    if not prompt_meta or not outcome_ledger.is_available():
+        return
+    try:
+        outcome_ledger.log_call_metrics(
+            prompt_meta["name"], prompt_meta.get("version"), prompt_meta.get("source"),
+            **metrics,
+        )
+    except Exception as e:
+        logger.warning("call-metrics logging failed: %s", e)
+
+
 # ---------------------------------------------------------------------------
 # Outcome-ledger helpers — log forward-looking AI calls so /accuracy can grade
 # them later. Both helpers are best-effort: any failure is swallowed by the
@@ -869,55 +988,17 @@ async def _movers_generator(raw_holdings: list[dict]):
     # version 1, so wiring this in changes nothing until someone edits the
     # prompt in Langfuse. Version/source captured for the audit trail — see
     # _log_tomorrow_predictions' metadata below.
-    _tomorrow_task_fallback = (
-        "Build a FACTUAL, HOLDING-CENTRIC radar of upcoming events and observable "
-        "state changes for the user's holdings. This is NOT a forecast — every "
-        "sentence should describe something CONCRETE that already exists in CONTEXT: "
-        "a scheduled earnings date, a current RSI reading, a published news catalyst, "
-        "a measured volume surge.\n\n"
-        "OUTPUT TWO LAYERS:\n"
-        "  A) per_holding[] — for EACH holding in CONTEXT.holdings that has at least ONE of: "
-        "     an upcoming_earnings entry, a semantic_news match with similarity ≥ 0.6, OR a "
-        "     stretched technical state (rsi_zone overbought/oversold, vol_zone surge, "
-        "     momentum_state extending_*, or pct_from_20d_high within ±2%). "
-        "     Build a 'watch_item' object with:\n"
-        "       - ticker, sector\n"
-        "       - catalyst_type: 'earnings' | 'news' | 'technical' | 'sector_flow' | 'mixed'\n"
-        "       - event_date: ISO date 'YYYY-MM-DD' when there is a known scheduled event\n"
-        "         (earnings date from upcoming_earnings). null if no dated event.\n"
-        "       - days_to_event: integer days from today to event_date. null if no event.\n"
-        "       - what_to_watch: ONE concrete OBSERVATIONAL sentence — describe the\n"
-        "         current state plus the upcoming event, WITHOUT predicting the outcome.\n"
-        "         Good:  'Earnings 22 May (5 days); RSI 72 — extended; volume 1.4x 20d avg.'\n"
-        "         Bad:   'May pull back from current levels' / 'could lead to a price correction'\n"
-        "         The user reads facts and decides — we do not.\n"
-        "       - direction: 'positive' | 'negative' | 'mixed' | 'neutral' (used by\n"
-        "         backend filters; NOT rendered as a sentiment chip in the UI anymore)\n"
-        "       - importance: 'high' | 'medium' | 'low' (used by backend filters)\n"
-        "       - sources: list of ids from {TICKER}_news[i] / {TICKER}_sem[i] / 'technicals' / 'upcoming_earnings'\n"
-        "  B) macro_themes[] — 1-3 cross-cutting macro themes from global/india headlines that\n"
-        "     are CURRENTLY visible in CONTEXT and touch MULTIPLE holdings (e.g. crude spike,\n"
-        "     Fed decision, FII outflow). Each theme must list the affected_holdings explicitly.\n"
-        "     `mechanism` describes the channel of impact in OBSERVATIONAL language — what's\n"
-        "     happening and which holdings are exposed — not a directional bet.\n\n"
-        "STRICT RULES:\n"
-        "  • At least 60% of output items must be per_holding[], NOT macro_themes[]. The user\n"
-        "    wants 'what's scheduled on MY stocks', not 'general market commentary'.\n"
-        "  • If FII/DII flows in CONTEXT.market.flows are large (|net_inr_cr| > 1000), surface\n"
-        "    that in a macro_theme with the specific number cited.\n"
-        "  • If a holding has NO catalyst, do NOT include it. Empty radar is fine.\n"
-        "  • BANNED forecast phrases (zero tolerance — these are advice, not education):\n"
-        "      'may pull back', 'could lead to', 'expected to', 'should rise', 'poised to',\n"
-        "      'will likely', 'price correction', 'face downward pressure', 'further upside',\n"
-        "      'profit-taking', 'breakout candidate', 'a beat could push to', 'if the print misses'.\n"
-        "    If you find yourself wanting to use one, REWRITE as observation: instead of\n"
-        "    'OLAELEC may face downward pressure if momentum shifts', write 'OLAELEC RSI 70,\n"
-        "    momentum_state consolidating; earnings 30 May (12 days).'\n"
-        "  • Default direction to 'neutral' when in doubt. The frontend no longer shows the\n"
-        "    direction chip so this matters less for UX, but it still controls filtering.\n"
-    )
-    _tomorrow_prompt = prompt_registry.get_prompt("portfolio.tomorrow_watch", _tomorrow_task_fallback)
+    _tomorrow_prompt = prompt_registry.get_prompt("portfolio.tomorrow_watch", TOMORROW_WATCH_FALLBACK_PROMPT)
     tomorrow_task = _tomorrow_prompt.text
+    # Same dict reused for trace stamping (ai_client.generate_grounded_json's
+    # prompt_meta) and for the ai_predictions.metadata.prompt audit trail
+    # (_log_tomorrow_predictions below) — one source of truth per call, not
+    # two copies that could drift.
+    _tomorrow_prompt_meta = {
+        "name": "portfolio.tomorrow_watch",
+        "version": _tomorrow_prompt.version,
+        "source": _tomorrow_prompt.source,
+    }
     tomorrow_schema = """{
   "per_holding": [
     {
@@ -1048,10 +1129,17 @@ async def _movers_generator(raw_holdings: list[dict]):
     # asyncio.gather() already returns a Future — wrapping it in create_task()
     # was a bug (create_task needs a coroutine). The gather Future supports
     # .done() / .result() / .cancel() / asyncio.shield natively.
+    # Filled in place by generate_grounded_json (Phase 3 — prompt_monitor.py's
+    # online comparison needs every call's metrics, including failed ones;
+    # see outcome_ledger.log_call_metrics' docstring for why).
+    _tomorrow_metrics: dict = {}
     llm_task = asyncio.gather(
         _run_today(),
         # 2200 tokens: ≤15 holdings × per_holding watch item + 1-3 macro themes.
-        asyncio.to_thread(ai_client.generate_grounded_json, tomorrow_task, tomorrow_input, tomorrow_schema, 2200),
+        asyncio.to_thread(
+            ai_client.generate_grounded_json, tomorrow_task, tomorrow_input, tomorrow_schema, 2200,
+            0.2, _tomorrow_prompt_meta, _tomorrow_metrics,
+        ),
     )
     heartbeat_msgs = [
         "Cross-checking holdings against today's news + technicals...",
@@ -1109,11 +1197,11 @@ async def _movers_generator(raw_holdings: list[dict]):
     if outcome_ledger.is_available():
         try:
             await asyncio.to_thread(
-                _log_tomorrow_predictions, tomorrow_data, movers_ctx,
-                {"name": "portfolio.tomorrow_watch", "version": _tomorrow_prompt.version, "source": _tomorrow_prompt.source},
+                _log_tomorrow_predictions, tomorrow_data, movers_ctx, _tomorrow_prompt_meta,
             )
         except Exception as e:
             logger.warning("outcome_ledger logging failed: %s", e)
+        await asyncio.to_thread(_log_call_metrics_best_effort, _tomorrow_prompt_meta, _tomorrow_metrics)
 
     # Verifier intentionally NOT run on movers output. It cost 10-15s
     # end-to-end and added little value here: the today_data already comes out
@@ -1776,57 +1864,19 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
         "candidate_news": candidates,
     }
 
-    # See the matching comment above tomorrow_task — same Langfuse-managed
-    # prompt mechanism (path-back leg 3b), this endpoint's news-annotation
-    # prompt instead. This literal string is the cold-start fallback + the
-    # seed text for Langfuse version 1.
-    _news_task_fallback = (
-        "For EACH item in CONTEXT.candidate_news, decide whether it materially affects "
-        "the user's portfolio (CONTEXT.user_holdings + CONTEXT.user_watchlist). For items "
-        "that DO affect the portfolio, output an annotation. SKIP items that don't.\n\n"
-        "STRICT RULES:\n"
-        "1. affected_tickers MUST be a subset of CONTEXT.user_holdings + CONTEXT.user_watchlist. "
-        "Never invent tickers.\n"
-        "2. impact_level: 'high' if it directly hits a held name or a sector with >20% portfolio "
-        "weight, 'medium' if mild sector/macro effect, 'low' if tangential. Skip if no impact.\n"
-        "3. direction: 'positive' (tailwind for affected tickers), 'negative' (headwind), 'mixed' "
-        "(some up some down).\n"
-        "4. reason: ONE concrete sentence (<200 chars). MUST cite both (a) the news mechanism AND "
-        "(b) a relevant technical fact from CONTEXT.user_universe_technicals for at least one "
-        "affected ticker. Example: 'PSB profits beat — HDFCBANK is below SMA50 with momentum "
-        "extending_down, so this could trigger a sector-led mean-reversion bounce.' BANNED phrases: "
-        "'may enhance sentiment', 'could affect', 'positive movement enhances'. Be specific.\n"
-        "5. technical_context: short string (<120 chars) summarizing the technical state of the "
-        "PRIMARY affected ticker (rsi_zone + vol_zone + momentum_state + sma_state). If no "
-        "technicals available for that ticker, set to null. Example: 'RSI overbought; vol 1.8x avg; "
-        "extending_up; above SMA50.'\n"
-        "6. category: 'stock_specific' (single ticker news), 'sector' (sector-wide), 'macro' "
-        "(India macro), 'global' (overseas event with India impact).\n"
-        "7. Order output by impact_level (high → medium → low). Cap at 20 items — "
-        "the top 20 most relevant beat a long tail every time.\n"
-        "8. For users with 20+ holdings, lean toward keeping items even at 'low' impact — "
-        "the user wants breadth of coverage across their portfolio, not just headline events.\n"
-        "9. Some candidates carry `semantic_match_ticker` + `semantic_similarity` (0-1). "
-        "These are surfaced by vector search — they're news that doesn't NAME the ticker but "
-        "is semantically close to its business. Treat these as valid signal: include the named "
-        "ticker in affected_tickers if the transmission mechanism is real. Higher similarity "
-        "(>0.7) = stronger signal.\n"
-        "9b. POLICY ITEMS — if a candidate has scope='policy_pib' or 'policy_rbi' it carries "
-        "`affected_sectors`. These items are government press releases / RBI notifications and "
-        "rarely name specific companies. Map them to the user's holdings by intersecting the "
-        "item's affected_sectors with CONTEXT.user_holdings_by_sector — every matched ticker "
-        "goes into affected_tickers. Set category='macro'. Example: a PIB release with "
-        "affected_sectors=['Banking & Finance'] should set affected_tickers to ALL user "
-        "holdings under Banking. If no sector overlap with the user's portfolio, SKIP the item.\n"
-        "10. DIRECTION DISCIPLINE — DEFAULT TO 'mixed' when in doubt. Only emit 'positive' or "
-        "'negative' when (a) the news is unambiguously directional AND (b) the affected ticker's "
-        "technical state in CONTEXT.user_universe_technicals is consistent with the direction "
-        "(e.g. positive news + momentum extending_up + above SMA50). If technicals contradict the "
-        "news, call it 'mixed'. The system will then drop low-conviction calls — better to under-"
-        "promise than to issue a confident wrong direction. BANNED words: 'will', 'should', 'expected to'."
+    # See the matching comment above TOMORROW_WATCH_FALLBACK_PROMPT — same
+    # Langfuse-managed prompt mechanism (path-back leg 3b), this endpoint's
+    # news-annotation prompt instead.
+    _news_prompt = prompt_registry.get_prompt(
+        "portfolio.news_feed_annotation", NEWS_FEED_ANNOTATION_FALLBACK_PROMPT
     )
-    _news_prompt = prompt_registry.get_prompt("portfolio.news_feed_annotation", _news_task_fallback)
     task = _news_prompt.text
+    # See _tomorrow_prompt_meta above — same reuse-for-trace-and-ledger rationale.
+    _news_prompt_meta = {
+        "name": "portfolio.news_feed_annotation",
+        "version": _news_prompt.version,
+        "source": _news_prompt.source,
+    }
     schema = """{
   "items": [
     {
@@ -1844,12 +1894,16 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
   "data_gaps": [ str, ... ]
 }"""
 
+    # Filled in place by generate_grounded_json — see _tomorrow_metrics above
+    # for why this matters most on the parse-failure path.
+    _news_metrics: dict = {}
     try:
         data = await asyncio.wait_for(
             asyncio.to_thread(
                 # 2400 tokens: 20 items × ~120 tokens each. Reduced from 3500
                 # after capping items at 20 → faster LLM completion.
-                ai_client.generate_grounded_json, task, annotation_ctx, schema, 2400
+                ai_client.generate_grounded_json, task, annotation_ctx, schema, 2400,
+                0.2, _news_prompt_meta, _news_metrics,
             ),
             # 110s on Render's free tier — OpenAI from Render is 2-3× slower
             # than from a laptop and the request retry loop after a premature
@@ -1863,6 +1917,15 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
             "error": "Generation timed out.",
             "generated_at": datetime.now(timezone.utc).isoformat(),
         })
+
+    # Logged regardless of whether `data` parsed — a parse failure IS the
+    # signal prompt_monitor.py's schema_validation_failure_rate needs, and
+    # it's the one case _log_news_feed_predictions below never runs for
+    # (there's nothing to log as a prediction). Not awaited via to_thread on
+    # the timeout path above since a real OS thread can't be cancelled once
+    # started — see _log_call_metrics_best_effort call site comments.
+    if outcome_ledger.is_available():
+        await asyncio.to_thread(_log_call_metrics_best_effort, _news_prompt_meta, _news_metrics)
 
     if not data:
         return with_disclaimer({
@@ -1927,8 +1990,7 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
     # news_feed:{ticker}:{news_id}:{date} so concurrent users don't duplicate.
     if outcome_ledger.is_available():
         background.add_task(
-            _log_news_feed_predictions, cleaned, tech_by_ticker,
-            {"name": "portfolio.news_feed_annotation", "version": _news_prompt.version, "source": _news_prompt.source},
+            _log_news_feed_predictions, cleaned, tech_by_ticker, _news_prompt_meta,
         )
 
     # Filter for the user-facing list AFTER logging (so the ledger sees everything).

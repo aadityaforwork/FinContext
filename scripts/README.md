@@ -109,6 +109,44 @@ Only useful if you're already on Render Starter. Add a cron service:
 
 ---
 
+## `run_prompt_monitor.py` — daily prompt-version monitor
+
+Triggers `POST /api/prompt-monitor/run-daily`. Path-back leg 3b, Phase 3:
+compares each Langfuse-managed prompt's live version against the version
+that was live before it (data-gaps rate, schema-validation-failure rate,
+confidence distribution, tokens/call, p95 latency — all from
+`prompt_call_log`, migration `008_prompt_call_log.sql`) and reverts the
+`production` label back to the previous version if — and only if — both a
+minimum sample size and a minimum effect size are cleared. **Never
+promotes** — see `backend/app/services/prompt_monitor.py`'s module
+docstring. Idempotent — safe to re-run any time.
+
+Same cron setup as `compute_outcomes.py` above (cron-job.org, POST,
+`X-Admin-Token` header) — point it at
+`https://YOUR-BACKEND.onrender.com/api/prompt-monitor/run-daily` on
+whatever daily schedule you like; it doesn't need to line up with the
+outcomes cron's post-market-close timing since it isn't reading price data.
+
+Run it right now (one-off):
+```powershell
+$env:FINCONTEXT_API_BASE   = "https://YOUR-BACKEND.onrender.com"
+$env:FINCONTEXT_ADMIN_TOKEN = "<your admin token>"
+python scripts/run_prompt_monitor.py
+```
+
+Expected output on a healthy (no-op) run:
+```json
+{
+  "portfolio.tomorrow_watch": {"action": "insufficient_sample", "reason": "..."},
+  "portfolio.news_feed_annotation": {"action": "insufficient_sample", "reason": "..."}
+}
+```
+`insufficient_sample` is the expected steady-state answer until a prompt
+has accumulated enough call volume under two different versions — it's not
+an error.
+
+---
+
 ## Troubleshooting
 
 | Symptom | What it means |

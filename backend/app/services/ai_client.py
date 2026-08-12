@@ -15,6 +15,7 @@ expose the same chat.completions.create() shape, so the call sites are identical
 import json
 import logging
 import os
+import time
 
 from dotenv import load_dotenv
 
@@ -151,9 +152,35 @@ def generate_grounded_json(
     schema_description: str,
     max_tokens: int = 2048,
     temperature: float = 0.2,
+    prompt_meta: dict | None = None,
+    metrics_out: dict | None = None,
 ) -> dict:
     """
     Run an analytical JSON task that MUST cite fields from the provided context.
+
+    `prompt_meta` (optional): {"name", "version", "source"} from
+    prompt_registry.get_prompt() — the caller's current Langfuse-managed
+    prompt, if this call site is wired to one (see prompt_registry.py /
+    AGENTS.md path-back leg 3b). When given, it's stamped onto the trace
+    span (`prompt_name`/`prompt_version`/`prompt_source`) so a trace is
+    attributable to the exact prompt version that produced it — the trace-
+    side half of the same audit trail portfolio_intelligence.py already
+    writes into ai_predictions.metadata.prompt for stored predictions.
+    Omitted (None) for every call site not yet wired to a versioned prompt —
+    behavior is byte-identical to before this parameter existed.
+
+    `metrics_out` (optional): a caller-owned dict this function fills in
+    place (never replaces) with this call's deterministic metrics —
+    confidence, data_gaps_count, parse_error, tokens_in, tokens_out,
+    duration_ms — before returning, on BOTH the success path and the
+    parse-failure path (the parse-failure case matters most: it's the only
+    signal prompt_monitor.py's schema_validation_failure_rate has, since a
+    failed call produces no ai_predictions rows at all — see
+    outcome_ledger.log_call_metrics' docstring). The caller decides what to
+    do with it (portfolio_intelligence.py passes it to
+    outcome_ledger.log_call_metrics); this function has no opinion on
+    persistence. Left untouched (None) by every call site not opted in —
+    zero behavior change otherwise.
 
     Returns the parsed JSON dict. On parse failure returns {} (caller handles fallback).
     """
@@ -178,10 +205,15 @@ def generate_grounded_json(
         {"role": "system", "content": GROUNDING_CONTRACT},
         {"role": "user", "content": user_prompt},
     ]
-    with llm_trace.span(
-        "ai_client.generate_grounded_json",
-        provider=_provider, model=MODEL, context_chars=len(context_json),
-    ) as t:
+    span_meta = dict(provider=_provider, model=MODEL, context_chars=len(context_json))
+    if prompt_meta:
+        # Prefixed so these sit next to the other stamped fields in the trace
+        # JSON/Langfuse observation without colliding with `model` above (a
+        # prompt_meta dict never carries that key, but be explicit anyway).
+        span_meta["prompt_name"] = prompt_meta.get("name")
+        span_meta["prompt_version"] = prompt_meta.get("version")
+        span_meta["prompt_source"] = prompt_meta.get("source")
+    with llm_trace.span("ai_client.generate_grounded_json", **span_meta) as t:
         resp = _client.chat.completions.create(
             model=MODEL,
             messages=messages,
@@ -199,11 +231,22 @@ def generate_grounded_json(
         except json.JSONDecodeError:
             logger.error("generate_grounded_json: invalid JSON. first 500 chars=%s", raw[:500])
             t.record(parse_error=True)
+            if metrics_out is not None:
+                metrics_out.update(
+                    confidence=None, data_gaps_count=None, parse_error=True,
+                    tokens_in=t.extra.get("tokens_in"), tokens_out=t.extra.get("tokens_out"),
+                    duration_ms=round((time.monotonic() - t.started_at) * 1000, 1),
+                )
             return {}
-        t.record(
-            confidence=parsed.get("confidence") if isinstance(parsed, dict) else None,
-            data_gaps=len(parsed.get("data_gaps") or []) if isinstance(parsed, dict) else None,
-        )
+        confidence = parsed.get("confidence") if isinstance(parsed, dict) else None
+        data_gaps_count = len(parsed.get("data_gaps") or []) if isinstance(parsed, dict) else None
+        t.record(confidence=confidence, data_gaps=data_gaps_count)
+        if metrics_out is not None:
+            metrics_out.update(
+                confidence=confidence, data_gaps_count=data_gaps_count, parse_error=False,
+                tokens_in=t.extra.get("tokens_in"), tokens_out=t.extra.get("tokens_out"),
+                duration_ms=round((time.monotonic() - t.started_at) * 1000, 1),
+            )
         return parsed
 
 

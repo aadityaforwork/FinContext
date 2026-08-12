@@ -64,6 +64,16 @@ alternative is a compliance or trust bomb — see `STRATEGY.md` §1/§3.
    distinct adders before naming a ticker) and `services/outcome_ledger.py`.
    Never write a query like `.neq("ticker", "__never__")` as a stand-in for
    "all rows" — that pattern has caused a real security bug here before.
+8. **Forward promotion of a prompt version is always a human action.** No
+   code path may relabel a Langfuse prompt's `production` label to a
+   version that wasn't already `production` before — a human decides that,
+   every time, by reading a `prompt_gate.py` report and relabeling in the
+   Langfuse UI. The one sanctioned exception is `prompt_monitor.py`'s daily
+   job, which may *revert* `production` back to the immediately-previous
+   live version on measured degradation — never forward, never to a new or
+   never-before-live version. This is enforced in code (see that module's
+   own docstring + `test_prompt_monitor.py`), not just stated here — don't
+   weaken it while "cleaning up" prompt-versioning code.
 
 ## Architecture map
 
@@ -102,6 +112,23 @@ backend/app/
                         produce judged predictions (portfolio_intelligence.py
                         tomorrow-watch + news-feed annotation) — see its
                         module docstring before adding a third call site.
+    eval_runner.py        Path-back leg 3b, Phase 1: runs a deterministic-
+                        outcome `EvalCase` N times (default 5) and reports a
+                        pass rate, not a boolean — no LLM judges anything.
+    prompt_gate.py        Path-back leg 3b, Phase 2: offline harness that
+                        compares two prompt VERSIONS' text against the same
+                        eval-case set and produces a BLOCK/IMPROVED/
+                        NO_CHANGE verdict for a human to read. Never
+                        promotes, never writes a Langfuse label — see
+                        scripts/prompt_gate.py for the CLI.
+    prompt_monitor.py      Path-back leg 3b, Phase 3: daily job (see
+                        routers/prompt_monitor.py + scripts/run_prompt_
+                        monitor.py) comparing the live prompt version's
+                        deterministic metrics (prompt_call_log) against the
+                        previously-live version. May REVERT `production` to
+                        that previous version on measured degradation —
+                        never promotes, never labels a new/never-live
+                        version. See non-negotiable rule 8 above.
     vector_store.py     pgvector-backed semantic news retrieval
                         (match_news_for_tickers RPC) — surfaces news that
                         affects a ticker even when the headline never names
@@ -114,7 +141,11 @@ backend/app/
                         actual price moves at 1d/5d/20d, powers the
                         /accuracy page. This is the eval loop — see
                         scripts/compute_outcomes.py for the cron job that
-                        keeps it fed.
+                        keeps it fed. Also owns prompt_call_log (call-grained
+                        LLM metrics, feeds prompt_monitor.py) — see that
+                        table's own docstring in migration
+                        008_prompt_call_log.sql for why it's separate from
+                        ai_predictions.
     track_record.py      Path-back leg 1: hierarchical-shrinkage calibration
                         factor from outcome_ledger's judged history, applied
                         to signal_ensemble's conviction. See its module
