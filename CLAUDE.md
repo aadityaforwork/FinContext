@@ -13,9 +13,13 @@ Cross-session facts and prior decisions for this repo are tracked in
 `~/.claude/projects/.../memory/` (see `MEMORY.md` there) — compliance
 posture, the Supabase RLS fix, etc. Check it before re-deciding something
 that's already settled. There's also a `memory/` directory in this repo
-(`project_anti_hallucination.md`, `project_context_engine.md`) with
-project-local design notes — read those before changing grounding or
-context-engine behavior.
+(see its own `MEMORY.md` index) with project-local, checked-in notes —
+design docs (`project_anti_hallucination.md`, `project_context_engine.md`)
+plus area-specific `gotcha_*.md` files (CrewAI deploy, agent runtime,
+config sprawl) that AGENTS.md points into on demand instead of carrying the
+full incident history inline. Read the relevant file(s) before touching the
+area they cover — AGENTS.md's "Known gaps" section says which file goes
+with which area.
 
 ## Where to look first
 

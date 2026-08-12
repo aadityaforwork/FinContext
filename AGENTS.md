@@ -5,6 +5,16 @@ in this repo. `CLAUDE.md` points here. Read this before touching anything
 under `backend/app/agents/`, `backend/app/services/ai_client.py`,
 `backend/app/services/grounding.py`, or any router that calls an LLM.
 
+**Keeping this file from re-bloating:** before adding a new rule or incident
+write-up here, ask two questions. (1) *Can a machine check it?* If yes, it
+belongs in `backend/tests/evals/test_agents_md_invariants.py` (or another
+test/hook/schema) — leave at most a one-line pointer here, not the prose.
+(2) *Is it always true, or only true when touching one area?* Always-true
+stays here; area-specific goes in a `memory/*.md` file (see `memory/MEMORY.md`
+for the index) and gets a one-line pointer here saying when to read it. This
+file should stay something an agent can actually read in full before
+starting, not an append-only incident log.
+
 ## What this is
 
 FinContext — AI-powered contextual analysis for Indian equities (NSE). FastAPI
@@ -36,9 +46,10 @@ alternative is a compliance or trust bomb — see `STRATEGY.md` §1/§3.
    `app.core.compliance` before it reaches the client.
 5. **The `GROUNDING_CONTRACT` text is duplicated on purpose** in
    `services/ai_client.py` and `agents/base.py` — it's the same doctrine
-   restated for two calling conventions (raw prompt vs. CrewAI backstory).
-   If you change the wording, change it in both places and check they still
-   say the same thing.
+   restated for two calling conventions (raw prompt vs. CrewAI backstory), not
+   byte-identical. If you change the wording, change it in both places —
+   `test_agents_md_invariants.py::test_grounding_contract_core_doctrine_present_in_both_copies`
+   fails CI if either copy silently drops a rule the other still has.
 6. **Deterministic numbers are computed by services, not by the model.**
    `signal_ensemble.py`, `risk_metrics.py`, `technicals.py`,
    `portfolio_analytics.py`, `compute_portfolio_health()` compute real
@@ -125,131 +136,32 @@ frontend/src/app/components/
 
 ## Known gaps — don't rediscover these, fix them or work around them deliberately
 
-- **Both live crews were silently failing on every single request before
-  2026-08-11** — not a latency problem, a correctness one that *presented*
-  as latency. Three independent bugs stacked:
-  1. `crewai`/`crewai-tools` weren't pinned in `requirements.txt` at all
-     despite `agents/base.py` hard-requiring them.
-  2. The `[litellm]` extra wasn't installed either — crewai 1.x's `LLM`
-     class only talks to a short list of "native" providers out of the box,
-     and Groq isn't one of them, so without litellm every kickoff raised
-     `ImportError` before even reaching the network.
-  3. Even with both installed, crewai 1.15.14 has an **unfixed upstream bug**
-     ([crewAIInc/crewAI#5886](https://github.com/crewAIInc/crewAI/issues/5886),
-     PR #6355 still open) — every message gets tagged with a
-     `cache_breakpoint` key for Anthropic-style prompt caching, but only the
-     Anthropic-native adapter strips it back out. The LiteLLM-fallback path
-     every non-native provider (Groq included) goes through does not, so the
-     raw key reaches Groq's API and Groq's schema validation rejects the
-     whole request with a 400.
-  Net effect: `narrative_crew.run()` / `risk_brief_crew.run()` would make a
-  real network round-trip to Groq, get a 400, get caught by the router's
-  `except Exception`, and silently fall back to the legacy `ai_client`
-  single-call path — which then made a *second* real LLM call. Every
-  narrative-impact/risk-brief request was paying for a failed crew attempt
-  **plus** the full legacy call, invisibly, on top of whatever the
-  legitimate LLM latency was. This is very likely the real source of "high
-  latency" complaints, more so than anything fixable by tuning the crew
-  itself. Fixed: `requirements.txt` now pins `crewai[litellm]==1.15.14` +
-  `crewai-tools==1.15.14`; `agents/base.py._patch_cache_breakpoint_bug()`
-  applies the workaround from the issue thread (no-ops
-  `crewai.llms.cache.mark_cache_breakpoint`) — remove it once a released
-  crewai version ships the real fix. Verified end-to-end against live Groq:
-  narrative crew ~7s, risk-brief crew ~22s, both correctly grounded. Also
-  found and fixed a stray `(optional override)` string appended to
-  `CREWAI_MODEL` in the local `.env` (not committed — python-dotenv had been
-  reading it as part of the model name, which alone was enough to break
-  every kickoff independent of the three bugs above; worth checking your own
-  `.env` for similar drift if this ever recurs).
-  Bump the crewai pin deliberately going forward (major version jumps have
-  broken `Crew`/`Task`/`LLM` kwargs before, and this specific bug's fix
-  status should be rechecked before any bump) and re-run the eval harness in
-  `backend/tests/evals/` before moving it.
-- **Adding crewai broke the Render build entirely (2026-08-11, same day as
-  the fix above).** Pinning `crewai[litellm]==1.15.14` alongside the
-  pre-existing exact pins `fastapi==0.109.2` / `pydantic==2.6.1` made `pip
-  install -r requirements.txt` fail with `ResolutionImpossible`: crewai
-  requires `pydantic>=2.11.9,<2.13`, and its `mcp` dependency pulls a
-  starlette/uvicorn far newer than fastapi 0.109.2 tolerates. A fresh
-  `pip install` of just the new package (what got tested before the previous
-  fix shipped) doesn't catch this — it silently upgrades pydantic in your
-  existing venv instead of failing, which is exactly how this got missed.
-  **Always validate a new pin with a full, clean `pip install -r
-  requirements.txt` into a fresh venv** (or `uv sync` — see below), not
-  `pip install <new-package>` on top of an existing one. Fixed by loosening
-  `fastapi`/`uvicorn`/`pydantic` to floors (`pydantic>=2.11.9,<2.13` to stay
-  inside crewai's window) and capping `pandas>=2.0.0,<3` (was unpinned and a
-  fresh resolve could land on breaking pandas 3.x — same failure shape,
-  fixed preemptively). Verified: clean install succeeds, `app.main` imports,
-  `app.openapi()` generates, full test suite passes, live narrative-crew
-  call against Groq still works, all under the new versions.
-  **`backend/pyproject.toml` is a second, separate dependency manifest that
-  must be kept in sync by hand** — its own header comment explains why: it
-  exists only so Vercel's Python builder (`uv`) has a `[project]` table, and
-  once present, Vercel's builder reads *pyproject.toml exclusively*, ignoring
-  requirements.txt. It had drifted — still had the exact old pins and never
-  got crewai added — so the Vercel backend deploy (`vercel.json`
-  `experimentalServices.backend`) would have kept running with agents
-  permanently unavailable even after requirements.txt was fixed. Fixed in
-  lockstep with requirements.txt, plus regenerated `backend/uv.lock` (`uv
-  lock`) and verified with `uv sync` into a throwaway `.venv`.
-  **⚠️ That lockstep "fix" then broke Vercel for every deploy after it —
-  see the next entry. The two manifests are intentionally NOT identical
-  now.** If you change one, think about the other, run `uv lock`, and
-  re-verify — but do not blindly mirror them.
-- **crewai must NOT be in `backend/pyproject.toml` (2026-08-11, second
-  incident).** Adding it there to "fix the drift" above pushed the Vercel
-  Python function bundle to **1058 MB against a hard 500 MB platform
-  limit**, so every production deploy from `8ec848f` onward failed with
-  `Total bundle size exceeds the maximum function size` — including the
-  *frontend*, since both services build in one deployment. The last green
-  deploy (`e61f5de`) was green precisely *because* pyproject.toml had no
-  crewai. The weight is crewai core's RAG/memory stack, which these crews
-  never touch: lancedb ~149 MB, googleapiclient ~103 MB, pyarrow ~85 MB,
-  chromadb_rust_bindings ~57 MB, onnxruntime ~40 MB, kubernetes ~40 MB.
-  `excludeFiles` does not help — it filters source files, not installed
-  site-packages. Resolution: crewai stays in `requirements.txt` (Render →
-  full agent surfaces) and stays out of `pyproject.toml` (Vercel → the
-  lazy `try/except` imports in `agents/base.py`/`registry.py`/`crews/`
-  make both crew endpoints fall back to the legacy `ai_client` path, which
-  `analysis.py:/narrative-impact` and `risk.py:/risk-brief` already catch
-  and log). Measured after the fix: **306.8 MB**, verified by `uv sync`
-  into a throwaway env plus a full `app.main` import in that crewai-less
-  env (53 routes, `openapi()` generates, `prewarm()` survives).
-  Also dropped `crewai-tools` from **both** manifests — nothing in this
-  repo ever imported it (`agents/tools.py` uses `crewai.tools`, a core
-  submodule, not the separate `crewai_tools` distribution).
-  If you want real agents on Vercel, it's an architecture change, not a
-  pin: drop `experimentalServices.backend` from `vercel.json` and serve
-  the API from Render only.
-- **Agent-path latency/TTFR fix (2026-08-11).** `agents/base.py`'s LLM
-  singleton used to build lazily on the first real request, so SDK-import +
-  client-construction cost landed inside that user's time-to-first-response.
-  `main.py`'s startup hook now calls `agents_base.prewarm()` so that cost is
-  paid once at boot. `registry._agent()` now also sets `max_iter`/
-  `max_execution_time` (`CREWAI_TIMEOUT_SECONDS`/`CREWAI_MAX_ITER`) on every
-  agent so a stuck call can't blow up p99, and `make_narrative_extractor`
-  opts into `get_llm(fast=True)` (`CREWAI_FAST_MODEL`) since it's a narrow
-  extraction step sitting on the critical path of the narrative crew's
-  2-call sequential chain. Both live router endpoints
-  (`analysis.py:/narrative-impact`, `risk.py:/risk-brief`) still `await` the
-  full crew before returning anything — no partial/streaming response yet.
-  That's the next lever if TTFR still isn't low enough; it needs a frontend
-  contract change (SSE or chunked JSON), not just a backend tweak, so treat
-  it as a separate piece of work.
-- **No runtime LLM provider fallback.** `ai_client.py` picks OpenAI-or-Groq
-  once at import; `agents/base.py` hard-requires `GROQ_API_KEY`. A single
-  provider outage currently takes the whole AI surface down. If you're
-  touching either file, this is the highest-leverage fix available.
-- **Config sprawl.** `ai_client.py`, `agents/base.py`, `vector_store.py`,
-  `outcome_ledger.py`, `social.py`, `telegram.py` each do their own
-  `load_dotenv()` + `os.getenv()`. `core/config.py` doesn't own AI/Supabase
-  vars. Prefer adding new env reads there going forward, even though the
-  existing ones haven't been migrated yet.
-- **No hallucination regression tests existed before `backend/tests/evals/`
-  was added.** `verify_claims()` is a second LLM call asking the model to
-  grade itself — a soft check. The eval harness in `backend/tests/evals/`
-  is the hard check; extend it before shipping new grounded flows.
+This section used to carry the full incident write-up for each gap inline,
+which is exactly the kind of thing that made this file balloon — narrative
+history that's only relevant when you're actually touching the affected
+area, not every time an agent starts. Full detail now lives in `memory/`,
+read on demand; the invariants that came out of the crewai saga are also
+hard-tested (see `backend/tests/evals/test_agents_md_invariants.py`), so
+regressing them fails CI instead of relying on someone having read this file.
+
+- **CrewAI is wired but fragile across two deploy targets** (Render vs.
+  Vercel have different constraints — dependency resolution, a hard 500MB
+  function bundle, provider quirks). Read `memory/gotcha_crewai_deploy.md`
+  before touching `requirements.txt`, `pyproject.toml`, `agents/base.py`,
+  `agents/registry.py`, or `vercel.json`'s `experimentalServices.backend`.
+  The short version: crewai lives in `requirements.txt` only, never in
+  `pyproject.toml` — `test_agents_md_invariants.py` enforces this.
+- **Agent latency (TTFR/prewarm) + no runtime LLM provider fallback.**
+  Read `memory/gotcha_agent_runtime.md` before touching `agents/base.py` or
+  `ai_client.py`.
+- **Config sprawl** — several files each do their own `load_dotenv()` +
+  `os.getenv()` instead of going through `core/config.py`. Read
+  `memory/gotcha_config_env_sprawl.md` before adding a new env-var read
+  anywhere in `backend/app`.
+- **Hallucination regression coverage**: `verify_claims()` is a second LLM
+  call asking the model to grade itself — a soft check. The eval harness in
+  `backend/tests/evals/` is the hard check; extend it before shipping a new
+  grounded flow, don't rely on the soft check alone.
 
 ## Dev commands
 
@@ -275,7 +187,9 @@ outcome ledger, telegram, or social/peer-pulse.
 
 - Cache keys: `llm_cache.make_key(prefix, *parts)` — deterministic, colon-joined.
 - New CrewAI agent: add a `make_<role>()` factory to `agents/registry.py`,
-  never instantiate `Agent(...)` inline in a crew file. If the agent is a
+  never instantiate `Agent(...)` inline in a crew file —
+  `test_agents_md_invariants.py::test_agent_only_instantiated_in_registry`
+  enforces this. If the agent is a
   narrow extraction/classification step (no synthesis, no final verdict)
   and sits on the critical path of a sequential crew, consider
   `_agent(fast=True, ...)` for TTFR — see `agents/base.py` CREWAI_FAST_MODEL.
