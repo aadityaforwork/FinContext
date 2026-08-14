@@ -5,7 +5,7 @@ scripts/prompt_gate.py — Phase 2: offline prompt-version comparison gate.
 Fetches two labeled Langfuse versions of one of the two judged prompts
 (portfolio.tomorrow_watch / portfolio.news_feed_annotation) and runs
 app.services.prompt_gate.compare() against the fixed eval case set in
-tests/evals/prompt_gate_cases.py, printing a human-readable report.
+app/services/prompt_eval_cases.py, printing a human-readable report.
 
 NEVER PROMOTES anything — see prompt_gate.py's module docstring. Read the
 report, then (if you want to promote) do that by hand in the Langfuse UI.
@@ -43,7 +43,7 @@ from app.routers.portfolio_intelligence import (  # noqa: E402
     NEWS_FEED_ANNOTATION_FALLBACK_PROMPT,
     TOMORROW_WATCH_FALLBACK_PROMPT,
 )
-from tests.evals.prompt_gate_cases import (  # noqa: E402
+from app.services.prompt_eval_cases import (  # noqa: E402
     NEWS_FEED_ANNOTATION_CASES,
     TOMORROW_WATCH_CASES,
 )

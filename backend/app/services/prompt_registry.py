@@ -24,7 +24,7 @@ Mechanism:
     (or a future eval run, see 3c) edits the prompt in the Langfuse UI or via
     create_text_prompt, which creates a new version — labeled `candidate` by
     default, NOT auto-promoted. Promotion to production = relabeling that
-    version via update_prompt_labels. Rollback = relabel the previous
+    version via update_prompt. Rollback = relabel the previous
     version back to `production`. No code deploy either way.
   - get_prompt() always asks for the `production` label — code never reads
     `candidate` directly. A `candidate` version only becomes live once a

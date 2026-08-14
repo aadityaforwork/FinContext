@@ -16,13 +16,34 @@ posture, same "ledger of AI-call telemetry" theme as everything else here —
 see log_call_metrics()'s docstring for why it can't just be derived from
 ai_predictions.
 
+Also owns `accuracy_alert_log` (migration 009_accuracy_alert_log.sql) — one
+row per alert accuracy_monitor.py actually fires (not every evaluation, just
+the ones that crossed the threshold), used both as an audit trail and to
+drive that module's alert cooldown. Same reasoning for living here as
+prompt_call_log above.
+
+Also owns `miss_fixtures` (migration 010_miss_fixtures.sql) — permanent eval
+fixtures converted from real market-graded misses, feeding miss_fixtures.py
+(path-back leg 3d). `prompt_call_log.context_snapshot` (same migration) is
+the private stash of exact-context-at-call-time these fixtures are built
+from — see log_call_metrics' docstring for why that snapshot can never live
+on ai_predictions instead (that table is publicly readable).
+
 Public functions:
     log_predictions(items)              — bulk-upsert prediction rows
     compute_pending_outcomes()          — fill in outcomes for due predictions
     accuracy_summary(...)               — aggregate hit-rate breakdowns
     recent_results(limit)               — recent (prediction, outcome) rows
-    log_call_metrics(...)               — log one LLM call's deterministic metrics
+    scored_rows(horizon, days)          — raw graded rows, feeds track_record.py + accuracy_monitor.py
+    log_call_metrics(...)               — log one LLM call's deterministic metrics (+ optional context snapshot)
     call_metrics_rows(prompt_name, days) — raw metric rows for a prompt
+    call_context(call_id)               — {prompt_name, context_snapshot} for one logged call
+    log_accuracy_alert(...)             — log one fired accuracy-drift alert
+    last_accuracy_alert(source, days)   — most recent alert for a source, for cooldown
+    recent_accuracy_alerts(days)        — every alert in a window, feeds prompt_drafter.py
+    graded_misses(horizon, days)        — market-graded misses, feeds miss_fixtures.py
+    log_miss_fixture(...)               — convert one miss into a permanent eval fixture
+    miss_fixture_rows(prompt_name, limit) — stored miss fixtures for a prompt
 
 Every call is best-effort. Failures are logged + swallowed so the rest of the
 app keeps working with no ledger (just no accuracy page).
@@ -438,11 +459,14 @@ def accuracy_summary(
 
 
 def scored_rows(horizon: str = "1d", days: int = 90) -> list[dict]:
-    """Raw {source, catalyst_type, hit} rows for the given horizon — feeds
-    track_record.py's calibration segments. Deliberately minimal (no
-    aggregation, no impact_level) so it stays cheap to call from a cache
-    refresh. Excludes ungraded/pending rows (hit IS NULL) via the view join.
-    Best-effort — returns [] on any failure, never raises.
+    """Raw {source, catalyst_type, hit, prediction_date} rows for the given
+    horizon — feeds track_record.py's calibration segments and
+    accuracy_monitor.py's drift check. Deliberately minimal (no aggregation,
+    no impact_level) so it stays cheap to call from a cache refresh.
+    `prediction_date` is only consumed by accuracy_monitor.py (track_record.py
+    ignores the extra key) — kept in one function rather than two nearly-
+    identical queries. Excludes ungraded/pending rows (hit IS NULL) via the
+    view join. Best-effort — returns [] on any failure, never raises.
     """
     if not _client:
         return []
@@ -451,7 +475,7 @@ def scored_rows(horizon: str = "1d", days: int = 90) -> list[dict]:
     try:
         rows = (
             _client.table("prediction_results")
-            .select("source,catalyst_type,hit")
+            .select("source,catalyst_type,hit,prediction_date")
             .eq("horizon", horizon)
             .gte("prediction_date", from_date)
             .not_.is_("hit", "null")
@@ -499,6 +523,8 @@ def log_call_metrics(
     prompt_version: int | None,
     prompt_source: str,
     *,
+    call_id: str | None = None,
+    context_snapshot: dict | None = None,
     confidence: str | None = None,
     data_gaps_count: int | None = None,
     parse_error: bool = False,
@@ -519,23 +545,39 @@ def log_call_metrics(
     the schema_validation_failure_rate prompt_monitor.py needs. This table
     makes every attempted call visible, success or failure.
 
+    `call_id` (optional): if given, used as this row's primary key instead
+    of letting Postgres generate one — lets the caller (portfolio_
+    intelligence.py) stamp the SAME id into ai_predictions.metadata.call_id
+    as a join key, without a second round trip to read the generated id
+    back. `context_snapshot` (optional): the exact CONTEXT dict passed to
+    generate_grounded_json for this call — feeds miss_fixtures.py's
+    replay-and-check fixtures. Deliberately stored HERE, never in
+    ai_predictions.metadata: ai_predictions has a public "anon select" RLS
+    policy (migration 004 — the Accuracy page is intentionally public), so
+    a real user's portfolio/watchlist context must never land there. See
+    AGENTS.md rule 9.
+
     Never raises; returns False (no-op) if the ledger is unavailable or the
     insert fails — same posture as log_predictions().
     """
     if not _client:
         return False
     try:
-        _client.table("prompt_call_log").insert({
+        row = {
             "prompt_name": prompt_name,
             "prompt_version": prompt_version,
             "prompt_source": prompt_source,
+            "context_snapshot": context_snapshot,
             "confidence": confidence,
             "data_gaps_count": data_gaps_count,
             "parse_error": bool(parse_error),
             "tokens_in": tokens_in,
             "tokens_out": tokens_out,
             "duration_ms": duration_ms,
-        }).execute()
+        }
+        if call_id:
+            row["id"] = call_id
+        _client.table("prompt_call_log").insert(row).execute()
         return True
     except Exception as e:
         logger.warning("log_call_metrics failed: %s", e)
@@ -568,4 +610,269 @@ def call_metrics_rows(prompt_name: str, days: int = 30) -> list[dict]:
         return rows
     except Exception as e:
         logger.warning("call_metrics_rows fetch failed: %s", e)
+        return []
+
+
+def call_context(call_id: str) -> dict | None:
+    """The stored {prompt_name, context_snapshot} for one prompt_call_log
+    row by id — `call_id` is the same value the router stamped into both
+    that row and ai_predictions.metadata.call_id (see log_call_metrics'
+    docstring). Feeds miss_fixtures.py: given a graded miss, this is how it
+    finds the exact context that was live when the call was made. None if
+    not found, `call_id` is falsy, or the client is unavailable.
+    Best-effort — never raises.
+    """
+    if not _client or not call_id:
+        return None
+    try:
+        rows = (
+            _client.table("prompt_call_log")
+            .select("prompt_name,context_snapshot")
+            .eq("id", call_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        return rows[0] if rows else None
+    except Exception as e:
+        logger.warning("call_context fetch failed: %s", e)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Accuracy alert log — path-back leg 3c (accuracy_monitor.py). Backed by
+# `accuracy_alert_log` (migration 009_accuracy_alert_log.sql).
+# ---------------------------------------------------------------------------
+def log_accuracy_alert(
+    source: str,
+    prompt_name: str | None,
+    *,
+    recent_n: int,
+    recent_hit_rate_pct: float,
+    baseline_n: int,
+    baseline_hit_rate_pct: float,
+    drop_pp: float,
+    message: str,
+) -> bool:
+    """Best-effort log of one fired accuracy-drift alert. Only called when
+    accuracy_monitor.py actually crosses its threshold — not every daily
+    evaluation, which would make this table as noisy as the logs. Two jobs:
+    a permanent audit trail, and the read side (last_accuracy_alert) is what
+    lets accuracy_monitor.py avoid re-alerting on the same still-degraded
+    segment every single day. Never raises; returns False on failure or if
+    the client is unavailable — same posture as log_call_metrics().
+    """
+    if not _client:
+        return False
+    try:
+        _client.table("accuracy_alert_log").insert({
+            "source": source,
+            "prompt_name": prompt_name,
+            "recent_n": recent_n,
+            "recent_hit_rate_pct": recent_hit_rate_pct,
+            "baseline_n": baseline_n,
+            "baseline_hit_rate_pct": baseline_hit_rate_pct,
+            "drop_pp": drop_pp,
+            "message": message,
+        }).execute()
+        return True
+    except Exception as e:
+        logger.warning("log_accuracy_alert failed: %s", e)
+        return False
+
+
+def recent_accuracy_alerts(days: int = 14) -> list[dict]:
+    """Every `accuracy_alert_log` row in the last `days` days, newest first
+    — feeds prompt_drafter.py's run_pending_drafts(), which turns a fired
+    accuracy-drift alert into a draft-and-test attempt at fixing the
+    underlying prompt (path-back leg 3e — the piece last_accuracy_alert
+    above doesn't cover, since that one only ever returns the SINGLE most
+    recent row for one known source, not "every alert in this window" across
+    all sources). Best-effort — returns [] on any failure, never raises.
+    """
+    if not _client:
+        return []
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        rows = (
+            _client.table("accuracy_alert_log")
+            .select("source,prompt_name,message,drop_pp,created_at")
+            .gte("created_at", cutoff)
+            .order("created_at", desc=True)
+            .limit(200)
+            .execute()
+            .data
+            or []
+        )
+        return rows
+    except Exception as e:
+        logger.warning("recent_accuracy_alerts fetch failed: %s", e)
+        return []
+
+
+def last_accuracy_alert(source: str, days: int = 7) -> dict | None:
+    """Most recent `accuracy_alert_log` row for `source` within the last
+    `days` days, or None if there isn't one (including when the client is
+    unavailable or the query fails — best-effort, never raises). Feeds
+    accuracy_monitor.py's alert cooldown so a segment that's still degraded
+    tomorrow doesn't fire a second Telegram message tomorrow too.
+    """
+    if not _client:
+        return None
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        rows = (
+            _client.table("accuracy_alert_log")
+            .select("created_at")
+            .eq("source", source)
+            .gte("created_at", cutoff)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        return rows[0] if rows else None
+    except Exception as e:
+        logger.warning("last_accuracy_alert fetch failed: %s", e)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Miss fixtures — path-back leg 3d (miss_fixtures.py). Backed by
+# `miss_fixtures` (migration 010_miss_fixtures.sql).
+# ---------------------------------------------------------------------------
+def graded_misses(horizon: str = "1d", days: int = 30) -> list[dict]:
+    """Every prediction graded as a miss (hit=False, direction != 'mixed')
+    at `horizon` in the last `days` days — one dict per miss:
+    {prediction_id, ticker, prediction_date, source, catalyst_type,
+    direction, reason, return_pct, metadata}. `metadata` carries `call_id`
+    when the router set one at log time (see portfolio_intelligence.py's
+    _tomorrow_call_id / _news_call_id) — miss_fixtures.py uses it via
+    call_context() to find the exact context that was live for that call.
+    Queries ai_predictions/prediction_outcomes directly (not the public
+    prediction_results view) purely because the view doesn't select
+    `metadata` — nothing here is more sensitive than what the view already
+    exposes. Best-effort — returns [] on any failure, never raises.
+    """
+    if not _client:
+        return []
+    today = datetime.now(timezone.utc).date()
+    from_date = (today - timedelta(days=days)).isoformat()
+    try:
+        outcome_rows = (
+            _client.table("prediction_outcomes")
+            .select("prediction_id,return_pct")
+            .eq("horizon", horizon)
+            .eq("hit", False)
+            .not_.is_("return_pct", "null")
+            .limit(2000)
+            .execute()
+            .data
+            or []
+        )
+        if not outcome_rows:
+            return []
+        return_by_id = {r["prediction_id"]: r["return_pct"] for r in outcome_rows}
+        pred_ids = list(return_by_id.keys())
+
+        preds: list[dict] = []
+        for i in range(0, len(pred_ids), 500):
+            chunk = pred_ids[i:i + 500]
+            r = (
+                _client.table("ai_predictions")
+                .select("id,ticker,prediction_date,source,catalyst_type,direction,reason,metadata")
+                .in_("id", chunk)
+                .neq("direction", "mixed")
+                .gte("prediction_date", from_date)
+                .execute()
+            )
+            preds.extend(r.data or [])
+
+        return [
+            {
+                "prediction_id": p["id"], "ticker": p["ticker"],
+                "prediction_date": p["prediction_date"], "source": p["source"],
+                "catalyst_type": p.get("catalyst_type"), "direction": p["direction"],
+                "reason": p.get("reason"), "metadata": p.get("metadata") or {},
+                "return_pct": return_by_id.get(p["id"]),
+            }
+            for p in preds
+        ]
+    except Exception as e:
+        logger.warning("graded_misses fetch failed: %s", e)
+        return []
+
+
+def log_miss_fixture(
+    prediction_id: str,
+    prompt_name: str,
+    *,
+    ticker: str,
+    prediction_date: str,
+    catalyst_type: str | None,
+    original_direction: str,
+    expected_direction: str,
+    reason: str | None,
+    return_pct: float,
+    context_snapshot: dict,
+) -> bool:
+    """Best-effort write of one converted miss fixture. `prediction_id` is
+    UNIQUE on the table — a second attempt to convert the same prediction
+    (the daily job re-scanning its lookback window) hits a duplicate-key
+    error, which is treated as an EXPECTED no-op (already converted), not a
+    failure, and logged at debug rather than warning. Never raises; returns
+    False on any failure including the expected duplicate case.
+    """
+    if not _client:
+        return False
+    try:
+        _client.table("miss_fixtures").insert({
+            "prediction_id": prediction_id,
+            "prompt_name": prompt_name,
+            "ticker": ticker,
+            "prediction_date": prediction_date,
+            "catalyst_type": catalyst_type,
+            "original_direction": original_direction,
+            "expected_direction": expected_direction,
+            "reason": reason,
+            "return_pct": return_pct,
+            "context_snapshot": context_snapshot,
+        }).execute()
+        return True
+    except Exception as e:
+        if "duplicate key" in str(e).lower() or "23505" in str(e):
+            logger.debug("log_miss_fixture: prediction %s already has a fixture", prediction_id)
+        else:
+            logger.warning("log_miss_fixture failed: %s", e)
+        return False
+
+
+def miss_fixture_rows(prompt_name: str, limit: int = 200) -> list[dict]:
+    """Stored miss fixtures for `prompt_name`, newest first — feeds
+    miss_fixtures.load_miss_fixture_cases(), which turns each row into an
+    eval_runner.EvalCase. Best-effort — returns [] on any failure, never
+    raises.
+    """
+    if not _client:
+        return []
+    try:
+        rows = (
+            _client.table("miss_fixtures")
+            .select(
+                "id,prediction_id,ticker,prediction_date,catalyst_type,"
+                "original_direction,expected_direction,reason,return_pct,"
+                "context_snapshot,created_at"
+            )
+            .eq("prompt_name", prompt_name)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+            .data
+            or []
+        )
+        return rows
+    except Exception as e:
+        logger.warning("miss_fixture_rows fetch failed: %s", e)
         return []

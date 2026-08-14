@@ -74,6 +74,16 @@ alternative is a compliance or trust bomb — see `STRATEGY.md` §1/§3.
    never-before-live version. This is enforced in code (see that module's
    own docstring + `test_prompt_monitor.py`), not just stated here — don't
    weaken it while "cleaning up" prompt-versioning code.
+9. **A logged LLM call's raw CONTEXT snapshot never goes in `ai_predictions`.**
+   `ai_predictions` has a public `"anon select"` RLS policy (migration 004
+   — the Accuracy page is intentionally public), so anything written to its
+   `metadata` column is world-readable via the anon key. A real user's
+   portfolio/watchlist/headlines context must only ever land in
+   `prompt_call_log.context_snapshot` (RLS enabled, no policies,
+   service-role only) — `ai_predictions.metadata` may only carry a `call_id`
+   (a meaningless-without-the-private-table join key) to reach it. See
+   `outcome_ledger.log_call_metrics`'s docstring and `miss_fixtures.py`'s
+   module docstring before adding anything new to either table's metadata.
 
 ## Architecture map
 
@@ -121,6 +131,13 @@ backend/app/
                         NO_CHANGE verdict for a human to read. Never
                         promotes, never writes a Langfuse label — see
                         scripts/prompt_gate.py for the CLI.
+    prompt_eval_cases.py   The hand-written EvalCase set prompt_gate.py
+                        compares against — lives here (not backend/tests/)
+                        because prompt_drafter.py (a production service)
+                        needs it at runtime too, not just from a test/CLI
+                        context. backend/tests/evals/prompt_gate_cases.py is
+                        now a thin re-export kept only for that file's own
+                        existing importers.
     prompt_monitor.py      Path-back leg 3b, Phase 3: daily job (see
                         routers/prompt_monitor.py + scripts/run_prompt_
                         monitor.py) comparing the live prompt version's
@@ -145,12 +162,68 @@ backend/app/
                         LLM metrics, feeds prompt_monitor.py) — see that
                         table's own docstring in migration
                         008_prompt_call_log.sql for why it's separate from
-                        ai_predictions.
+                        ai_predictions — and accuracy_alert_log (fired-alert
+                        audit trail + cooldown state for accuracy_monitor.py,
+                        migration 009_accuracy_alert_log.sql) and
+                        miss_fixtures (converted eval fixtures from real
+                        misses, migration 010_miss_fixtures.sql — see
+                        non-negotiable rule 9 for why this table and
+                        prompt_call_log are the only two allowed to hold a
+                        raw context snapshot).
     track_record.py      Path-back leg 1: hierarchical-shrinkage calibration
                         factor from outcome_ledger's judged history, applied
                         to signal_ensemble's conviction. See its module
                         docstring for the shrinkage rationale and the
                         deliberate 1d-horizon trade-off.
+    accuracy_monitor.py   Path-back leg 3c: daily job (see routers/accuracy_
+                        monitor.py + scripts/run_accuracy_monitor.py)
+                        comparing a segment's recent market-graded hit rate
+                        against its own trailing baseline and pushing a
+                        Telegram alert on a real drop. ALERT-ONLY — never
+                        reverts/promotes/writes a prompt, unlike prompt_
+                        monitor.py; see its module docstring for why that
+                        stays a human call.
+    miss_fixtures.py       Path-back leg 3d: daily job (see routers/miss_
+                        fixtures.py + scripts/run_miss_fixtures.py) turning
+                        each market-graded miss into a permanent eval
+                        fixture — replay the exact context, check the
+                        candidate prompt against the market's own graded
+                        direction. Fixtures are DATA (a private Supabase
+                        table), never a checked-in file — see non-negotiable
+                        rule 9 above for why the context they carry can
+                        never touch a public table.
+    prompt_drafter.py       Path-back leg 3e: the draft/test/(maybe)publish
+                        agent — the piece that closes the loop accuracy_
+                        monitor.py (3c) opens. Two daily jobs (routers/
+                        prompt_drafter.py + scripts/run_prompt_drafter.py):
+                        run-pending drafts a revised prompt for each newly
+                        flagged segment, tests it against prompt_eval_
+                        cases.py + miss_fixtures.py's cases via prompt_
+                        gate.py, and — only if the gate says IMPROVED —
+                        creates a Langfuse `candidate` version and PAUSES;
+                        check-approvals resumes a paused run once a human
+                        has actually moved that version's label to
+                        `production` in the Langfuse UI. NEVER writes
+                        `production` itself — same non-negotiable as
+                        prompt_monitor.py (rule 8). Built on LangGraph
+                        (backend-only dependency, requirements.txt — same
+                        Vercel-bundle-size reasoning as crewai below) purely
+                        for its `interrupt()`/checkpoint primitive: this is
+                        the first path-back component that has to survive a
+                        real wait for a person, spanning separate requests
+                        days apart — see its own module docstring for how
+                        that's persisted (a Supabase-backed snapshot of
+                        LangGraph's own in-memory checkpointer, not a
+                        Postgres/Sqlite checkpoint backend).
+    prompt_draft_store.py   Supabase read/write helpers for prompt_draft_
+                        runs + prompt_draft_checkpoints (migration 011_
+                        prompt_drafter.sql) — kept separate from outcome_
+                        ledger.py on purpose; see this module's own
+                        docstring for why.
+    telegram_bot.py       Telegram Bot API wrapper. send_message (per-user)
+                        + send_admin_alert (ops alerts to TELEGRAM_ADMIN_
+                        CHAT_ID — accuracy_monitor.py and friends) +
+                        format_daily_brief.
   agents/               CrewAI multi-agent framework. PARTIALLY migrated —
                         only 2 of ~7 AI flows run through here:
     registry.py           make_<role>() factories — Agent definitions.

@@ -29,6 +29,13 @@ TELEGRAM_API = (
     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}" if TELEGRAM_BOT_TOKEN else None
 )
 
+# The operator's own chat — distinct from the per-user `telegram_links` table.
+# Used for system/ops alerts (accuracy drift, "candidate ready for review")
+# that a human needs to actually see promptly, not per-user daily briefs.
+# Find your chat id by DMing the bot once, then GET
+# https://api.telegram.org/bot<token>/getUpdates — see scripts/README.md.
+TELEGRAM_ADMIN_CHAT_ID = os.getenv("TELEGRAM_ADMIN_CHAT_ID")
+
 # Telegram hard caps a message at 4096 chars. We aim for ~1500 — past that the
 # brief stops being scannable on a phone.
 MAX_MESSAGE_CHARS = 3500
@@ -67,6 +74,24 @@ def send_message(
     except Exception as e:
         logger.warning("Telegram sendMessage failed for %s: %s", chat_id, e)
         return {"ok": False, "error": str(e)}
+
+
+def send_admin_alert(text: str, *, parse_mode: str = "HTML") -> bool:
+    """Best-effort push of one system/ops alert to the operator's own chat
+    (TELEGRAM_ADMIN_CHAT_ID) — used by accuracy_monitor.py and friends for
+    things a human needs to actually see promptly (a segment's accuracy just
+    dropped, a candidate prompt is ready for review), as opposed to a line in
+    Sentry Logs someone has to remember to go check.
+
+    No-ops (returns False) if either the bot token or TELEGRAM_ADMIN_CHAT_ID
+    is unset, or if the send itself fails — send_message() already never
+    raises, so this never does either.
+    """
+    if not TELEGRAM_ADMIN_CHAT_ID:
+        logger.info("send_admin_alert: TELEGRAM_ADMIN_CHAT_ID not set; skipping")
+        return False
+    result = send_message(TELEGRAM_ADMIN_CHAT_ID, text, parse_mode=parse_mode)
+    return bool(result.get("ok"))
 
 
 def set_webhook(url: str, secret_token: str | None = None, timeout: float = 10.0) -> dict:

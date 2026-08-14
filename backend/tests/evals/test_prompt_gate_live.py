@@ -2,7 +2,8 @@
 Live prompt-gate eval — actually calls the configured LLM provider N times
 per case against the current `production`-labeled (or fallback) text of
 portfolio.tomorrow_watch / portfolio.news_feed_annotation and reports a
-pass rate, using eval_runner.py + tests/evals/prompt_gate_cases.py.
+pass rate, using eval_runner.py + app/services/prompt_eval_cases.py
+(re-exported here for back-compat via tests/evals/prompt_gate_cases.py).
 
 Same skip/cost posture as test_grounding_live.py: skipped automatically with
 no provider configured, real (small) API spend when one is. Run explicitly
@@ -26,7 +27,7 @@ from app.routers.portfolio_intelligence import (
     TOMORROW_WATCH_FALLBACK_PROMPT,
 )
 from app.services import ai_client, eval_runner
-from tests.evals.prompt_gate_cases import ALL_CASES
+from app.services.prompt_eval_cases import ALL_CASES
 
 pytestmark = pytest.mark.skipif(
     not ai_client.is_available(),

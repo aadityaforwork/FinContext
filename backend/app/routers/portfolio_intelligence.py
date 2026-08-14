@@ -11,6 +11,7 @@ import gc
 import json
 import logging
 import os
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
@@ -38,7 +39,7 @@ router = APIRouter(prefix="/api/intelligence", tags=["portfolio-intelligence"])
 # Prompt fallback text — path-back leg 3b (prompt_registry.py). Module-level
 # (not inline in the endpoint) so the SAME literal string that's the
 # cold-start fallback and the Langfuse-seed text for version 1 is also the
-# single source of truth for tests/evals/prompt_gate_cases.py + the Phase 1
+# single source of truth for app/services/prompt_eval_cases.py + the Phase 1
 # live pass-rate eval (test_prompt_gate_live.py) — no second copy to drift
 # out of sync with what's actually shipped.
 # ---------------------------------------------------------------------------
@@ -650,17 +651,29 @@ def _apply_ensemble_to_news_items(
     return hidden
 
 
-def _log_call_metrics_best_effort(prompt_meta: dict | None, metrics: dict) -> None:
+def _log_call_metrics_best_effort(
+    prompt_meta: dict | None, metrics: dict, *,
+    call_id: str | None = None, context_snapshot: dict | None = None,
+) -> None:
     """Best-effort log of one generate_grounded_json call's deterministic
     metrics into outcome_ledger's prompt_call_log (path-back leg 3b, Phase 3
     — feeds prompt_monitor.py). No-op if `prompt_meta` is None (call site
     not wired to a versioned prompt) or the ledger is unavailable. Swallows
-    its own failures — this must never be why a request fails."""
+    its own failures — this must never be why a request fails.
+
+    `call_id`/`context_snapshot` (optional, leg 3d): stamps the exact
+    CONTEXT this call used into prompt_call_log, keyed by `call_id` — the
+    same id the caller also writes into ai_predictions.metadata.call_id
+    (see _log_tomorrow_predictions/_log_news_feed_predictions) so
+    miss_fixtures.py can join a later-graded miss back to what the model
+    actually saw. NEVER pass context_snapshot to log_predictions/
+    ai_predictions instead — see AGENTS.md rule 9."""
     if not prompt_meta or not outcome_ledger.is_available():
         return
     try:
         outcome_ledger.log_call_metrics(
             prompt_meta["name"], prompt_meta.get("version"), prompt_meta.get("source"),
+            call_id=call_id, context_snapshot=context_snapshot,
             **metrics,
         )
     except Exception as e:
@@ -684,7 +697,9 @@ def _log_call_metrics_best_effort(prompt_meta: dict | None, metrics: dict) -> No
 # by test_track_record_logging.py — don't "clean this up" without reading
 # that test first.
 # ---------------------------------------------------------------------------
-def _log_tomorrow_predictions(tomorrow_data: dict, movers_ctx: dict, prompt_meta: dict | None = None) -> None:
+def _log_tomorrow_predictions(
+    tomorrow_data: dict, movers_ctx: dict, prompt_meta: dict | None = None, call_id: str | None = None,
+) -> None:
     """Persist Tomorrow per_holding watch items as forward-looking predictions.
 
     Each row is dedup-keyed `tomorrow:{ticker}:{date}` so re-running the Context
@@ -697,6 +712,15 @@ def _log_tomorrow_predictions(tomorrow_data: dict, movers_ctx: dict, prompt_meta
     written into metadata.prompt alongside the calibration snapshot so a past
     prediction's text is traceable to the exact Langfuse prompt version that
     generated it (path-back leg 3b — see prompt_registry.py docstring).
+
+    `call_id` (optional, path-back leg 3d): the same id passed to
+    _log_call_metrics_best_effort for this call — a join key only, no
+    context. NEVER add a raw context/holdings blob to this function's
+    `metadata` dict: ai_predictions has a public "anon select" RLS policy
+    (migration 004), so anything written here is world-readable. The actual
+    context snapshot lives in prompt_call_log (private), reachable from a
+    row here only via this call_id — see outcome_ledger.log_call_metrics'
+    docstring and AGENTS.md rule 9.
     """
     items = (tomorrow_data or {}).get("per_holding") or []
     if not items:
@@ -746,6 +770,7 @@ def _log_tomorrow_predictions(tomorrow_data: dict, movers_ctx: dict, prompt_meta
                     "global_n": w.get("calibration_global_n"),
                 },
                 "prompt": prompt_meta,
+                "call_id": call_id,
             },
         })
     if rows:
@@ -753,7 +778,7 @@ def _log_tomorrow_predictions(tomorrow_data: dict, movers_ctx: dict, prompt_meta
 
 
 def _log_news_feed_predictions(
-    cleaned_items: list[dict], tech_by_ticker: dict, prompt_meta: dict | None = None,
+    cleaned_items: list[dict], tech_by_ticker: dict, prompt_meta: dict | None = None, call_id: str | None = None,
 ) -> None:
     """Persist annotated News Impact items as predictions — one row per
     (item × affected_ticker). Skip 'mixed' direction (not scoreable). Dedup key
@@ -762,8 +787,9 @@ def _log_news_feed_predictions(
     ones hidden from the user for low conviction — see the TRAP-STATE
     INVARIANT note above _log_tomorrow_predictions.
 
-    `prompt_meta`: see _log_tomorrow_predictions' docstring — same audit-trail
-    purpose, this endpoint's news-feed annotation prompt instead.
+    `prompt_meta`, `call_id`: see _log_tomorrow_predictions' docstring —
+    same audit-trail purpose and same "call_id is a join key only, never a
+    context blob" rule, this endpoint's news-feed annotation prompt instead.
     """
     if not cleaned_items:
         return
@@ -807,6 +833,7 @@ def _log_news_feed_predictions(
                         "global_n": it.get("calibration_global_n"),
                     },
                     "prompt": prompt_meta,
+                    "call_id": call_id,
                 },
             })
     if rows:
@@ -999,6 +1026,11 @@ async def _movers_generator(raw_holdings: list[dict]):
         "version": _tomorrow_prompt.version,
         "source": _tomorrow_prompt.source,
     }
+    # Path-back leg 3d: join key between this call's stored context
+    # (prompt_call_log.context_snapshot — private) and the prediction rows
+    # it produces (ai_predictions.metadata.call_id — public). See
+    # _log_call_metrics_best_effort's docstring.
+    _tomorrow_call_id = str(uuid.uuid4())
     tomorrow_schema = """{
   "per_holding": [
     {
@@ -1197,11 +1229,14 @@ async def _movers_generator(raw_holdings: list[dict]):
     if outcome_ledger.is_available():
         try:
             await asyncio.to_thread(
-                _log_tomorrow_predictions, tomorrow_data, movers_ctx, _tomorrow_prompt_meta,
+                _log_tomorrow_predictions, tomorrow_data, movers_ctx, _tomorrow_prompt_meta, _tomorrow_call_id,
             )
         except Exception as e:
             logger.warning("outcome_ledger logging failed: %s", e)
-        await asyncio.to_thread(_log_call_metrics_best_effort, _tomorrow_prompt_meta, _tomorrow_metrics)
+        await asyncio.to_thread(
+            _log_call_metrics_best_effort, _tomorrow_prompt_meta, _tomorrow_metrics,
+            call_id=_tomorrow_call_id, context_snapshot=tomorrow_input,
+        )
 
     # Verifier intentionally NOT run on movers output. It cost 10-15s
     # end-to-end and added little value here: the today_data already comes out
@@ -1877,6 +1912,8 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
         "version": _news_prompt.version,
         "source": _news_prompt.source,
     }
+    # See _tomorrow_call_id above — same join-key purpose, leg 3d.
+    _news_call_id = str(uuid.uuid4())
     schema = """{
   "items": [
     {
@@ -1925,7 +1962,10 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
     # the timeout path above since a real OS thread can't be cancelled once
     # started — see _log_call_metrics_best_effort call site comments.
     if outcome_ledger.is_available():
-        await asyncio.to_thread(_log_call_metrics_best_effort, _news_prompt_meta, _news_metrics)
+        await asyncio.to_thread(
+            _log_call_metrics_best_effort, _news_prompt_meta, _news_metrics,
+            call_id=_news_call_id, context_snapshot=annotation_ctx,
+        )
 
     if not data:
         return with_disclaimer({
@@ -1990,7 +2030,7 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
     # news_feed:{ticker}:{news_id}:{date} so concurrent users don't duplicate.
     if outcome_ledger.is_available():
         background.add_task(
-            _log_news_feed_predictions, cleaned, tech_by_ticker, _news_prompt_meta,
+            _log_news_feed_predictions, cleaned, tech_by_ticker, _news_prompt_meta, _news_call_id,
         )
 
     # Filter for the user-facing list AFTER logging (so the ledger sees everything).

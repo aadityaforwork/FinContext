@@ -113,13 +113,13 @@ def test_empty_active_case_set_is_a_noop_not_a_crash(monkeypatch):
 def test_gate_never_writes_or_promotes_anything():
     """Static guard: this module must never actually CALL the Langfuse
     label-writing API -- the docstring is allowed to mention
-    `update_prompt_labels`/`create_prompt` by name (explaining why the
-    module doesn't call them), but no `.update_prompt_labels(` /
+    `update_prompt`/`create_prompt` by name (explaining why the
+    module doesn't call them), but no `.update_prompt(` /
     `.create_prompt(` call site may exist in the source."""
     import inspect
 
     src = inspect.getsource(prompt_gate)
-    assert ".update_prompt_labels(" not in src
+    assert ".update_prompt(" not in src
     assert ".create_prompt(" not in src
 
 

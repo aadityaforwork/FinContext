@@ -2,10 +2,10 @@
 Prompt-version gate — Phase 2 (offline, blocks promotion)
 ============================================================
 Compares two versions' TEXT of the same Langfuse-managed prompt against the
-same eval case set (see eval_runner.py / tests/evals/prompt_gate_cases.py)
+same eval case set (see eval_runner.py / app/services/prompt_eval_cases.py)
 and produces a per-case pass-rate table plus a verdict for a human to read.
 
-NEVER PROMOTES. This module never calls Langfuse's `update_prompt_labels`
+NEVER PROMOTES. This module never calls Langfuse's `update_prompt`
 and never writes a `production` label — see AGENTS.md ("forward promotion
 is a human action") and prompt_registry.py's module docstring. Its only
 output is a report; what a human does with that report (relabel a

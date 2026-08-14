@@ -32,7 +32,7 @@ class _FakeLangfuseClient:
         self._raises = raises
         self.calls: list[dict] = []
 
-    def update_prompt_labels(self, **kwargs):
+    def update_prompt(self, **kwargs):
         self.calls.append(kwargs)
         if self._raises is not None:
             raise self._raises
@@ -122,7 +122,7 @@ def test_revert_write_failure_is_reported_not_raised(monkeypatch):
 
 
 def test_revert_never_promotes_a_never_before_seen_version(monkeypatch):
-    """Static guarantee check: the version passed to update_prompt_labels is
+    """Static guarantee check: the version passed to update_prompt is
     always `previous_version`, which by construction was already observed
     live in the call log -- never the current (degraded) version, never
     anything else."""

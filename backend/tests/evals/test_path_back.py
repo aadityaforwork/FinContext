@@ -56,7 +56,11 @@ def test_log_tomorrow_predictions_logs_hidden_items_too(monkeypatch):
     # path-back leg 3b: caller passes the Langfuse prompt's audit-trail info;
     # every logged row must carry it, hidden or not, same as calibration.
     prompt_meta = {"name": "portfolio.tomorrow_watch", "version": 4, "source": "langfuse"}
-    pi._log_tomorrow_predictions(tomorrow_data, movers_ctx, prompt_meta)
+    # path-back leg 3d: call_id is a join key to the PRIVATE context snapshot
+    # in prompt_call_log -- it must land in metadata (harmless, meaningless
+    # without that private table), never the context itself.
+    call_id = "11111111-1111-1111-1111-111111111111"
+    pi._log_tomorrow_predictions(tomorrow_data, movers_ctx, prompt_meta, call_id)
 
     assert "rows" in captured, "log_predictions was never called"
     tickers_logged = {r["ticker"] for r in captured["rows"]}
@@ -68,10 +72,13 @@ def test_log_tomorrow_predictions_logs_hidden_items_too(monkeypatch):
     assert cal["pair_n"] == 12
     assert cal["hit_rate_pct"] == 20.0
     assert infy_row["metadata"]["prompt"] == prompt_meta
+    assert infy_row["metadata"]["call_id"] == call_id
+    assert "context_snapshot" not in infy_row["metadata"]  # AGENTS.md rule 9
     # TCS (not hidden) gets the same prompt_meta -- it's a property of the
     # batch/call, not of whether an individual item was hidden.
     tcs_row = next(r for r in captured["rows"] if r["ticker"] == "TCS")
     assert tcs_row["metadata"]["prompt"] == prompt_meta
+    assert tcs_row["metadata"]["call_id"] == call_id
 
 
 def test_log_tomorrow_predictions_prompt_meta_defaults_to_none(monkeypatch):
@@ -121,7 +128,8 @@ def test_log_news_feed_predictions_logs_hidden_items_too(monkeypatch):
     ]
 
     prompt_meta = {"name": "portfolio.news_feed_annotation", "version": 2, "source": "langfuse"}
-    pi._log_news_feed_predictions(cleaned, {}, prompt_meta)
+    call_id = "22222222-2222-2222-2222-222222222222"
+    pi._log_news_feed_predictions(cleaned, {}, prompt_meta, call_id)
 
     assert "rows" in captured, "log_predictions was never called"
     tickers_logged = {r["ticker"] for r in captured["rows"]}
@@ -132,3 +140,5 @@ def test_log_news_feed_predictions_logs_hidden_items_too(monkeypatch):
     assert cal["factor"] == 0.75
     assert cal["pair_n"] == 15
     assert infy_row["metadata"]["prompt"] == prompt_meta
+    assert infy_row["metadata"]["call_id"] == call_id
+    assert "context_snapshot" not in infy_row["metadata"]  # AGENTS.md rule 9

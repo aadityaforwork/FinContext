@@ -56,6 +56,22 @@ sentry-sdk[fastapi]>=2.0.0
 # LLM observability (traces every ai_client.py / CrewAI call — see services/llm_trace.py)
 langfuse>=3.0.0
 
+# LangGraph (backend/app/services/prompt_drafter.py) — path-back leg 3e's
+# draft/test/approve agent. Requires a REAL checkpointer/interrupt() to pause
+# mid-run for a human (moving a Langfuse label), unlike CrewAI's stateless
+# kickoff-and-done crews elsewhere in this repo — see that module's own
+# "WHY LANGGRAPH" docstring section. Lives in requirements.txt ONLY, same
+# rule as crewai below (NOT pyproject.toml — Vercel's 500MB function bundle
+# limit; this whole path-back cron family runs on Render, never on a
+# request path Vercel serves). Only langgraph itself is pinned as a floor;
+# no langgraph-checkpoint-postgres/-sqlite extra is needed — the
+# checkpointer used here is LangGraph's own in-memory reference
+# implementation, wrapped with a thin snapshot/restore layer that persists
+# to Supabase (see prompt_drafter.py's "PERSISTENCE" docstring section for
+# why neither of those extras' assumptions — a direct Postgres DSN, a
+# durable local disk file — fit this repo's existing infra).
+langgraph>=1.0.0
+
 # CrewAI multi-agent framework (backend/app/agents/) — narrative + risk-brief
 # crews. Pinned (not >=) because crew/task/LLM behavior across major versions
 # is not backward compatible; bump deliberately and re-test agents/ + the

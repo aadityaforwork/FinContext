@@ -12,8 +12,8 @@ NON-NEGOTIABLE, enforced by this module's own design (not just convention):
   - This module NEVER promotes. It never calls `create_prompt` and never
     sets a label to a version that wasn't already, at some point, the live
     `production` version. The only Langfuse write it can ever make is
-    `update_prompt_labels(name, version=<previous live version>,
-    label="production")` — a revert, not a promotion. Forward promotion
+    `update_prompt(name, version=<previous live version>,
+    new_labels=["production"])` — a revert, not a promotion. Forward promotion
     (relabeling a `candidate` to `production`) is a human action, always —
     see AGENTS.md.
   - Every component degrades to a no-op. Metric rows come from
@@ -212,12 +212,21 @@ def _revert_production_label(prompt_name: str, previous_version: int) -> tuple[b
     `production` back at a version that was already live before. Never
     raises — returns (False, reason) on any failure (no client configured,
     SDK error, etc.) so evaluate() can report an honest outcome even when
-    the write itself couldn't happen."""
+    the write itself couldn't happen.
+
+    NOTE: the SDK method is `update_prompt` (not `update_prompt_labels` —
+    that name doesn't exist on langfuse-python's `Langfuse` client; found
+    2026-08-13 while wiring prompt_drafter.py's identical write path. The
+    original code here called the non-existent method, so every real revert
+    attempt was silently swallowed by this function's own try/except and
+    reported as "revert_failed" — never actually wrote the label. Confirmed
+    against the installed langfuse 4.14.3 client via
+    `inspect.signature(Langfuse.update_prompt)`."""
     client = langfuse_client.get_client()
     if client is None:
         return False, "Langfuse not configured — cannot write the revert label"
     try:
-        client.update_prompt_labels(name=prompt_name, version=previous_version, new_labels=["production"])
+        client.update_prompt(name=prompt_name, version=previous_version, new_labels=["production"])
         return True, "reverted"
     except Exception as e:
         logger.exception("prompt_monitor: revert label write failed for %s v%s", prompt_name, previous_version)
