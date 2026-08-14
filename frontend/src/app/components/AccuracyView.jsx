@@ -301,7 +301,11 @@ function Banner({ color, children }) {
 }
 
 function Headline({ accuracy }) {
-  const { hit_rate_pct, scored, hits, avg_return_pct, horizon, days } = accuracy;
+  const { hit_rate_pct, scored, hits, avg_return_pct, horizon, days, hit_threshold_pct } = accuracy;
+  // Comes from the backend per horizon (it scales with sqrt(trading days) —
+  // see outcome_ledger.hit_threshold_pct). Never hardcode it here: the number
+  // shown has to be the one the rows were actually graded against.
+  const thr = hit_threshold_pct != null ? `${hit_threshold_pct}%` : "the horizon's threshold";
   const goodCutoff = 60;
   const okCutoff = 50;
   const color = hit_rate_pct >= goodCutoff ? "#10b981"
@@ -354,8 +358,10 @@ function Headline({ accuracy }) {
         marginTop: "14px", fontSize: "11px", color: "var(--color-text-muted)",
         fontStyle: "italic", lineHeight: 1.5,
       }}>
-        A "hit" means the predicted direction matched AND the actual move was ≥ 0.5%.
-        Neutral calls hit if the move stayed under 0.5%. "Mixed" calls aren't scored.
+        A "hit" means the predicted direction matched AND the actual move was ≥ {thr}.
+        Neutral calls hit if the move stayed under {thr}. "Mixed" calls aren't scored.
+        That bar scales with the horizon (√time), so a 20-day call isn't graded
+        against the same band as a next-day one.
       </p>
     </div>
   );

@@ -26,13 +26,25 @@ _client = None
 
 
 def get_client():
-    """Lazy, cached Langfuse client, or None if not configured/unavailable."""
+    """Lazy, cached Langfuse client, or None if not configured/unavailable.
+
+    The "not configured" case is deliberately NOT cached. `_checked` is only
+    set once we've actually attempted an init with a key present, because
+    this module reads os.environ directly and never calls load_dotenv()
+    itself — so whether the key is visible depends on whether something else
+    has loaded .env yet. Caching a negative result here would mean a single
+    call that lands before dotenv (an import-time call in a script, a test
+    that imports before its fixture runs) permanently disables Langfuse for
+    the whole process, silently and unrecoverably. Platform-provided env
+    (Vercel/Render) is present from process start so this only bites local
+    and script contexts — but it bites them invisibly, which is worse.
+    """
     global _checked, _client
     if _checked:
         return _client
-    _checked = True
     if not os.environ.get("LANGFUSE_PUBLIC_KEY"):
-        return None
+        return None  # not cached — see docstring
+    _checked = True
     try:
         from langfuse import get_client as _lf_get_client
         _client = _lf_get_client()

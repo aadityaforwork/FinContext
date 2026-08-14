@@ -32,16 +32,19 @@ def _miss(
 # ---------------------------------------------------------------------------
 # _expected_direction -- deterministic, no LLM
 # ---------------------------------------------------------------------------
+# `horizon` is a required arg — the threshold scales with it. These cases use
+# the module's own HORIZON so they keep testing the path production takes;
+# the cross-horizon behavior itself is covered in test_hit_threshold.py.
 def test_expected_direction_positive():
-    assert miss_fixtures._expected_direction(2.0) == "positive"
+    assert miss_fixtures._expected_direction(2.0, miss_fixtures.HORIZON) == "positive"
 
 
 def test_expected_direction_negative():
-    assert miss_fixtures._expected_direction(-2.0) == "negative"
+    assert miss_fixtures._expected_direction(-2.0, miss_fixtures.HORIZON) == "negative"
 
 
 def test_expected_direction_neutral_inside_threshold():
-    assert miss_fixtures._expected_direction(0.1) == "neutral"
+    assert miss_fixtures._expected_direction(0.1, miss_fixtures.HORIZON) == "neutral"
 
 
 # ---------------------------------------------------------------------------

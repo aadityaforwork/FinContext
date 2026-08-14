@@ -150,14 +150,19 @@ _UNREPRESENTABLE_DIRECTIONS = {
 }
 
 
-def _expected_direction(return_pct: float) -> str:
+def _expected_direction(return_pct: float, horizon: str) -> str:
     """What direction WOULD have been a hit, given the graded return —
     the inverse of outcome_ledger._hit_rule's threshold logic, reusing its
-    HIT_THRESHOLD_PCT constant so the two never drift apart. Deterministic;
-    no LLM involved, same non-negotiable as eval_runner.py."""
-    if return_pct >= outcome_ledger.HIT_THRESHOLD_PCT:
+    hit_threshold_pct() so the two never drift apart. Deterministic;
+    no LLM involved, same non-negotiable as eval_runner.py.
+
+    `horizon` is required for the same reason it is on _hit_rule: the
+    threshold scales with it, so a fixture built at the wrong horizon would
+    teach the drafter the wrong right-answer."""
+    threshold = outcome_ledger.hit_threshold_pct(horizon)
+    if return_pct >= threshold:
         return "positive"
-    if return_pct <= -outcome_ledger.HIT_THRESHOLD_PCT:
+    if return_pct <= -threshold:
         return "negative"
     return "neutral"
 
@@ -208,7 +213,7 @@ def convert_pending_misses(days: int = LOOKBACK_DAYS, limit: int = MAX_PER_RUN) 
             if return_pct is None:
                 summary["skipped_no_context"] += 1  # shouldn't happen for a graded row; same bucket
                 continue
-            expected = _expected_direction(return_pct)
+            expected = _expected_direction(return_pct, HORIZON)
 
             if expected in _UNREPRESENTABLE_DIRECTIONS.get(prompt_name, set()):
                 summary["skipped_unrepresentable_direction"] += 1

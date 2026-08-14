@@ -52,6 +52,7 @@ app keeps working with no ledger (just no accuracy page).
 from __future__ import annotations
 
 import logging
+import math
 import os
 from datetime import date, datetime, timezone, timedelta
 from typing import Any, Iterable
@@ -84,8 +85,40 @@ if SUPABASE_URL and SUPABASE_SERVICE_KEY:
 HORIZONS_TD = {"1d": 1, "5d": 5, "20d": 20}
 
 # Absolute % move required for a directional call (positive/negative) to count
-# as a hit. Anything smaller is "drift" and credited to the neutral bucket.
-HIT_THRESHOLD_PCT = 0.5
+# as a hit AT THE 1-TRADING-DAY HORIZON. Anything smaller is "drift" and
+# credited to the neutral bucket. Longer horizons scale this up — always go
+# through hit_threshold_pct() rather than reading this constant directly.
+HIT_THRESHOLD_PCT_1D = 0.5
+
+
+def hit_threshold_pct(horizon: str) -> float:
+    """The |move| a directional call must clear at `horizon` to count as a hit.
+
+    Scales as sqrt(trading days) — the standard random-walk volatility
+    scaling, since price dispersion grows with the square root of elapsed
+    time. So: 0.5% at 1d, ~1.12% at 5d, ~2.24% at 20d.
+
+    WHY THIS ISN'T ONE FLAT CONSTANT (fixed 2026-08-14): it used to be, and a
+    horizon-blind band quietly broke the score in BOTH directions at once —
+      - 'neutral' calls became near-impossible to hit as the horizon grew (a
+        stock staying inside +/-0.5% for 20 trading days basically never
+        happens). Measured on real graded history: 32.9% hit rate at 1d vs
+        11% at 5d.
+      - 'positive'/'negative' calls became progressively FREE, because
+        clearing a fixed 0.5% over 20 days takes no skill. Measured: 38.8% at
+        1d vs 52.1% at 5d.
+    The two distortions partly cancel in the headline number, which is why
+    the 1d/5d/20d hit rates all looked flatly similar (35/37/37%) while the
+    per-direction breakdown underneath was pulling apart. Any comparison
+    across horizons was meaningless before this.
+
+    Derived from HORIZONS_TD so adding a horizon there can't leave a stale
+    threshold behind. Unknown horizon falls back to the 1d base rather than
+    raising — grading a row on the strict end is safer than crashing the
+    daily job.
+    """
+    td = HORIZONS_TD.get(horizon, 1)
+    return round(HIT_THRESHOLD_PCT_1D * math.sqrt(td), 4)
 
 
 def is_available() -> bool:
@@ -184,21 +217,27 @@ def _fetch_price_history(ticker: str, start_date: date) -> dict[str, float]:
         return {}
 
 
-def _hit_rule(direction: str, return_pct: float) -> bool:
+def _hit_rule(direction: str, return_pct: float, horizon: str) -> bool:
     """Determine whether a prediction was a hit.
 
     - 'positive' / 'negative' — directional: sign must match and |return| ≥ threshold
     - 'neutral'              — |return| must be < threshold
     - 'mixed'                — never counts as hit OR miss (treated as N/A by callers)
+
+    `horizon` is REQUIRED and has no default on purpose: the threshold scales
+    with it (see hit_threshold_pct), and the bug this signature replaced was
+    precisely that grading ignored the horizon. A default here would let a new
+    call site silently reintroduce that.
     """
     if return_pct is None:
         return False
+    threshold = hit_threshold_pct(horizon)
     if direction == "positive":
-        return return_pct >= HIT_THRESHOLD_PCT
+        return return_pct >= threshold
     if direction == "negative":
-        return return_pct <= -HIT_THRESHOLD_PCT
+        return return_pct <= -threshold
     if direction == "neutral":
-        return abs(return_pct) < HIT_THRESHOLD_PCT
+        return abs(return_pct) < threshold
     return False  # mixed / unknown
 
 
@@ -310,7 +349,7 @@ def compute_pending_outcomes() -> dict:
                     continue
                 target_price = history[sorted_dates[target_idx]]
                 ret = round((target_price - float(anchor_price)) / float(anchor_price) * 100, 2)
-                hit = _hit_rule(p["direction"], ret) if p["direction"] != "mixed" else None
+                hit = _hit_rule(p["direction"], ret, h_label) if p["direction"] != "mixed" else None
                 to_insert.append({
                     "prediction_id": p["id"],
                     "horizon": h_label,
@@ -443,6 +482,10 @@ def accuracy_summary(
     return {
         "horizon": horizon,
         "days": days,
+        # The threshold this horizon's rows were graded against. Returned so
+        # the Accuracy page states the real number instead of hardcoding one —
+        # it varies per horizon now (see hit_threshold_pct).
+        "hit_threshold_pct": hit_threshold_pct(horizon),
         "filters": {"source": source, "impact_level": impact_level},
         **summary,
         "by_impact":    _group(rows, "impact_level"),
