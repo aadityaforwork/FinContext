@@ -10,6 +10,19 @@ from datetime import datetime, timezone
 from app.db import Base
 
 
+def _utcnow_naive() -> datetime:
+    """Current UTC time as a NAIVE datetime, for plain `DateTime` columns.
+
+    Mirrors services/llm_cache._utcnow_naive() — see that docstring for the full
+    rationale. The short version: these are `DateTime` columns without
+    `timezone=True`, so an AWARE default is not just cosmetically inconsistent,
+    it is rejected outright by asyncpg ("invalid input for query argument ...
+    can't subtract offset-naive and offset-aware datetimes") and the whole
+    INSERT fails.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -85,7 +98,14 @@ class LLMCache(Base):
     cache_key = Column(String(255), primary_key=True)
     payload = Column(JSON, nullable=False)
     scope = Column(String(64), nullable=False, default="global")  # 'global' or 'user:<id>'
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    # NAIVE UTC, not aware — see _utcnow_naive() above. services/llm_cache.py
+    # standardised `expires_at` on naive UTC (2026-08-11) but this default was
+    # missed, so every set() built an INSERT mixing a naive expires_at with an
+    # aware created_at. asyncpg rejected the whole statement, llm_cache.set()
+    # swallowed it as a warning, and the persistent cross-worker tier silently
+    # never wrote a single row from then until 2026-08-15 — meaning every cold
+    # worker re-ran the full news+LLM fan-out it was supposed to skip.
+    created_at = Column(DateTime, default=_utcnow_naive, nullable=False)
     expires_at = Column(DateTime, nullable=False, index=True)
 
     __table_args__ = (

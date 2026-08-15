@@ -117,5 +117,84 @@ def test_agent_only_instantiated_in_registry():
     )
 
 
+# ---------------------------------------------------------------------------
+# Render OOM, 2026-08-15. The service runs on Starter (512 MB hard cap) and
+# `import app.main` alone already costs ~200 MB. prompt_drafter.py imported
+# langgraph at module scope; main.py imports every router at boot; so ~22 MB
+# of LangGraph (53 MB standalone, less in-app because it shares pydantic/httpx
+# with the rest) sat resident in the long-lived web process for the sake of an
+# admin-token cron endpoint that runs once a day. Combined with a dashboard
+# fan-out that needs ~240 MB, the instance pinned at 99.99% of the cap.
+#
+# Same rule crewai already follows (agents/base.py prewarm()): heavy,
+# cron-only, or agent-only dependencies are imported INSIDE the function that
+# needs them, never at module scope on a path main.py reaches at boot.
+#
+# Subprocess, not `"langgraph" in sys.modules`, because test_prompt_drafter.py
+# legitimately exercises the graph and would poison sys.modules for an
+# in-process check depending on test ordering.
+# ---------------------------------------------------------------------------
+def test_heavy_optional_deps_not_imported_by_app_main():
+    import subprocess
+    import sys
+
+    # The marker keeps parsing unambiguous: app.main logs to stderr, but a bare
+    # empty stdout line is indistinguishable from "probe produced nothing".
+    probe = (
+        "import sys; import app.main; "
+        "print('LEAKED:' + ','.join(sorted(m for m in ('langgraph', 'crewai', 'litellm') "
+        "if m in sys.modules)))"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=str(BACKEND_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert proc.returncode == 0, f"probe failed to import app.main:\n{proc.stderr[-2000:]}"
+    marker = [ln for ln in proc.stdout.splitlines() if ln.startswith("LEAKED:")]
+    assert marker, f"probe produced no result line; stdout was:\n{proc.stdout[-2000:]}"
+    leaked = [m for m in marker[-1].removeprefix("LEAKED:").split(",") if m]
+    assert not leaked, (
+        f"{leaked} imported at app.main boot — each of these is tens of MB resident in the "
+        "web process on a 512 MB Render Starter box, for code paths a served request never "
+        "touches. Move the import inside the function that needs it."
+    )
+
+
+# ---------------------------------------------------------------------------
+# llm_cache silent-write-failure, 2026-08-15. LLMCache's datetime columns are
+# plain `DateTime` (no timezone=True). asyncpg REJECTS an aware datetime bound
+# to such a column ("invalid input for query argument ... can't subtract
+# offset-naive and offset-aware datetimes") and fails the whole INSERT, which
+# llm_cache.set() swallows as a warning. The 2026-08-11 fix standardised
+# `expires_at` on naive UTC but missed `created_at`'s column default, so the
+# persistent cross-worker cache tier wrote nothing at all for four days and
+# every cold worker re-ran the full news+LLM fan-out it existed to skip.
+#
+# SQLite (local/CI default) happily accepts aware datetimes, so no amount of
+# local testing reproduces this — hence a direct assertion on the defaults.
+# ---------------------------------------------------------------------------
+def test_llm_cache_datetime_defaults_are_naive():
+    from app.db.models import LLMCache
+
+    for col_name in ("created_at", "expires_at"):
+        col = LLMCache.__table__.c[col_name]
+        assert col.type.timezone is False, (
+            f"LLMCache.{col_name} became timezone-aware at the column level — if that's "
+            "deliberate, migrate the existing table and drop the naive-UTC convention in "
+            "services/llm_cache.py at the same time."
+        )
+        if col.default is None:
+            continue
+        produced = col.default.arg({})
+        assert produced.tzinfo is None, (
+            f"LLMCache.{col_name}'s default produced an AWARE datetime ({produced!r}). "
+            "asyncpg rejects that against a naive DateTime column and silently kills every "
+            "llm_cache write — use models._utcnow_naive."
+        )
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

@@ -82,11 +82,24 @@ import logging
 import pickle
 import uuid
 from datetime import datetime, timezone
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
-from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.graph import END, START, StateGraph
-from langgraph.types import Command, interrupt
+# LangGraph is imported LAZILY, inside the functions that actually need it —
+# never at module scope. Measured 2026-08-15: `import langgraph` costs ~53 MB
+# resident. This module is reached only through the admin-token-gated
+# /api/prompt-drafter/* cron endpoints (once a day), but app/main.py imports
+# every router at boot, so a module-scope import here loaded that 53 MB into
+# the long-lived web process forever — ~10% of Render Starter's 512 MB cap,
+# spent on a code path a served request never touches. That is the same rule
+# crewai already follows everywhere in app/agents/ (see agents/base.py's
+# prewarm() docstring for the OOM incident that established it).
+#
+# `from __future__ import annotations` above makes every annotation a string,
+# so the TYPE_CHECKING block below is enough for type checkers and costs
+# nothing at runtime.
+if TYPE_CHECKING:
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import StateGraph
 
 from app.services import (
     accuracy_monitor,
@@ -386,6 +399,8 @@ def _await_approval(state: DraftState) -> dict:
     # since the node completes normally the moment interrupt() returns a
     # resume value. All notification side effects below live after that
     # line for exactly this reason.
+    from langgraph.types import interrupt
+
     result = interrupt({
         "prompt_name": state["prompt_name"],
         "candidate_version": state.get("candidate_version"),
@@ -402,6 +417,8 @@ def _await_approval(state: DraftState) -> dict:
 
 
 def _build_graph() -> StateGraph:
+    from langgraph.graph import END, START, StateGraph
+
     g = StateGraph(DraftState)
     g.add_node("load_baseline", _load_baseline)
     g.add_node("draft_candidate", _draft_candidate)
@@ -461,6 +478,8 @@ def start_draft_run(prompt_name: str, trigger_reason: str) -> dict:
     """
     thread_id = str(uuid.uuid4())
     try:
+        from langgraph.checkpoint.memory import InMemorySaver
+
         saver = InMemorySaver()
         graph = _build_graph().compile(checkpointer=saver)
         config = {"configurable": {"thread_id": thread_id}}
@@ -502,6 +521,9 @@ def resume_approved_run(thread_id: str, resume_value: dict) -> dict:
         return {"thread_id": thread_id, "status": "error", "reason": "no checkpoint found"}
 
     try:
+        from langgraph.checkpoint.memory import InMemorySaver
+        from langgraph.types import Command
+
         saver = InMemorySaver()
         _load_thread_state(saver, thread_id, blob)
         graph = _build_graph().compile(checkpointer=saver)
