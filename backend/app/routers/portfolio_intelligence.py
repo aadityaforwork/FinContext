@@ -167,6 +167,23 @@ SSE_FRESH_TTL_S = 5 * 60     # 5 min
 SSE_MAX_TTL_S   = 15 * 60    # 15 min
 
 
+# Per-cache-key locks serializing the MISS path below. Without this, N
+# concurrent requests landing on a cold cache (double page load, an SSE
+# reconnect, two browser tabs, a client retry-on-timeout) each independently
+# drive a full `inner_generator` — for /movers and /portfolio that means N
+# simultaneous full-ticker-universe news/LLM fan-outs. Two such concurrent
+# passes are the confirmed trigger for the 2026-08-15 outage: cascading SSL
+# EOF errors across unrelated outbound hosts (Google News AND Supabase) plus
+# a cancelled gather in _run_today, consistent with the Render instance
+# running out of memory/sockets under 2x the intended concurrent load.
+# Deliberately never evicted — see response_cache._store's _MAX_ENTRIES for
+# the pattern this would mirror if key cardinality ever became a real
+# concern; in practice it's bounded by daily distinct (holdings/watchlist)
+# hashes, same order of magnitude as response_cache's own cap, and Render's
+# free tier recycles the process periodically anyway.
+_sse_inflight: dict[str, asyncio.Lock] = {}
+
+
 async def _cached_sse_stream(
     inner_generator,
     cache_key: str,
@@ -184,7 +201,10 @@ async def _cached_sse_stream(
                              background task to drain `inner_generator` and
                              refresh the cache for the next visitor.
       • Cache miss / force → drive `inner_generator`, capture the final
-                             `result` event, write to cache.
+                             `result` event, write to cache. Serialized per
+                             `cache_key` via `_sse_inflight` — a concurrent
+                             second miss on the same key waits for the first
+                             (with a heartbeat) instead of recomputing.
 
     `inner_generator` MUST be a freshly-created async generator (not yet
     iterated). On a cache hit we either discard it or hand it off to a
@@ -234,23 +254,68 @@ async def _cached_sse_stream(
                     response_cache._refreshing.discard(cache_key)
             return
 
-    # MISS / force_refresh — stream the inner generator, capturing the result
-    # event for the cache so the next request is fast.
-    last_result = None
-    async for chunk in inner_generator:
-        if isinstance(chunk, str) and chunk.startswith("data: "):
-            body = chunk[6:].strip()
-            if body and body != "[DONE]":
-                try:
-                    p = json.loads(body)
-                    if isinstance(p, dict) and p.get("type") == "result":
-                        last_result = p
-                except (ValueError, json.JSONDecodeError):
-                    pass
-        yield chunk
+    # MISS / force_refresh. force_refresh deliberately bypasses the lock below
+    # (and doesn't take one) — it's a deliberate user action ("refresh now"),
+    # not a cache-cold pile-up, and forcing it to queue behind an unrelated
+    # in-flight miss would make "refresh" feel broken.
+    if force_refresh:
+        last_result = None
+        async for chunk in inner_generator:
+            if isinstance(chunk, str) and chunk.startswith("data: "):
+                body = chunk[6:].strip()
+                if body and body != "[DONE]":
+                    try:
+                        p = json.loads(body)
+                        if isinstance(p, dict) and p.get("type") == "result":
+                            last_result = p
+                    except (ValueError, json.JSONDecodeError):
+                        pass
+            yield chunk
+        if last_result is not None:
+            response_cache.put(cache_key, last_result)
+        return
 
-    if last_result is not None:
-        response_cache.put(cache_key, last_result)
+    lock = _sse_inflight.setdefault(cache_key, asyncio.Lock())
+    if lock.locked():
+        # Someone else is already computing this exact key — wait for them
+        # instead of kicking off a second full fan-out. Heartbeat every 5s so
+        # Render's proxy doesn't treat this stream as idle and close it (same
+        # concern as the heartbeat in _movers_generator/_intelligence_generator).
+        yield f"data: {json.dumps({'type':'step','message':'Already computing — waiting for the in-flight request...'})}\n\n"
+        while lock.locked():
+            try:
+                await asyncio.wait_for(lock.acquire(), timeout=5)
+                lock.release()
+                break
+            except TimeoutError:
+                yield ": heartbeat\n\n"
+
+        cached, _ = response_cache.get(cache_key, max_ttl_s=max_ttl_s)
+        if cached is not None:
+            yield f"data: {json.dumps({'type':'step','message':'Loaded from cache.'})}\n\n"
+            yield f"data: {json.dumps(cached)}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+        # Fell through with still no cached value (the in-flight request
+        # errored without writing to cache) — fall through and compute it
+        # ourselves rather than leaving the client stuck.
+
+    async with lock:
+        last_result = None
+        async for chunk in inner_generator:
+            if isinstance(chunk, str) and chunk.startswith("data: "):
+                body = chunk[6:].strip()
+                if body and body != "[DONE]":
+                    try:
+                        p = json.loads(body)
+                        if isinstance(p, dict) and p.get("type") == "result":
+                            last_result = p
+                    except (ValueError, json.JSONDecodeError):
+                        pass
+            yield chunk
+
+        if last_result is not None:
+            response_cache.put(cache_key, last_result)
 
 
 async def _intelligence_generator(raw_holdings: list[dict]):
