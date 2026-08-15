@@ -103,6 +103,18 @@ class Settings:
     # this API serves LLM/data-heavy endpoints, tracing every request is noisy
     # and not worth the overhead.
     SENTRY_TRACES_SAMPLE_RATE: float = float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0.1"))
+    # Sentry Logs (enable_logs=True) batches client-side and is NOT delivered by
+    # the same eager transport as error/issue events — confirmed 2026-08-15 via
+    # a live A/B/C test: a one-shot script with an explicit sentry_sdk.flush()
+    # delivered every time, while a process that logged once and stayed alive
+    # for 90s with no flush() call never delivered anything, even after exiting
+    # normally. This app's uvicorn process runs forever and never calls
+    # flush() anywhere, so every logger.info()/.warning() across the whole app
+    # has been accumulating in Sentry's Logs buffer and never shipping — Issues
+    # (errors) were unaffected and worked the whole time, which is what made
+    # this easy to miss. See main.py's periodic flush task, which this
+    # interval controls.
+    SENTRY_LOG_FLUSH_INTERVAL_S: int = int(os.environ.get("SENTRY_LOG_FLUSH_INTERVAL_S", "30"))
 
 
 settings = Settings()

@@ -158,6 +158,64 @@ async def _prewarm_agents():
     await asyncio.to_thread(agents_base.prewarm)
 
 
+_sentry_flush_task: asyncio.Task | None = None
+
+
+async def _sentry_log_flush_loop() -> None:
+    """Periodically call sentry_sdk.flush() so Sentry Logs actually ship.
+
+    Sentry Logs (enable_logs=True) batches client-side and is NOT delivered by
+    the same eager transport as error/issue events — confirmed 2026-08-15 via
+    a live A/B/C test: a one-shot script that logged once and called
+    sentry_sdk.flush() explicitly delivered every time; a process that logged
+    once and stayed alive for 90s with no flush() call never delivered
+    anything, even after exiting normally. This app's uvicorn process runs
+    forever and never exits under normal operation, so without this loop every
+    logger.info()/.warning() across the whole app accumulates in Sentry's Logs
+    buffer and never ships. Error/issue capture (Sentry Issues) is unaffected
+    by any of this — it already shipped immediately without a flush, which is
+    exactly what made the Logs gap easy to miss.
+
+    Runs on a worker thread (sentry_sdk.flush is a blocking call) so a slow or
+    stalled flush can't stall the event loop. Never raises — a flush failure
+    must not crash the periodic loop or take down the app.
+    """
+    interval = settings.SENTRY_LOG_FLUSH_INTERVAL_S
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await asyncio.to_thread(sentry_sdk.flush, timeout=5)
+        except Exception:
+            logger.exception("periodic sentry_sdk.flush() failed")
+
+
+@app.on_event("startup")
+async def _start_sentry_log_flush_loop():
+    """Start the periodic Sentry Logs flush loop — no-op if Sentry is unset."""
+    global _sentry_flush_task
+    if not settings.SENTRY_DSN:
+        return
+    _sentry_flush_task = asyncio.create_task(_sentry_log_flush_loop())
+    logger.info(
+        "Sentry Logs periodic flush loop started (every %ss)", settings.SENTRY_LOG_FLUSH_INTERVAL_S
+    )
+
+
+@app.on_event("shutdown")
+async def _stop_sentry_log_flush_loop():
+    """Cancel the flush loop and do one last flush so a graceful shutdown
+    doesn't strand whatever logs accumulated since the last periodic flush."""
+    global _sentry_flush_task
+    if _sentry_flush_task is not None:
+        _sentry_flush_task.cancel()
+        _sentry_flush_task = None
+    if settings.SENTRY_DSN:
+        try:
+            await asyncio.to_thread(sentry_sdk.flush, timeout=5)
+        except Exception:
+            logger.exception("final sentry_sdk.flush() on shutdown failed")
+
+
 @app.get("/health", tags=["system"])
 async def health_check():
     return {"status": "healthy", "version": "0.5.0"}
