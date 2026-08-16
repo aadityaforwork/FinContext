@@ -133,7 +133,22 @@ def log_predictions(items: list[dict]) -> int:
         ticker, source, direction
     Optional fields:
         prediction_date (defaults to today UTC), impact_level, catalyst_type,
-        reason, cited_sources, technical_state, price_at_call, dedup_key, metadata
+        reason, cited_sources, technical_state, price_at_call, dedup_key,
+        metadata, trace_id
+
+    `trace_id` (optional): the Langfuse trace of the LLM call that produced
+    this prediction, from generate_grounded_json's `metrics_out`. Stored
+    inside `metadata` as `langfuse_trace_id` — no migration needed, metadata
+    is already jsonb. compute_pending_outcomes() reads it back to push the
+    market's grade onto that trace once the horizon elapses, which is what
+    lets Langfuse group hit rate by prompt version natively.
+
+    NOTE the rule-9 boundary: `ai_predictions` has a public "anon select"
+    RLS policy, so everything in `metadata` is world-readable via the anon
+    key. A Langfuse trace id is safe to put here for the same reason
+    `call_id` already is — it's an opaque handle that reaches nothing
+    without separate Langfuse credentials. Do NOT follow it with anything
+    from the context snapshot itself.
 
     `dedup_key` is used to UPSERT — same key replaces the existing row. Use
     deterministic keys so re-running an endpoint the same day doesn't create
@@ -155,6 +170,11 @@ def log_predictions(items: list[dict]) -> int:
             pd_str = pd.isoformat()
         else:
             pd_str = str(pd)[:10]
+        metadata = it.get("metadata")
+        trace_id = it.get("trace_id")
+        if trace_id:
+            metadata = dict(metadata or {})
+            metadata["langfuse_trace_id"] = trace_id
         row = {
             "ticker": ticker,
             "prediction_date": pd_str,
@@ -167,7 +187,7 @@ def log_predictions(items: list[dict]) -> int:
             "technical_state": it.get("technical_state"),
             "price_at_call": it.get("price_at_call"),
             "dedup_key": it.get("dedup_key"),
-            "metadata": it.get("metadata"),
+            "metadata": metadata,
         }
         rows.append(row)
 
@@ -262,7 +282,7 @@ def compute_pending_outcomes() -> dict:
     try:
         res = (
             _client.table("ai_predictions")
-            .select("id,ticker,prediction_date,direction,price_at_call")
+            .select("id,ticker,prediction_date,direction,price_at_call,metadata")
             .gte("prediction_date", cutoff_oldest)
             .lt("prediction_date", cutoff_recent)
             .execute()
@@ -300,6 +320,11 @@ def compute_pending_outcomes() -> dict:
         by_ticker.setdefault(p["ticker"], []).append(p)
 
     to_insert: list[dict] = []
+    # Collected alongside to_insert so the Langfuse push happens once, after
+    # the DB write succeeds — Supabase stays the source of truth, Langfuse
+    # is a mirror of it. Rows whose prediction predates trace-id capture
+    # carry trace_id None and are skipped.
+    graded_for_langfuse: list[dict] = []
     for ticker, preds in by_ticker.items():
         # Earliest prediction date for this ticker drives how far back to fetch.
         earliest = min((p["prediction_date"] for p in preds), default=None)
@@ -358,6 +383,14 @@ def compute_pending_outcomes() -> dict:
                     "hit": hit,
                 })
                 summary["by_horizon"][h_label] = summary["by_horizon"].get(h_label, 0) + 1
+                graded_for_langfuse.append({
+                    "trace_id": (p.get("metadata") or {}).get("langfuse_trace_id"),
+                    "horizon": h_label,
+                    "hit": hit,
+                    "return_pct": ret,
+                    "ticker": ticker,
+                    "direction": p.get("direction"),
+                })
 
     if to_insert:
         # Bulk-insert in chunks (Supabase has a payload size limit).
@@ -372,7 +405,43 @@ def compute_pending_outcomes() -> dict:
                 logger.warning("compute_pending_outcomes: insert chunk failed: %s", e)
                 summary["errors"] += 1
 
+    summary["langfuse_scores"] = _push_outcome_scores(graded_for_langfuse)
     return summary
+
+
+def _push_outcome_scores(graded: list[dict]) -> int:
+    """Mirror freshly-graded outcomes onto their Langfuse traces.
+
+    This is the payoff for storing a trace id with each prediction: the call
+    happened at least one trading day ago, the market has now answered, and
+    that answer gets attached to the exact generation that made the claim.
+    Once these land, "is prompt version 2 better than version 1" is a native
+    Langfuse question instead of one only prompt_monitor.py can answer.
+
+    Best-effort by construction — never raises, and a total Langfuse outage
+    just means zero scores written while Supabase (the source of truth) is
+    already updated. Flushes once at the end rather than per score; a busy
+    day grades hundreds of pairs and a flush each would dominate the job's
+    runtime.
+    """
+    written = 0
+    try:
+        from app.services import langfuse_scores
+
+        for g in graded:
+            if not g.get("trace_id"):
+                continue
+            written += langfuse_scores.record_outcome_score(
+                g["trace_id"], g["horizon"],
+                hit=g.get("hit"), return_pct=g.get("return_pct"),
+                ticker=g.get("ticker"), direction=g.get("direction"),
+                flush=False,
+            )
+        if written:
+            langfuse_scores.flush_scores()
+    except Exception:
+        logger.exception("compute_pending_outcomes: pushing outcome scores to Langfuse failed")
+    return written
 
 
 # ---------------------------------------------------------------------------
@@ -574,6 +643,7 @@ def log_call_metrics(
     tokens_in: int | None = None,
     tokens_out: int | None = None,
     duration_ms: float | None = None,
+    trace_id: str | None = None,
 ) -> bool:
     """Best-effort log of one LLM call's deterministic metrics.
 
@@ -600,6 +670,12 @@ def log_call_metrics(
     a real user's portfolio/watchlist context must never land there. See
     AGENTS.md rule 9.
 
+    `trace_id` (optional): the Langfuse trace for this call, straight from
+    generate_grounded_json's `metrics_out`. Stored so prompt_monitor.py's
+    per-version metrics can be pivoted against the same call in Langfuse,
+    and so a row in this table can be opened as a trace without a search.
+    Column added in migration 013; older rows carry NULL.
+
     Never raises; returns False (no-op) if the ledger is unavailable or the
     insert fails — same posture as log_predictions().
     """
@@ -617,6 +693,7 @@ def log_call_metrics(
             "tokens_in": tokens_in,
             "tokens_out": tokens_out,
             "duration_ms": duration_ms,
+            "trace_id": trace_id,
         }
         if call_id:
             row["id"] = call_id

@@ -22,6 +22,7 @@ from app.core.compliance import with_disclaimer
 from app.services import (
     ai_client,
     grounding,
+    llm_trace,
     market_data,
     outcome_ledger,
     prompt_registry,
@@ -764,6 +765,7 @@ def _log_call_metrics_best_effort(
 # ---------------------------------------------------------------------------
 def _log_tomorrow_predictions(
     tomorrow_data: dict, movers_ctx: dict, prompt_meta: dict | None = None, call_id: str | None = None,
+    trace_id: str | None = None,
 ) -> None:
     """Persist Tomorrow per_holding watch items as forward-looking predictions.
 
@@ -837,6 +839,13 @@ def _log_tomorrow_predictions(
                 "prompt": prompt_meta,
                 "call_id": call_id,
             },
+            # Langfuse join key — lands in metadata.langfuse_trace_id (see
+            # log_predictions). Lets compute_pending_outcomes push this
+            # prediction's eventual market grade back onto the generation
+            # that made it, so hit rate becomes queryable per prompt version
+            # in Langfuse itself. Opaque handle only — rule 9 still applies
+            # to everything else in this dict.
+            "trace_id": trace_id,
         })
     if rows:
         outcome_ledger.log_predictions(rows)
@@ -844,6 +853,7 @@ def _log_tomorrow_predictions(
 
 def _log_news_feed_predictions(
     cleaned_items: list[dict], tech_by_ticker: dict, prompt_meta: dict | None = None, call_id: str | None = None,
+    trace_id: str | None = None,
 ) -> None:
     """Persist annotated News Impact items as predictions — one row per
     (item × affected_ticker). Skip 'mixed' direction (not scoreable). Dedup key
@@ -900,6 +910,9 @@ def _log_news_feed_predictions(
                     "prompt": prompt_meta,
                     "call_id": call_id,
                 },
+                # See _log_tomorrow_predictions — Langfuse join key so this
+                # prediction's market grade lands back on its own generation.
+                "trace_id": trace_id,
             })
     if rows:
         outcome_ledger.log_predictions(rows)
@@ -1236,6 +1249,10 @@ async def _movers_generator(raw_holdings: list[dict]):
         asyncio.to_thread(
             ai_client.generate_grounded_json, tomorrow_task, tomorrow_input, tomorrow_schema, 2200,
             0.2, _tomorrow_prompt_meta, _tomorrow_metrics,
+            # Keyword, not positional: this is the live Langfuse prompt
+            # object for the native version link, and it must stay out of
+            # _tomorrow_prompt_meta (that dict gets written to Supabase).
+            prompt_client=_tomorrow_prompt.client,
         ),
     )
     heartbeat_msgs = [
@@ -1295,6 +1312,7 @@ async def _movers_generator(raw_holdings: list[dict]):
         try:
             await asyncio.to_thread(
                 _log_tomorrow_predictions, tomorrow_data, movers_ctx, _tomorrow_prompt_meta, _tomorrow_call_id,
+                _tomorrow_metrics.get("trace_id"),
             )
         except Exception as e:
             logger.warning("outcome_ledger logging failed: %s", e)
@@ -1514,13 +1532,31 @@ async def morning_brief(req: MorningBriefRequest):
   "data_gaps": [ str, ... ]
 }"""
 
+    # Reference wiring for llm_trace.flow() — see that function's docstring.
+    # Gives this endpoint's generation a named parent trace instead of a bare
+    # `ai_client.generate_grounded_json` root, so the Langfuse trace list
+    # reads as flows rather than as an undifferentiated pile of calls.
+    #
+    # Wrapped around the await, NOT around a yield: contextvars (which is how
+    # OpenTelemetry finds the parent) propagate across awaits within a task
+    # and into asyncio.to_thread, but a `with` block spanning a `yield` in an
+    # async generator resumes in the consumer's context and would produce a
+    # wrong tree. That's why the SSE generators (_movers_generator and
+    # friends) are deliberately NOT wrapped — their LLM awaits sit inside a
+    # heartbeat loop that yields. Fixing those needs the flow to start
+    # outside the generator, not a `with` bolted around the loop.
     try:
-        data = await asyncio.wait_for(
-            asyncio.to_thread(
-                ai_client.generate_grounded_json, task, context, schema, 1024
-            ),
-            timeout=45,
-        )
+        with llm_trace.flow(
+            "morning_brief",
+            tags=["morning_brief", "demo" if demo_mode else "user"],
+            holdings=len(raw_positions), watchlist=len(watchlist),
+        ):
+            data = await asyncio.wait_for(
+                asyncio.to_thread(
+                    ai_client.generate_grounded_json, task, context, schema, 1024
+                ),
+                timeout=45,
+            )
     except asyncio.TimeoutError:
         return with_disclaimer({
             "demo_mode": demo_mode,
@@ -2006,6 +2042,9 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
                 # after capping items at 20 → faster LLM completion.
                 ai_client.generate_grounded_json, task, annotation_ctx, schema, 2400,
                 0.2, _news_prompt_meta, _news_metrics,
+                # See the tomorrow-watch call — native prompt link, kept out
+                # of the meta dict that gets persisted.
+                prompt_client=_news_prompt.client,
             ),
             # 110s on Render's free tier — OpenAI from Render is 2-3× slower
             # than from a laptop and the request retry loop after a premature
@@ -2096,6 +2135,7 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
     if outcome_ledger.is_available():
         background.add_task(
             _log_news_feed_predictions, cleaned, tech_by_ticker, _news_prompt_meta, _news_call_id,
+            _news_metrics.get("trace_id"),
         )
 
     # Filter for the user-facing list AFTER logging (so the ledger sees everything).

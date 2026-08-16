@@ -109,9 +109,28 @@ backend/app/
     llm_cache.py         Two-tier cache (in-process TTL + Postgres, shared
                         across workers) for full crew/LLM outputs. Wraps
                         every crew kickoff via agents/orchestrator.run_cached.
-    llm_trace.py         Structured per-call tracing (added — see below).
-                        Wrap any new LLM/agent call site with
-                        `llm_trace.span(...)`.
+    llm_trace.py         Structured per-call tracing. Wrap any new LLM/agent
+                        call site with `llm_trace.span(...)`; wrap a
+                        multi-call user operation in `llm_trace.flow(...)`
+                        so its calls share one trace (NOT around a `yield`
+                        in an SSE generator — see the memory file below).
+                        Sends full prompt/completion bodies as of
+                        2026-08-16 (`LANGFUSE_CAPTURE_CONTENT=false` turns
+                        that back off) — read
+                        `memory/gotcha_langfuse_content_capture.md` before
+                        changing anything about what gets sent.
+    langfuse_scores.py    Deterministic call-time quality scores +
+                        the delayed market-outcome scores, written back
+                        onto the trace that produced the call.
+                        `grounding.citation_validity` is the first hard,
+                        automated enforcement of rule 2 (it walks CONTEXT
+                        and checks every cited path resolves). NO LLM
+                        JUDGES — same stance as eval_runner.py.
+    langfuse_datasets.py  Mirrors eval cases into a Langfuse dataset and a
+                        gate comparison into dataset runs. A MIRROR ONLY —
+                        prompt_gate.py stays the authority on
+                        BLOCK/IMPROVED/NO_CHANGE and nothing here may ever
+                        become a precondition for promoting a prompt.
     langfuse_client.py   Shared lazy Langfuse client (opt-in on
                         LANGFUSE_PUBLIC_KEY, never raises) — used by both
                         llm_trace.py and prompt_registry.py so the client
@@ -277,6 +296,13 @@ regressing them fails CI instead of relying on someone having read this file.
   `os.getenv()` instead of going through `core/config.py`. Read
   `memory/gotcha_config_env_sprawl.md` before adding a new env-var read
   anywhere in `backend/app`.
+- **Langfuse now receives real user context.** The 2026-08-16 decision
+  reversed the metadata-only posture, so prompt/completion bodies and
+  fixture contexts leave the database for a third-party US host. The
+  privacy-policy wording, DPA, and deletion path that decision implies are
+  **not yet done** — read `memory/gotcha_langfuse_content_capture.md`
+  before touching tracing, scoring, or datasets, and don't mistake the code
+  being wired for those obligations being met.
 - **Hallucination regression coverage**: `verify_claims()` is a second LLM
   call asking the model to grade itself — a soft check. The eval harness in
   `backend/tests/evals/` is the hard check; extend it before shipping a new

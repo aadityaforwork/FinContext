@@ -81,6 +81,14 @@ class PromptResult:
     # fetch failed — SDK-level fallback kicked in) | "fallback_error" (this
     # module's own try/except caught something the SDK didn't handle).
     source: str
+    # The raw Langfuse prompt client object, when we really fetched one.
+    # Passing this to llm_trace.span(prompt=...) links the generation to the
+    # prompt version *natively*, which is what populates Langfuse's
+    # per-version metrics view (cost/latency/scores grouped by version).
+    # The `version`/`source` fields above stay the audit-trail values that
+    # get persisted to Supabase; this one is live-object plumbing and is
+    # None on every fallback path, so call sites can pass it unconditionally.
+    client: object | None = None
 
 
 def get_prompt(name: str, fallback_text: str, *, label: str = "production") -> PromptResult:
@@ -109,4 +117,4 @@ def get_prompt(name: str, fallback_text: str, *, label: str = "production") -> P
         # the fallback we gave it instead of raising, per its own contract.
         return PromptResult(text=p.prompt, version=None, source="fallback_sdk")
 
-    return PromptResult(text=p.prompt, version=p.version, source="langfuse")
+    return PromptResult(text=p.prompt, version=p.version, source="langfuse", client=p)

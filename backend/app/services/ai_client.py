@@ -154,6 +154,7 @@ def generate_grounded_json(
     temperature: float = 0.2,
     prompt_meta: dict | None = None,
     metrics_out: dict | None = None,
+    prompt_client: object | None = None,
 ) -> dict:
     """
     Run an analytical JSON task that MUST cite fields from the provided context.
@@ -168,6 +169,16 @@ def generate_grounded_json(
     writes into ai_predictions.metadata.prompt for stored predictions.
     Omitted (None) for every call site not yet wired to a versioned prompt —
     behavior is byte-identical to before this parameter existed.
+
+    `prompt_client` (optional): the live Langfuse prompt object from
+    prompt_registry.PromptResult.client. Passing it links this generation to
+    that prompt version natively in Langfuse, which is what populates the
+    per-version metrics view (latency/cost/scores grouped by version) — a
+    strictly better join than the string stamps in `prompt_meta`, which stay
+    for the local log line, for Supabase, and for call sites with no
+    Langfuse-managed prompt. Kept separate from `prompt_meta` on purpose:
+    that dict gets persisted to ai_predictions.metadata, and a live SDK
+    object must never end up in a database row.
 
     `metrics_out` (optional): a caller-owned dict this function fills in
     place (never replaces) with this call's deterministic metrics —
@@ -206,6 +217,7 @@ def generate_grounded_json(
         {"role": "user", "content": user_prompt},
     ]
     span_meta = dict(provider=_provider, model=MODEL, context_chars=len(context_json))
+    prompt_obj = None
     if prompt_meta:
         # Prefixed so these sit next to the other stamped fields in the trace
         # JSON/Langfuse observation without colliding with `model` above (a
@@ -213,7 +225,13 @@ def generate_grounded_json(
         span_meta["prompt_name"] = prompt_meta.get("name")
         span_meta["prompt_version"] = prompt_meta.get("version")
         span_meta["prompt_source"] = prompt_meta.get("source")
-    with llm_trace.span("ai_client.generate_grounded_json", **span_meta) as t:
+    # Native prompt→generation link. Deliberately its own parameter rather
+    # than a key inside `prompt_meta`: callers reuse that same dict as the
+    # ai_predictions.metadata.prompt audit trail written to Supabase, and a
+    # live SDK object has no business being serialized into a database row.
+    prompt_obj = prompt_client
+    with llm_trace.span("ai_client.generate_grounded_json", prompt=prompt_obj, **span_meta) as t:
+        t.record_content(input=user_prompt)
         resp = _client.chat.completions.create(
             model=MODEL,
             messages=messages,
@@ -231,23 +249,53 @@ def generate_grounded_json(
         except json.JSONDecodeError:
             logger.error("generate_grounded_json: invalid JSON. first 500 chars=%s", raw[:500])
             t.record(parse_error=True)
+            t.record_content(output=raw)
+            _score_grounded_call(t, {}, context)
             if metrics_out is not None:
                 metrics_out.update(
                     confidence=None, data_gaps_count=None, parse_error=True,
                     tokens_in=t.extra.get("tokens_in"), tokens_out=t.extra.get("tokens_out"),
                     duration_ms=round((time.monotonic() - t.started_at) * 1000, 1),
+                    trace_id=t.trace_id,
                 )
             return {}
         confidence = parsed.get("confidence") if isinstance(parsed, dict) else None
         data_gaps_count = len(parsed.get("data_gaps") or []) if isinstance(parsed, dict) else None
         t.record(confidence=confidence, data_gaps=data_gaps_count)
+        t.record_content(output=parsed)
+        _score_grounded_call(t, parsed, context)
         if metrics_out is not None:
             metrics_out.update(
                 confidence=confidence, data_gaps_count=data_gaps_count, parse_error=False,
                 tokens_in=t.extra.get("tokens_in"), tokens_out=t.extra.get("tokens_out"),
                 duration_ms=round((time.monotonic() - t.started_at) * 1000, 1),
+                # The join key for delayed scoring: whoever persists a
+                # prediction from this call stores this so the market's
+                # verdict can be attached to this trace days later.
+                trace_id=t.trace_id,
             )
         return parsed
+
+
+def _score_grounded_call(t, parsed: dict, context: dict) -> None:
+    """Attach the deterministic grounding scores to this call's trace.
+
+    Runs on both the success and the parse-failure path — the failure case
+    is the one that would otherwise be invisible, since a call that returns
+    {} writes no prediction rows anywhere and would show up in Langfuse as
+    merely *fewer* traces rather than worse ones.
+
+    Import is local and the whole thing is best-effort: scoring is an
+    observability nicety and must never break a user-facing generation.
+    Same stance the tracer itself takes.
+    """
+    try:
+        from app.services import langfuse_scores
+
+        for s in langfuse_scores.grounding_scores(parsed, context).values():
+            t.score(s.name, s.value, data_type=s.data_type, comment=s.comment)
+    except Exception:
+        logger.exception("grounded call scoring failed")
 
 
 def verify_claims(output: dict, context: dict, max_tokens: int = 1024) -> dict:
