@@ -1,0 +1,53 @@
+name: Daily brief email
+
+# Fires the server-side brief so it goes out with no machine of yours on and
+# no per-send approval. The endpoint iterates every enabled subscriber itself;
+# this job only pokes it.
+
+on:
+  schedule:
+    # 03:00 UTC = 08:30 IST, Mon-Fri. NSE opens 09:15 IST.
+    # GitHub queues scheduled runs and can start them several minutes late
+    # under load, which is fine for a pre-market brief.
+    - cron: "0 3 * * 1-5"
+  workflow_dispatch:
+
+concurrency:
+  group: daily-brief-email
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Wake the service
+        # Render's free tier spins down after inactivity and the first request
+        # can take ~60s. Absorb that here instead of inside the send timeout.
+        run: |
+          curl -sS -m 180 -o /dev/null -w 'health: %{http_code}\n' \
+            https://fincontext.onrender.com/health || true
+
+      - name: Send the brief
+        env:
+          ADMIN_TOKEN: ${{ secrets.FINCONTEXT_ADMIN_TOKEN }}
+        run: |
+          code=$(curl -sS -m 300 -X POST \
+            https://fincontext.onrender.com/api/brief/send-daily-email \
+            -H "X-Admin-Token: $ADMIN_TOKEN" \
+            -o response.json -w '%{http_code}')
+          echo "HTTP $code"
+          cat response.json; echo
+          if [ "$code" != "200" ]; then
+            echo "::error::send-daily-email returned HTTP $code"
+            exit 1
+          fi
+          sent=$(jq -r '.sent' response.json)
+          targets=$(jq -r '.targets' response.json)
+          skipped=$(jq -r '.skipped_no_holdings' response.json)
+          failed=$(jq -r '.failed' response.json)
+          echo "$sent/$targets sent · $skipped skipped (no holdings) · $failed failed"
+          if [ "$failed" != "0" ]; then
+            echo "::error::$failed subscriber(s) failed - check last_error in email_brief_subs"
+            exit 1
+          fi
