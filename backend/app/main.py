@@ -27,6 +27,7 @@ from app.routers import (
     embeddings as embeddings_router,
     outcomes as outcomes_router,
     telegram as telegram_router,
+    brief_email as brief_email_router,
     onboarding as onboarding_router,
     prompt_monitor as prompt_monitor_router,
     accuracy_monitor as accuracy_monitor_router,
@@ -109,6 +110,7 @@ app.include_router(social_router.router)
 app.include_router(embeddings_router.router)
 app.include_router(outcomes_router.router)
 app.include_router(telegram_router.router)
+app.include_router(brief_email_router.router)
 app.include_router(onboarding_router.router)
 app.include_router(prompt_monitor_router.router)
 app.include_router(accuracy_monitor_router.router)

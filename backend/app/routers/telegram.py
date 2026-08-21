@@ -76,8 +76,8 @@ _CODE_ALPHABET = string.ascii_uppercase + string.digits
 # ---------------------------------------------------------------------------
 # Auth helpers
 # ---------------------------------------------------------------------------
-def _verify_supabase_jwt(authorization: str | None) -> str:
-    """Resolve the caller's Supabase user_id from the Authorization header.
+def verify_supabase_user(authorization: str | None) -> dict:
+    """Resolve the caller's Supabase user record from the Authorization header.
 
     Goes direct to the Supabase Auth REST endpoint via `requests` instead of
     `_sb.auth.get_user(jwt)` — the Python SDK mixes its own service-role
@@ -113,10 +113,14 @@ def _verify_supabase_jwt(authorization: str | None) -> str:
         )
         raise HTTPException(status_code=401, detail="Invalid token.")
     user = r.json() or {}
-    user_id = user.get("id")
-    if not user_id:
+    if not user.get("id"):
         raise HTTPException(status_code=401, detail="Invalid token.")
-    return user_id
+    return user
+
+
+def _verify_supabase_jwt(authorization: str | None) -> str:
+    """user_id-only wrapper. Most callers here only need the id."""
+    return verify_supabase_user(authorization)["id"]
 
 
 def _check_admin(token: str | None) -> None:
@@ -506,6 +510,9 @@ def _build_user_brief(user_id: str) -> dict | None:
         "policy_items": relevant_policy,
         "upcoming_earnings": upcoming_earnings,
     }
+
+
+build_user_brief = _build_user_brief
 
 
 @router.post("/send-daily-brief")
