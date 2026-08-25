@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
 """
-send_daily_brief.py — fire the Telegram morning brief for every linked user.
+send_daily_brief.py — fire the morning brief for every subscribed user.
 
-Hits POST /api/telegram/send-daily-brief on the FinContext backend. The
-backend iterates every user in `telegram_links` (with daily_brief_enabled),
-builds their personalized P&L + movers + policy headlines brief, and pushes
-to Telegram.
+Hits the FinContext backend, which iterates every subscriber for the chosen
+channel, builds their personalized P&L + movers + policy headlines brief, and
+pushes it out.
+
+  --channel telegram   POST /api/telegram/send-daily-brief  (telegram_links)
+  --channel email      POST /api/brief/send-daily-email     (email_brief_subs)
 
 Idempotent — safe to re-run any time.
 
 Usage (env vars):
     export FINCONTEXT_API_BASE=https://your-backend.onrender.com
     export FINCONTEXT_ADMIN_TOKEN=...
-    python scripts/send_daily_brief.py
+    python scripts/send_daily_brief.py                    # telegram
+    python scripts/send_daily_brief.py --channel email    # email
 
 Schedule:
     cron-job.org → "0 3 * * 1-5"  (3:00 UTC = 8:30 AM IST, Mon-Fri only)
-    See scripts/README.md → "Telegram bot daily brief"
+    One cronjob per channel, both hitting the URLs above directly.
+    See scripts/README.md → "Telegram bot daily brief" and "Daily brief email"
 """
 
 from __future__ import annotations
@@ -28,11 +32,20 @@ import sys
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
+CHANNEL_PATHS = {
+    "telegram": "/api/telegram/send-daily-brief",
+    "email": "/api/brief/send-daily-email",
+}
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--channel", choices=sorted(CHANNEL_PATHS), default="telegram",
+        help="Which channel to fire. Default telegram.",
     )
     parser.add_argument(
         "--api-base", default=os.getenv("FINCONTEXT_API_BASE"),
@@ -41,6 +54,10 @@ def main() -> int:
     parser.add_argument(
         "--admin-token", default=os.getenv("FINCONTEXT_ADMIN_TOKEN"),
         help="Admin token matching ADMIN_TOKEN on the server (or set FINCONTEXT_ADMIN_TOKEN)",
+    )
+    parser.add_argument(
+        "--only-user-id", default=None,
+        help="Send to just this user id. Email channel only, for testing.",
     )
     parser.add_argument(
         "--timeout", type=int, default=240,
@@ -56,7 +73,13 @@ def main() -> int:
         )
         return 2
 
-    url = args.api_base.rstrip("/") + "/api/telegram/send-daily-brief"
+    if args.only_user_id and args.channel != "email":
+        print("ERROR: --only-user-id is only supported on --channel email.", file=sys.stderr)
+        return 2
+
+    url = args.api_base.rstrip("/") + CHANNEL_PATHS[args.channel]
+    if args.only_user_id:
+        url += f"?only_user_id={args.only_user_id}"
     req = Request(
         url,
         method="POST",
@@ -96,7 +119,7 @@ def main() -> int:
     skipped = data.get("skipped_no_holdings", 0)
 
     print(
-        f"\nSummary: {sent}/{targets} sent · "
+        f"\n{args.channel} summary: {sent}/{targets} sent · "
         f"{skipped} skipped (no holdings) · {failed} failed"
     )
     return 0 if failed == 0 else 1

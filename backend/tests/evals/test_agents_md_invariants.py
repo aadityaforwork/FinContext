@@ -196,5 +196,65 @@ def test_llm_cache_datetime_defaults_are_naive():
         )
 
 
+# ---------------------------------------------------------------------------
+# Every admin-token daily job must actually be SCHEDULED by something.
+#
+# miss_fixtures (leg 3d) shipped complete — service, router, migration, tests
+# — and then sat at zero rows from the day it shipped until 2026-08-25, not
+# because anything was broken but because nothing ever called it. The data it
+# needed was in the database the whole time; 51 fixtures converted the first
+# time the endpoint was hit by hand. accuracy_monitor, prompt_monitor and
+# prompt_drafter were in the same silent state.
+#
+# A leg that nothing invokes is indistinguishable, from the outside, from a
+# leg that runs daily and finds nothing to do — which is exactly why it went
+# unnoticed for twelve days. So: adding a run-daily endpoint without adding it
+# to a workflow now fails here instead of quietly never running.
+#
+# Static text check only — this asserts a schedule EXISTS, not that any
+# particular run succeeded.
+# ---------------------------------------------------------------------------
+def test_every_daily_job_endpoint_is_scheduled():
+    routers_dir = BACKEND_ROOT / "app" / "routers"
+    workflows_dir = REPO_ROOT / ".github" / "workflows"
+
+    assert workflows_dir.is_dir(), f"no .github/workflows directory at {workflows_dir}"
+    scheduled_text = "\n".join(
+        p.read_text(encoding="utf-8") for p in sorted(workflows_dir.glob("*.yml"))
+    )
+
+    # Find every admin-gated job endpoint: a router with an @router.post whose
+    # path looks like a periodic job, plus the router's own prefix.
+    job_path_re = re.compile(r'@router\.post\(\s*[\'"](/(?:run-daily|run-pending|check-approvals|compute-daily))[\'"]')
+    prefix_re = re.compile(r'APIRouter\(\s*prefix=[\'"]([^\'"]+)[\'"]')
+
+    endpoints: list[tuple[str, str]] = []
+    for py in sorted(routers_dir.glob("*.py")):
+        text = py.read_text(encoding="utf-8")
+        prefix_m = prefix_re.search(text)
+        if not prefix_m:
+            continue
+        for job_m in job_path_re.finditer(text):
+            endpoints.append((py.name, prefix_m.group(1) + job_m.group(1)))
+
+    assert endpoints, (
+        "found no daily-job endpoints at all — the detection regex in this test has "
+        "probably drifted from how routers/*.py declare them."
+    )
+
+    unscheduled = [
+        (fname, path) for fname, path in endpoints if path not in scheduled_text
+    ]
+    assert not unscheduled, (
+        "these daily-job endpoints are not referenced by any .github/workflows/*.yml, "
+        "so nothing will ever call them (they will look healthy and do nothing — see "
+        "the miss_fixtures incident above):\n"
+        + "\n".join(f"  - {path}  ({fname})" for fname, path in unscheduled)
+        + "\n\nAdd them to .github/workflows/path-back-daily.yml (or another workflow). "
+        "If a job is deliberately triggered by an external cron instead, reference its "
+        "path in a workflow comment so this check can see it."
+    )
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

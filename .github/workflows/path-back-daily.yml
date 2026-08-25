@@ -1,0 +1,123 @@
+name: Path-back daily jobs
+
+# The self-iterating-prompt loop (path-back legs 3b/3c/3d/3e). Each leg is an
+# idempotent admin-token endpoint on the backend; this job only pokes them, in
+# dependency order. Nothing here promotes a prompt — see AGENTS.md rules 8/9.
+#
+# WHY THIS EXISTS: compute_outcomes had a cron and the daily brief had a
+# workflow, but legs 3b-3e never got one — so miss_fixtures sat empty from the
+# day it shipped despite the data being there the whole time. Adding a leg
+# without adding it here is the same bug again.
+#
+# NOT scheduled here, on purpose: /api/outcomes/compute-daily. It runs on the
+# external cron-job.org entry described in scripts/README.md, at 11:00 UTC —
+# an hour after NSE closes, which is the constraint that sets everything
+# below. Verified still firing daily (prediction_outcomes has rows through
+# today). If that external cron is ever retired, move it here rather than
+# leaving it unscheduled. This paragraph is also what satisfies
+# test_every_daily_job_endpoint_is_scheduled for that path.
+
+on:
+  schedule:
+    # 12:00 UTC = 17:30 IST, Mon-Fri. Deliberately AFTER the outcomes cron
+    # (11:00 UTC, see scripts/README.md): every job below reads market-graded
+    # outcomes, so grading has to have run first or they all no-op.
+    - cron: "0 12 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Run a single leg, or all of them in order"
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - accuracy-monitor
+          - miss-fixtures
+          - prompt-monitor
+          - prompt-drafter-run-pending
+          - prompt-drafter-check-approvals
+
+concurrency:
+  group: path-back-daily
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      API_BASE: https://fincontext.onrender.com
+      ADMIN_TOKEN: ${{ secrets.FINCONTEXT_ADMIN_TOKEN }}
+      ONLY: ${{ inputs.only }}
+    steps:
+      - name: Wake the service
+        # Render's free tier spins down after inactivity and the first request
+        # can take ~60s. Absorb that here instead of inside a job's timeout.
+        run: |
+          curl -sS -m 180 -o /dev/null -w 'health: %{http_code}\n' \
+            "$API_BASE/health" || true
+
+      - name: Run the legs
+        run: |
+          set -uo pipefail
+          failed=0
+
+          run_leg () {
+            local name="$1" path="$2"
+            if [ -n "$ONLY" ] && [ "$ONLY" != "all" ] && [ "$ONLY" != "$name" ]; then
+              echo "--- $name: skipped (only=$ONLY)"
+              return 0
+            fi
+            echo "--- $name -> POST $path"
+            code=$(curl -sS -m 600 -X POST "$API_BASE$path" \
+              -H "X-Admin-Token: $ADMIN_TOKEN" \
+              -o "resp-$name.json" -w '%{http_code}') || code="000"
+            echo "HTTP $code"
+            cat "resp-$name.json" 2>/dev/null; echo
+            if [ "$code" != "200" ]; then
+              echo "::error::$name returned HTTP $code"
+              failed=1
+              return 0
+            fi
+            # A 200 is not success on its own. Two shapes mean trouble:
+            #   {"errors": N}          - the converter/drafter legs count theirs
+            #   {"action": "error"}    - the per-source monitor legs report
+            #                            failure per source, with no counter
+            # Miss either and a broken leg shows up as a green tick.
+            errs=$(jq '[.. | objects | .errors? // empty] | add // 0' "resp-$name.json" 2>/dev/null || echo 0)
+            acts=$(jq '[.. | objects | select(.action? == "error")] | length' "resp-$name.json" 2>/dev/null || echo 0)
+            if [ "${errs:-0}" != "0" ] || [ "${acts:-0}" != "0" ]; then
+              echo "::error::$name reported errors=$errs action-errors=$acts"
+              failed=1
+            fi
+          }
+
+          # Order matters — each leg feeds the next.
+          #  3c alerts on drift ..................... writes accuracy_alert_log
+          #  3d converts graded misses to fixtures .. writes miss_fixtures
+          #  3b compares live prompt versions ....... may REVERT (never promote)
+          #  3e drafts against 3c's alerts + 3d's fixtures, then pauses
+          run_leg accuracy-monitor              /api/accuracy-monitor/run-daily
+          run_leg miss-fixtures                 /api/miss-fixtures/run-daily
+          run_leg prompt-monitor                /api/prompt-monitor/run-daily
+          run_leg prompt-drafter-run-pending    /api/prompt-drafter/run-pending
+          run_leg prompt-drafter-check-approvals /api/prompt-drafter/check-approvals
+
+          exit $failed
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "### Path-back daily"
+            for f in resp-*.json; do
+              [ -e "$f" ] || continue
+              name="${f#resp-}"; name="${name%.json}"
+              echo ""
+              echo "**$name**"
+              echo '```json'
+              cat "$f"
+              echo '```'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -463,3 +463,117 @@ auto-disables their `daily_brief_enabled` so we don't keep retrying.
 | Settings page shows "Checking link status…" forever | Backend `/api/telegram/link-status` returned non-OK or Supabase JWT verification failed. Check Render logs for the user's session. |
 | Daily brief returns `targets: 0` | No users have linked their Telegram yet. Try the link flow first. |
 | Daily brief returns `failed > 0` with "Forbidden" | The user blocked the bot. Backend auto-disables their brief — no action needed. |
+
+---
+
+## Daily brief email
+
+The email twin of the Telegram brief. Same content, same cron, different
+transport. Built because the Telegram brief only reaches users who linked a
+chat, and because email needs no client install.
+
+Both channels read the *same* payload builder
+(`routers/telegram.build_user_brief`), so anything added to one brief shows up
+in the other automatically.
+
+### Why not send it from a Claude session
+
+Sending through an assistant's Gmail tool needs an interactive session and a
+per-send approval, by design. That can't be handed to a cron. Everything below
+runs server-side so the brief goes out whether or not any machine of yours is
+on.
+
+### One-time setup
+
+**1. Run the migration.** Paste `supabase/migrations/014_email_brief_subs.sql`
+into the Supabase SQL Editor and run it. Verify:
+
+```sql
+SELECT count(*) FROM public.email_brief_subs;
+```
+
+**2. Get a Resend key.** Sign up at https://resend.com, then **API Keys** ->
+**Create API Key** (send-only permission is enough).
+
+Free tier is 3,000 emails/month and 100/day, which is plenty for a per-user
+daily brief until you have ~100 subscribers.
+
+**3. Set the backend env vars** (Render -> service -> Environment):
+
+| Var | Value |
+|---|---|
+| `RESEND_API_KEY` | `re_...` from step 2 |
+| `BRIEF_EMAIL_FROM` | `FinContext <onboarding@resend.dev>` until a domain is verified |
+| `PUBLIC_API_BASE` | `https://YOUR-BACKEND.onrender.com` (builds unsubscribe links) |
+
+Leave `RESEND_API_KEY` unset locally and the send endpoint returns 503 while
+the rest of the app is unaffected.
+
+> **Deliverability:** `onboarding@resend.dev` only delivers to the email you
+> signed up to Resend with. That is fine for testing on yourself. To send to
+> anyone else, add a domain in Resend -> **Domains**, set the DKIM/SPF records
+> it gives you, then change `BRIEF_EMAIL_FROM` to `brief@yourdomain.com`.
+
+**4. Subscribe yourself.** The endpoint is authed, so grab a Supabase access
+token from the web app (DevTools -> Application -> Local Storage -> the
+`sb-*-auth-token` entry -> `access_token`) and:
+
+```powershell
+$token = "<access_token>"
+curl -X POST https://YOUR-BACKEND.onrender.com/api/brief/email-subscribe `
+  -H "Authorization: Bearer $token"
+```
+
+Expected: `{"subscribed":true,"email":"you@example.com"}`. Check anytime with
+`GET /api/brief/email-status` and the same header.
+
+### Cron
+
+Add a **second** cron-job.org entry alongside the Telegram one:
+
+- **Title:** `FinContext daily brief (email)`
+- **URL:** `https://YOUR-BACKEND.onrender.com/api/brief/send-daily-email`
+- **Schedule:** `0 3 * * 1-5` (3:00 UTC = 8:30 AM IST, Mon-Fri)
+- **Method:** POST · **Timeout:** 300s
+- **Custom header:** `X-Admin-Token` = `<your ADMIN_TOKEN>`
+
+Then **Run now**. Expected response:
+
+```json
+{
+  "targets": 1,
+  "sent": 1,
+  "skipped_no_holdings": 0,
+  "failed": 0
+}
+```
+
+### Testing locally
+
+```powershell
+$env:FINCONTEXT_API_BASE    = "https://YOUR-BACKEND.onrender.com"
+$env:FINCONTEXT_ADMIN_TOKEN = "<your admin token>"
+python scripts/send_daily_brief.py --channel email
+```
+
+Add `--only-user-id <uuid>` to send to exactly one subscriber while testing.
+
+### Unsubscribing
+
+Every email carries a footer link and a `List-Unsubscribe` header, both hitting
+`/api/brief/email-unsubscribe?token=...` with a per-subscriber token. That
+endpoint sets `enabled = false` and needs no login, which is what makes Gmail's
+native unsubscribe button work. Users can also re-subscribe via
+`POST /api/brief/email-subscribe`, which keeps the original token so links in
+already-delivered mail keep working.
+
+### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| 503 `RESEND_API_KEY not set` | Env var missing on the service. Redeploy after adding it. |
+| `failed > 0`, error `HTTP 403` | Sending to an address other than your Resend signup address without a verified domain. See the deliverability note above. |
+| `targets: 0` | Nobody subscribed yet. Run the subscribe call in step 4. |
+| `skipped_no_holdings` equals `targets` | Subscribers exist but have no portfolio rows. The brief is P&L-driven, so it skips empty portfolios. |
+| Mail lands in spam | Expected on `onboarding@resend.dev`. Verify a domain to fix properly. |
+| Brief arrives but sections are missing | By design. Each section is emitted only when its data is present, so quiet days are short. |
