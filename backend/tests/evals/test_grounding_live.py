@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.services import ai_client
+from app.services.llm import ai_client
 from tests.evals.fixtures import RISK_REPORT_SPARSE_HISTORY, STOCK_CONTEXT_MISSING_GROWTH
 
 pytestmark = pytest.mark.skipif(

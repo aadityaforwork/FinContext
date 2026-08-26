@@ -118,7 +118,7 @@ confidence distribution, tokens/call, p95 latency — all from
 `prompt_call_log`, migration `008_prompt_call_log.sql`) and reverts the
 `production` label back to the previous version if — and only if — both a
 minimum sample size and a minimum effect size are cleared. **Never
-promotes** — see `backend/app/services/prompt_monitor.py`'s module
+promotes** — see `backend/app/services/pathback/prompt_monitor.py`'s module
 docstring. Idempotent — safe to re-run any time.
 
 Same cron setup as `compute_outcomes.py` above (cron-job.org, POST,
@@ -155,7 +155,7 @@ should look at the prompt" — the gap that existed before this job was that
 the only way to notice was opening the Accuracy page. Compares each
 monitored source's (`tomorrow_per_holding` / `news_feed`) hit rate over the
 last 14 days against its own trailing 90-day baseline
-(`backend/app/services/accuracy_monitor.py`) and pushes a Telegram message
+(`backend/app/services/pathback/accuracy_monitor.py`) and pushes a Telegram message
 to `TELEGRAM_ADMIN_CHAT_ID` if — and only if — both a minimum sample size
 (20 scored predictions in each window) and a minimum effect size (15
 percentage-point drop) are cleared. Re-alerts for the same source are
@@ -213,10 +213,10 @@ windows — not an error.
 
 Triggers `POST /api/miss-fixtures/run-daily`. Path-back leg 3d: closes the
 other gap — a miss caught by a human reading real output already becomes a
-permanent eval fixture (`backend/app/services/prompt_eval_cases.py`); a miss
+permanent eval fixture (`backend/app/services/pathback/prompt_eval_cases.py`); a miss
 the *market* catches a day or two later used to dead-end at the Accuracy
 page. This job scans recently graded misses
-(`backend/app/services/miss_fixtures.py`) and, for each one where the exact
+(`backend/app/services/pathback/miss_fixtures.py`) and, for each one where the exact
 context that was live at prediction time is still available, converts it
 into a fixture: replay that context, check that the candidate prompt gets
 *this* ticker's direction right where the original call got it wrong,
@@ -275,8 +275,8 @@ python scripts/run_prompt_drafter.py --action check-approvals
 **`run-pending`** (`POST /api/prompt-drafter/run-pending`) — scans
 `accuracy_alert_log` for prompts flagged in the last 14 days and, for each
 one not already covered by an in-flight or recent attempt, drafts a revised
-prompt (`backend/app/services/prompt_drafter.py`), tests it against
-`backend/app/services/prompt_eval_cases.py`'s hand-written cases PLUS
+prompt (`backend/app/services/pathback/prompt_drafter.py`), tests it against
+`backend/app/services/pathback/prompt_eval_cases.py`'s hand-written cases PLUS
 `miss_fixtures.py`'s market-caught cases, and — only if the gate verdict is
 `IMPROVED` — creates a Langfuse version labeled `candidate` (never
 `production`) and pushes a Telegram alert. Expected output most days:

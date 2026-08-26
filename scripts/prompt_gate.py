@@ -38,12 +38,13 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 
-from app.services import langfuse_client, prompt_gate  # noqa: E402
+from app.services.observability import langfuse_client
+from app.services.pathback import prompt_gate  # noqa: E402
 from app.routers.portfolio_intelligence import (  # noqa: E402
     NEWS_FEED_ANNOTATION_FALLBACK_PROMPT,
     TOMORROW_WATCH_FALLBACK_PROMPT,
 )
-from app.services.prompt_eval_cases import (  # noqa: E402
+from app.services.pathback.prompt_eval_cases import (  # noqa: E402
     NEWS_FEED_ANNOTATION_CASES,
     TOMORROW_WATCH_CASES,
 )

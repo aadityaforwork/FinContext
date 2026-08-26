@@ -40,7 +40,7 @@ REPO_ROOT = BACKEND_ROOT.parent
 # ---------------------------------------------------------------------------
 def test_grounding_contract_core_doctrine_present_in_both_copies():
     from app.agents.base import GROUNDING_CONTRACT as agent_contract
-    from app.services.ai_client import GROUNDING_CONTRACT as prompt_contract
+    from app.services.llm.ai_client import GROUNDING_CONTRACT as prompt_contract
 
     # Markers for the four hard rules both copies must restate: cite-only,
     # null+data_gaps for unsupported fields, {text,source} objects (no bare

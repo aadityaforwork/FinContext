@@ -14,7 +14,9 @@ Covers the five scenarios called out in the spec:
 
 from __future__ import annotations
 
-from app.services import langfuse_client, outcome_ledger, prompt_monitor
+from app.services.observability import langfuse_client
+from app.services.outcomes import outcome_ledger
+from app.services.pathback import prompt_monitor
 
 
 def _row(version, *, source="langfuse", confidence=None, data_gaps_count=0,

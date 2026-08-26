@@ -18,7 +18,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Header
 
 from app.routers.outcomes import _check_admin
-from app.services import miss_fixtures
+from app.services.pathback import miss_fixtures
 
 router = APIRouter(prefix="/api/miss-fixtures", tags=["miss-fixtures"])
 

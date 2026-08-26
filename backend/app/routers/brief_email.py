@@ -34,7 +34,7 @@ from fastapi.responses import HTMLResponse
 from supabase import create_client
 
 from app.routers.telegram import build_user_brief, verify_supabase_user
-from app.services import email_sender
+from app.services.notify import email_sender
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/brief", tags=["brief-email"])

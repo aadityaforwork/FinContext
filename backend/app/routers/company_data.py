@@ -9,7 +9,7 @@ and Python calls and adds disclaimers.
 from fastapi import APIRouter, HTTPException
 
 from app.core.compliance import with_disclaimer
-from app.services import fundamentals
+from app.services.marketdata import fundamentals
 
 router = APIRouter(prefix="/api/company", tags=["company"])
 

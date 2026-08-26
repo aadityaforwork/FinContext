@@ -20,7 +20,8 @@ from app.agents import base as agents_base
 from app.agents.crews import narrative as narrative_crew
 from app.core.compliance import with_disclaimer
 from app.core import rate_limit
-from app.services import ai_client, grounding, technicals
+from app.services.llm import ai_client, grounding
+from app.services.marketdata import technicals
 
 logger = logging.getLogger(__name__)
 

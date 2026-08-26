@@ -19,7 +19,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from app.agents.registry import make_risk_analyst
-from app.services import llm_cache
+from app.services.llm import llm_cache
 
 # 24h TTL — overnight prices change once. Same holdings + same date = same brief.
 _RISK_BRIEF_TTL_SECONDS = 24 * 3600

@@ -36,7 +36,8 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from app.nse_universe import TICKER_TO_META
-from app.services import grounding, policy_feeds, yf_safe
+from app.services.llm import grounding
+from app.services.marketdata import policy_feeds, yf_safe
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/onboarding", tags=["onboarding"])

@@ -20,19 +20,13 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
-from app.services import (
-    ai_client,
-    langfuse_client,
-    miss_fixtures,
-    outcome_ledger,
-    prompt_drafter,
-    prompt_draft_store,
-    prompt_gate,
-    prompt_registry,
-    telegram_bot,
-)
-from app.services.eval_runner import CaseResult
-from app.services.prompt_gate import CaseComparison, GateReport, Verdict
+from app.services.llm import ai_client
+from app.services.notify import telegram_bot
+from app.services.observability import langfuse_client, prompt_registry
+from app.services.outcomes import outcome_ledger
+from app.services.pathback import miss_fixtures, prompt_drafter, prompt_draft_store, prompt_gate
+from app.services.pathback.eval_runner import CaseResult
+from app.services.pathback.prompt_gate import CaseComparison, GateReport, Verdict
 
 
 def _report(verdict: Verdict, *, overall_delta=0.2, blocked_cases=None) -> GateReport:

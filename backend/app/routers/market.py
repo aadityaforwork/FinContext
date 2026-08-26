@@ -5,7 +5,7 @@ API endpoints for market-wide data (indices, macro).
 """
 
 from fastapi import APIRouter
-from app.services.market_data import get_market_indices
+from app.services.marketdata.market_data import get_market_indices
 
 router = APIRouter(prefix="/api/market", tags=["market"])
 

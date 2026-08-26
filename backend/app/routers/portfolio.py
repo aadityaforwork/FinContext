@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from cachetools import TTLCache
 import yfinance as yf
 from app.nse_universe import TICKER_TO_YF, TICKER_TO_META, resolve_yf_symbol
-from app.services import yf_safe
+from app.services.marketdata import yf_safe
 
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
 

@@ -43,8 +43,10 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 from supabase import create_client
 
-from app.services import grounding, policy_feeds, telegram_bot
-from app.services.grounding import _fetch_fast_snapshot, _upcoming_earnings
+from app.services.llm import grounding
+from app.services.marketdata import policy_feeds
+from app.services.notify import telegram_bot
+from app.services.llm.grounding import _fetch_fast_snapshot, _upcoming_earnings
 from app.nse_universe import TICKER_TO_META, resolve_yf_symbol
 
 logger = logging.getLogger(__name__)

@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Header, HTTPException
 
 from app.nse_universe import NSE_STOCKS
-from app.services import ai_client, embeddings, vector_store
+from app.services.llm import ai_client, embeddings, vector_store
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/embeddings", tags=["embeddings"])

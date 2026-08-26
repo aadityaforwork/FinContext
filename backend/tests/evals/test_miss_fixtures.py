@@ -12,7 +12,8 @@ case, idempotent re-conversion (already-exists skip), and failure-safety
 
 from __future__ import annotations
 
-from app.services import miss_fixtures, outcome_ledger
+from app.services.outcomes import outcome_ledger
+from app.services.pathback import miss_fixtures
 
 
 def _miss(

@@ -316,6 +316,7 @@ export default function PortfolioView({ onNavigate }) {
                   <tbody>
                     {portfolio.positions.map((pos) => {
                       const isPos = pos.pnl >= 0;
+                      const posHasQuote = typeof pos.current_price === "number" && pos.current_price > 0;
                       const verdict = verdictMap[pos.ticker];
                       const sig = verdict ? SIGNAL_STYLES[verdict.signal] : null;
                       return (
@@ -329,10 +330,23 @@ export default function PortfolioView({ onNavigate }) {
                           </td>
                           <td style={{ padding: "14px 12px", fontVariantNumeric: "tabular-nums", color: "var(--color-text-secondary)" }}>{pos.quantity}</td>
                           <td style={{ padding: "14px 12px", fontVariantNumeric: "tabular-nums", color: "var(--color-text-secondary)" }}>₹{pos.buy_price.toFixed(2)}</td>
-                          <td style={{ padding: "14px 12px", fontWeight: 600, fontVariantNumeric: "tabular-nums", color: "var(--color-text-primary)" }}>₹{pos.current_price.toFixed(2)}</td>
-                          <td style={{ padding: "14px 12px", fontWeight: 600, fontVariantNumeric: "tabular-nums", color: isPos ? "var(--color-accent-green)" : "var(--color-accent-red)" }}>
-                            {isPos ? "+" : ""}₹{pos.pnl.toFixed(2)}
-                            <div style={{ fontSize: "11px" }}>({isPos ? "+" : ""}{pos.pnl_percent.toFixed(2)}%)</div>
+                          {/* null price = quote genuinely unavailable (see
+                              yf_safe.read_quote). Show "—" rather than ₹0.00,
+                              and suppress the P&L entirely: a P&L computed
+                              against a missing price is just the negative of
+                              the whole position, which looks like a total loss. */}
+                          <td style={{ padding: "14px 12px", fontWeight: 600, fontVariantNumeric: "tabular-nums", color: posHasQuote ? "var(--color-text-primary)" : "var(--color-text-muted)" }}>
+                            {posHasQuote ? `₹${pos.current_price.toFixed(2)}` : "—"}
+                          </td>
+                          <td style={{ padding: "14px 12px", fontWeight: 600, fontVariantNumeric: "tabular-nums", color: !posHasQuote ? "var(--color-text-muted)" : isPos ? "var(--color-accent-green)" : "var(--color-accent-red)" }}>
+                            {posHasQuote ? (
+                              <>
+                                {isPos ? "+" : ""}₹{pos.pnl.toFixed(2)}
+                                <div style={{ fontSize: "11px" }}>({isPos ? "+" : ""}{pos.pnl_percent.toFixed(2)}%)</div>
+                              </>
+                            ) : (
+                              <span title="Live price unavailable — P&L can't be computed">—</span>
+                            )}
                           </td>
                           <td style={{ padding: "14px 12px" }}>
                             {sig ? (

@@ -18,7 +18,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 
-from app.services import llm_cache, llm_trace
+from app.services.llm import llm_cache, llm_trace
 
 logger = logging.getLogger(__name__)
 

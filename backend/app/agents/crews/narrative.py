@@ -21,7 +21,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from app.agents.registry import make_narrative_extractor, make_narrative_quantifier
-from app.services import llm_cache
+from app.services.llm import llm_cache
 
 # Cache narrative analyses for 24h. Same text → same answer.
 _NARRATIVE_TTL_SECONDS = 24 * 3600

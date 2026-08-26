@@ -25,7 +25,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Header
 
 from app.routers.outcomes import _check_admin
-from app.services import prompt_drafter
+from app.services.pathback import prompt_drafter
 
 router = APIRouter(prefix="/api/prompt-drafter", tags=["prompt-drafter"])
 

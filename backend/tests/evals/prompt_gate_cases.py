@@ -11,7 +11,7 @@ should import from app.services.prompt_eval_cases directly.
 
 from __future__ import annotations
 
-from app.services.prompt_eval_cases import (  # noqa: F401
+from app.services.pathback.prompt_eval_cases import (  # noqa: F401
     ALL_CASES,
     CASE_NEWS_POLICY_SECTOR_MAPPING,
     CASE_NEWS_TECHNICALS_CONTRADICT_MIXED,

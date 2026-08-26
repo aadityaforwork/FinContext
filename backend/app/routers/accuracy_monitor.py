@@ -19,7 +19,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Header
 
 from app.routers.outcomes import _check_admin
-from app.services import accuracy_monitor
+from app.services.pathback import accuracy_monitor
 
 router = APIRouter(prefix="/api/accuracy-monitor", tags=["accuracy-monitor"])
 

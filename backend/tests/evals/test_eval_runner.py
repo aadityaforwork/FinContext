@@ -8,7 +8,8 @@ module rather than a handful of functions alongside everything else there).
 
 from __future__ import annotations
 
-from app.services import ai_client, eval_runner
+from app.services.llm import ai_client
+from app.services.pathback import eval_runner
 
 
 def _case(check, **kw):

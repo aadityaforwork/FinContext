@@ -21,7 +21,7 @@ import logging
 from fastapi import APIRouter, Header
 
 from app.routers.outcomes import _check_admin  # reuse the existing ADMIN_TOKEN check — no new env read
-from app.services import prompt_monitor
+from app.services.pathback import prompt_monitor
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/prompt-monitor", tags=["prompt-monitor"])

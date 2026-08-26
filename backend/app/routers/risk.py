@@ -25,7 +25,7 @@ from pydantic import BaseModel
 from app.agents import base as agents_base
 from app.agents.explainers import risk_brief as risk_brief_crew
 from app.core.compliance import with_disclaimer
-from app.services import portfolio_analytics
+from app.services.portfolio import portfolio_analytics
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/risk", tags=["risk"])

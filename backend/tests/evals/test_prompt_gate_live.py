@@ -26,8 +26,9 @@ from app.routers.portfolio_intelligence import (
     NEWS_FEED_ANNOTATION_FALLBACK_PROMPT,
     TOMORROW_WATCH_FALLBACK_PROMPT,
 )
-from app.services import ai_client, eval_runner
-from app.services.prompt_eval_cases import ALL_CASES
+from app.services.llm import ai_client
+from app.services.pathback import eval_runner
+from app.services.pathback.prompt_eval_cases import ALL_CASES
 
 pytestmark = pytest.mark.skipif(
     not ai_client.is_available(),

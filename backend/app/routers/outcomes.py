@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Header, HTTPException, Query
 
-from app.services import outcome_ledger
+from app.services.outcomes import outcome_ledger
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/outcomes", tags=["outcomes"])

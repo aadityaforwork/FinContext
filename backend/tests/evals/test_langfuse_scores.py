@@ -10,7 +10,7 @@ server. The write path is exercised only for its no-op behaviour.
 
 from __future__ import annotations
 
-from app.services import langfuse_scores as ls
+from app.services.observability import langfuse_scores as ls
 
 # ---------------------------------------------------------------------------
 # resolve_source_path — the first hard check on AGENTS.md rule 2

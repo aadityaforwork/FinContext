@@ -16,7 +16,9 @@ from pydantic import ValidationError
 from app.agents.crews.narrative import NarrativeOutput
 from app.agents.explainers.risk_brief import RiskBriefOutput
 from app.core.compliance import DISCLAIMER_TEXT, with_disclaimer
-from app.services import prompt_registry, signal_ensemble, track_record
+from app.services.observability import prompt_registry
+from app.services.outcomes import track_record
+from app.services.portfolio import signal_ensemble
 
 
 # ---------------------------------------------------------------------------

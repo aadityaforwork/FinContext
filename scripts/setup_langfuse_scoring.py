@@ -40,7 +40,7 @@ _BACKEND = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 load_dotenv(os.path.join(_BACKEND, ".env"))
 sys.path.insert(0, _BACKEND)
 
-from app.services import langfuse_client  # noqa: E402
+from app.services.observability import langfuse_client  # noqa: E402
 
 # (name, data_type, min, max, categories, description)
 # Mirrors the namespace documented at the top of app/services/langfuse_scores.py —

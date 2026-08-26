@@ -1,6 +1,10 @@
 "use client";
 
 export default function WatchlistCard({ stock, isSelected, onClick }) {
+  // A quote is only real if it's a positive number. null = fetch failed
+  // (yf_safe.read_quote never reports 0 as a price), and 0 would be a stale
+  // row from before that contract existed — both mean "don't show a price".
+  const hasQuote = typeof stock.current_price === "number" && stock.current_price > 0;
   const isPositive = stock.change_percent >= 0;
 
   return (
@@ -44,29 +48,42 @@ export default function WatchlistCard({ stock, isSelected, onClick }) {
           </p>
         </div>
 
-        {/* Right: Price + Change */}
+        {/* Right: Price + Change.
+            The backend sends null (never 0) when a quote genuinely couldn't be
+            fetched — see yf_safe.read_quote. Render that as "—": a dash reads
+            as "we don't know", whereas ₹0.00 reads as a real price and is the
+            bug this guard exists to prevent. */}
         <div style={{ textAlign: "right", marginLeft: "12px" }}>
-          <p style={{ fontSize: "13px", fontWeight: 600, fontVariantNumeric: "tabular-nums", color: "var(--color-text-primary)" }}>
-            ₹{stock.current_price.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+          <p style={{ fontSize: "13px", fontWeight: 600, fontVariantNumeric: "tabular-nums", color: hasQuote ? "var(--color-text-primary)" : "var(--color-text-muted)" }}>
+            {hasQuote
+              ? `₹${stock.current_price.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`
+              : "—"}
           </p>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: "4px", marginTop: "2px" }}>
-            <svg style={{ width: "10px", height: "10px" }} viewBox="0 0 12 12" fill="none">
-              <path
-                d={isPositive ? "M6 2L10 7H2L6 2Z" : "M6 10L2 5H10L6 10Z"}
-                fill={isPositive ? "var(--color-accent-green)" : "var(--color-accent-red)"}
-              />
-            </svg>
-            <span
-              style={{
-                fontSize: "12px",
-                fontWeight: 600,
-                fontVariantNumeric: "tabular-nums",
-                color: isPositive ? "var(--color-accent-green)" : "var(--color-accent-red)",
-              }}
-            >
-              {isPositive ? "+" : ""}{stock.change_percent.toFixed(2)}%
+          {hasQuote && stock.change_percent != null && (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: "4px", marginTop: "2px" }}>
+              <svg style={{ width: "10px", height: "10px" }} viewBox="0 0 12 12" fill="none">
+                <path
+                  d={isPositive ? "M6 2L10 7H2L6 2Z" : "M6 10L2 5H10L6 10Z"}
+                  fill={isPositive ? "var(--color-accent-green)" : "var(--color-accent-red)"}
+                />
+              </svg>
+              <span
+                style={{
+                  fontSize: "12px",
+                  fontWeight: 600,
+                  fontVariantNumeric: "tabular-nums",
+                  color: isPositive ? "var(--color-accent-green)" : "var(--color-accent-red)",
+                }}
+              >
+                {isPositive ? "+" : ""}{stock.change_percent.toFixed(2)}%
+              </span>
+            </div>
+          )}
+          {!hasQuote && (
+            <span style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>
+              price unavailable
             </span>
-          </div>
+          )}
         </div>
       </div>
 

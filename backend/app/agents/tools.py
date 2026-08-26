@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import logging
 
-from app.services import fundamentals, market_data
+from app.services.marketdata import fundamentals, market_data
 
 logger = logging.getLogger(__name__)
 

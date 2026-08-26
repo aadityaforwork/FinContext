@@ -301,11 +301,20 @@ function Banner({ color, children }) {
 }
 
 function Headline({ accuracy }) {
-  const { hit_rate_pct, scored, hits, avg_return_pct, horizon, days, hit_threshold_pct } = accuracy;
-  // Comes from the backend per horizon (it scales with sqrt(trading days) —
-  // see outcome_ledger.hit_threshold_pct). Never hardcode it here: the number
-  // shown has to be the one the rows were actually graded against.
+  const {
+    hit_rate_pct, scored, hits, avg_return_pct, horizon, days,
+    hit_threshold_pct, hit_threshold_range_pct,
+  } = accuracy;
+  // The bar is per-STOCK now, not one number: it scales with each ticker's own
+  // volatility as well as with the horizon (see outcome_ledger.hit_threshold_pct).
+  // So `hit_threshold_pct` is the MEDIAN of what these rows were actually graded
+  // against, and it has to be worded as typical rather than stated as the rule —
+  // quoting it flat would tell a reader every stock is judged at that bar, which
+  // is true of none of them. Never hardcode either number here.
   const thr = hit_threshold_pct != null ? `${hit_threshold_pct}%` : "the horizon's threshold";
+  const thrRange = Array.isArray(hit_threshold_range_pct)
+    ? `${hit_threshold_range_pct[0]}%–${hit_threshold_range_pct[1]}%`
+    : null;
   const goodCutoff = 60;
   const okCutoff = 50;
   const color = hit_rate_pct >= goodCutoff ? "#10b981"
@@ -358,10 +367,13 @@ function Headline({ accuracy }) {
         marginTop: "14px", fontSize: "11px", color: "var(--color-text-muted)",
         fontStyle: "italic", lineHeight: 1.5,
       }}>
-        A "hit" means the predicted direction matched AND the actual move was ≥ {thr}.
-        Neutral calls hit if the move stayed under {thr}. "Mixed" calls aren't scored.
-        That bar scales with the horizon (√time), so a 20-day call isn't graded
-        against the same band as a next-day one.
+        A "hit" means the predicted direction matched AND the actual move cleared
+        that stock's own bar — typically {thr}
+        {thrRange ? ` (${thrRange} across these calls)` : ""} at this horizon.
+        Neutral calls hit if the move stayed under it. "Mixed" calls aren't scored.
+        The bar scales with the horizon (√time) and with each stock's own
+        volatility, so a quiet large-cap isn't graded against the same band as a
+        jumpy small-cap, and a 20-day call isn't graded like a next-day one.
       </p>
     </div>
   );

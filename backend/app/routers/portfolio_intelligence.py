@@ -19,18 +19,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.core.compliance import with_disclaimer
-from app.services import (
-    ai_client,
-    grounding,
-    llm_trace,
-    market_data,
-    outcome_ledger,
-    prompt_registry,
-    response_cache,
-    signal_ensemble,
-    track_record,
-    vector_store,
-)
+from app.services.llm import ai_client, grounding, llm_trace, response_cache, vector_store
+from app.services.marketdata import market_data
+from app.services.observability import prompt_registry
+from app.services.outcomes import outcome_ledger, track_record
+from app.services.portfolio import signal_ensemble
 from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
@@ -1965,7 +1958,7 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
     # Compute technical state for every ticker the user could be exposed to.
     # This lets the LLM write reasons like "rally on weak volume — move may fade"
     # instead of "positive movement enhances sentiment" (which says nothing).
-    from app.services import technicals as _tech
+    from app.services.marketdata import technicals as _tech
     universe_set = list({*user_holdings, *user_watchlist})
     tech_by_ticker: dict[str, dict] = {}
     try:

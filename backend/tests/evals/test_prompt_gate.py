@@ -7,7 +7,8 @@ deterministically per (prompt_text, case) pair.
 
 from __future__ import annotations
 
-from app.services import ai_client, eval_runner, prompt_gate
+from app.services.llm import ai_client
+from app.services.pathback import eval_runner, prompt_gate
 
 
 def _case(id_, check, holdout=False):

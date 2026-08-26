@@ -14,7 +14,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 
-from app.services import ai_client
+from app.services.llm import ai_client
 
 logger = logging.getLogger(__name__)
 

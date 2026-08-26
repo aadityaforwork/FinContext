@@ -24,9 +24,9 @@ from app.nse_universe import (
     resolve_yf_symbol,
     search_stocks,
 )
-from app.services.data_ingestion import retrieve_context
-from app.services.llm_engine import generate_analysis
-from app.services import yf_safe
+from app.services.marketdata.data_ingestion import retrieve_context
+from app.services.llm.llm_engine import generate_analysis
+from app.services.marketdata import yf_safe
 
 import asyncio
 import yfinance as yf

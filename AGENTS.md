@@ -2,8 +2,8 @@
 
 Instructions for any AI coding agent (Claude Code, Cursor, Codex, etc.) working
 in this repo. `CLAUDE.md` points here. Read this before touching anything
-under `backend/app/agents/`, `backend/app/services/ai_client.py`,
-`backend/app/services/grounding.py`, or any router that calls an LLM.
+under `backend/app/agents/`, `backend/app/services/llm/ai_client.py`,
+`backend/app/services/llm/grounding.py`, or any router that calls an LLM.
 
 **Keeping this file from re-bloating:** before adding a new rule or incident
 write-up here, ask two questions. (1) *Can a machine check it?* If yes, it

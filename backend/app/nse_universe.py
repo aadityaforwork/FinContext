@@ -410,7 +410,7 @@ def _probe_yf_ticker(query: str) -> dict | None:
         # Lazy import — yfinance import is heavy; we don't want module-load
         # cost just to define this function.
         import yfinance as yf
-        from app.services import yf_safe
+        from app.services.marketdata import yf_safe
 
         def _inner():
             t = yf.Ticker(f"{q}.NS")

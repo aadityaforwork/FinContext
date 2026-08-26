@@ -95,7 +95,7 @@ below are project-specific and save a re-discovery round trip. Confirmed
   event ID for a lag-free direct lookup.
 - **Langfuse** — LLM observability, project keys in `~/.claude.json` under
   the top-level (user-scope) `mcpServers.langfuse` entry — added 2026-08-11.
-  Wired into `backend/app/services/llm_trace.py`'s `span()` context manager,
+  Wired into `backend/app/services/llm/llm_trace.py`'s `span()` context manager,
   so every `ai_client.py` call and every CrewAI crew kickoff (via
   `agents/orchestrator.py`'s `run_cached`) gets a Langfuse generation
   observation automatically — no per-call-site changes needed if you add a
