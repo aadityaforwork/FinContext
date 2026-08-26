@@ -18,6 +18,17 @@ This module adds genuine source variety:
 Each fetch fans out to all sources concurrently with hard timeouts, merges the
 results, deduplicates by normalized-title hash, and sorts by freshness. Per-feed
 failures are isolated (one slow RBI server can't stall the whole pipeline).
+
+Two invariants this module now enforces, both added 2026-08-26 after finding
+2016 headlines being served to the LLM as current market context:
+
+  1. **Freshness is correctness, not just ranking.** An item outside
+     [now - 7d, now + 1d] is dropped before it can be cached — see
+     `_drop_stale`. A feed can return HTTP 200 with well-formed XML full of
+     decade-old entries, and every other guard here passes that.
+  2. **Nothing hands out a reference into `_feed_cache`.** Every public
+     function returns fresh dicts. Callers mutate what they get back, and
+     those writes used to land in the cache.
 """
 
 from __future__ import annotations
@@ -25,8 +36,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
 from email.utils import parsedate_to_datetime
 from urllib.parse import quote
 
@@ -90,6 +101,36 @@ _feed_neg_cache: TTLCache = TTLCache(maxsize=64, ttl=5 * 60)
 # not a wall of repeats every Context Engine run. Cleared on process restart.
 _feed_logged_failure: set[str] = set()
 
+# ---------------------------------------------------------------------------
+# Freshness window
+# ---------------------------------------------------------------------------
+# A feed can fail by serving OLD content at HTTP 200, which every guard above
+# passes: the request succeeds, the XML parses, entries come back. Found live
+# on 2026-08-26 — Moneycontrol's MCtopnews.xml was serving items dated
+# 2016-10-05 ("Sensex, Nifty wobbly; Hind Zinc, SBI, Force...") and
+# business.xml items from 2024-04-23, both at 200. Those headlines went
+# straight into grounding.build_market_context as *current* market context,
+# which is a rule-1 grounding failure: the model narrates decade-old news as
+# today's.
+#
+# So freshness is now a correctness check, not just a sort key. Seven days is
+# deliberately loose — weekend + a holiday still leaves Friday's results
+# coverage reachable — while being three orders of magnitude tighter than the
+# failure it exists to catch.
+_MAX_ITEM_AGE_S = 7 * 24 * 3600
+
+# Symmetric guard. A feed with a skewed clock (or a publisher scheduling posts
+# ahead) yields items dated in the future, and those pin to the top of every
+# freshness sort forever — the same "bad timestamp wins the ranking" failure as
+# stale content, just from the other direction. One day of tolerance covers
+# timezone sloppiness without admitting anything genuinely fabricated.
+_MAX_FUTURE_SKEW_S = 24 * 3600
+
+# Same once-per-process discipline as _feed_logged_failure, separate set: a
+# feed dropping items for staleness is a different operational fact from a feed
+# that won't respond, and conflating them hides one behind the other.
+_feed_logged_stale: set[str] = set()
+
 # Shared executor for concurrent fetches. 8 workers is more than enough for our
 # feed list and keeps Render's worker pool from getting starved.
 _exec = ThreadPoolExecutor(max_workers=8, thread_name_prefix="news-rss")
@@ -134,10 +175,55 @@ def _strip_html(s: str | None) -> str:
     return re.sub(r"<[^>]+>", "", s).strip()
 
 
+def _drop_stale(items: list[dict], source: str, url: str) -> list[dict]:
+    """Drop items whose timestamp falls outside the trust window.
+
+    Undated items (`_ts == 0`) are KEPT. That's the deliberate half of this
+    rule: we can't prove an undated item is stale, and every feed in the
+    registry currently dates its entries correctly, so dropping them would
+    trade a real coverage loss for a hypothetical. They already sort to the
+    bottom on `_ts`, and the count is logged so a feed that silently switches
+    to an unparseable date format shows up as a number rather than as silence.
+    """
+    now = time.time()
+    fresh: list[dict] = []
+    stale = 0
+    undated = 0
+    oldest_dropped = 0.0
+    for it in items:
+        ts = it.get("_ts") or 0.0
+        if not ts:
+            undated += 1
+            fresh.append(it)
+            continue
+        if ts < now - _MAX_ITEM_AGE_S or ts > now + _MAX_FUTURE_SKEW_S:
+            stale += 1
+            oldest_dropped = min(oldest_dropped or ts, ts)
+            continue
+        fresh.append(it)
+
+    if (stale or undated) and url not in _feed_logged_stale:
+        _feed_logged_stale.add(url)
+        age_days = (now - oldest_dropped) / 86400 if oldest_dropped else 0
+        logger.warning(
+            "RSS source served untrustworthy dates: %s — dropped %d/%d stale "
+            "(oldest %.0f days), kept %d undated. Feed responded 200; this is "
+            "a content problem, not a transport one.",
+            source, stale, len(items), age_days, undated,
+        )
+    return fresh
+
+
 def fetch_feed(url: str, source: str, category: str, limit: int = 12) -> list[dict]:
-    """Fetch a single RSS feed. Returns up to `limit` items. Cached + neg-cached."""
+    """Fetch a single RSS feed. Returns up to `limit` items. Cached + neg-cached.
+
+    Returns COPIES of the cached dicts. Callers mutate what they get back
+    (`fetch_india_market_pool` strips `_ts`, `data_ingestion.retrieve_context`
+    writes `relevance_score`), and handing out the cached objects meant those
+    writes landed in the cache — see the comment in `fetch_india_market_pool`.
+    """
     if url in _feed_cache:
-        return _feed_cache[url][:limit]
+        return [dict(it) for it in _feed_cache[url][:limit]]
     if url in _feed_neg_cache:
         return []
     try:
@@ -158,8 +244,12 @@ def fetch_feed(url: str, source: str, category: str, limit: int = 12) -> list[di
                 "published_date": _parse_published(entry),
                 "_ts":            _parse_published_ts(entry),
             })
+        # Freshness is enforced BEFORE caching, so a stale feed costs one
+        # filter pass per TTL rather than one per read, and nothing downstream
+        # can reach around the check by touching the cache directly.
+        out = _drop_stale(out, source, url)
         _feed_cache[url] = out
-        return out
+        return [dict(it) for it in out[:limit]]
     except Exception as e:
         _feed_neg_cache[url] = True
         # Log a feed failure ONCE per process. Quiet by default — these feeds
@@ -253,10 +343,22 @@ def fetch_india_market_pool(n: int = 18) -> list[dict]:
     # Freshness sort BEFORE dedup so we keep the most recent variant of each story.
     items.sort(key=lambda x: x.get("_ts", 0), reverse=True)
     items = dedup_items(items)
-    # Drop the private _ts field before returning to consumers — internal only.
-    for it in items:
-        it.pop("_ts", None)
-    return items[:n]
+    # Strip the private `_ts` by BUILDING NEW DICTS, never by mutating in place.
+    #
+    # This used to be `for it in items: it.pop("_ts", None)` — and the dicts it
+    # popped from were the very objects sitting in `_feed_cache`, because
+    # `fetch_feed` handed out its cached list directly. So the first pool call
+    # of each 10-minute TTL deleted the sort key from the cache, and every call
+    # after it sorted `.get("_ts", 0)` → 0 for every item: the freshness sort
+    # silently became a no-op and ordering collapsed to thread-completion
+    # order. Measured 2026-08-26 — `_ts` present on 12/12 items after
+    # `fetch_feed`, 0/12 after one pool call, and consecutive calls returned
+    # today's headlines, then 2016's, then 2016's again.
+    #
+    # `fetch_feed` now returns copies too, so this is belt and braces on
+    # purpose: the aliasing is fixed at the source, and the one call site that
+    # provably tripped over it no longer mutates anything either way.
+    return [{k: v for k, v in it.items() if k != "_ts"} for it in items[:n]]
 
 
 def google_news_for_query(query: str, hl: str = "en-IN", gl: str = "IN",
@@ -264,7 +366,7 @@ def google_news_for_query(query: str, hl: str = "en-IN", gl: str = "IN",
     """Google News RSS for a specific query (kept as backstop / per-ticker)."""
     cache_key = f"gnews|{query}|{hl}|{gl}|{ceid}"
     if cache_key in _feed_cache:
-        return _feed_cache[cache_key][:n]
+        return [dict(it) for it in _feed_cache[cache_key][:n]]
     try:
         url = (f"https://news.google.com/rss/search?q={quote(query)}"
                f"&hl={hl}&gl={gl}&ceid={ceid}")
@@ -289,7 +391,11 @@ def google_news_for_query(query: str, hl: str = "en-IN", gl: str = "IN",
                 "published_date": _parse_published(entry),
             })
         _feed_cache[cache_key] = out
-        return out[:n]
+        # Copies, same reason as fetch_feed: `data_ingestion.retrieve_context`
+        # writes `relevance_score` onto whatever it gets back, and that used to
+        # land in the shared cache — so one ticker's freshness ranking leaked
+        # into the next ticker's cached items.
+        return [dict(it) for it in out[:n]]
     except Exception as e:
         logger.warning("Google News fetch failed for '%s': %s", query, e)
         return []
