@@ -18,11 +18,17 @@ This module fixes both:
         thread is left to finish in the background (Python cannot kill
         threads) but the caller gets ok=False immediately.
 
-  • classify_error(exc, output) -> "permanent" | "transient" | None
-        looks at the exception (and optionally a None/empty result) and
-        decides whether the symbol is permanently bad (delisted, unknown)
-        or just having a temporary hiccup. Callers use this to pick the
-        right negative-cache TTL (24h vs 60s).
+  • classify_failure(result) -> "permanent" | "transient"
+        THE one callers should use on the ok=False path. Hand it the raw
+        `result` from run_with_timeout and it picks the negative-cache TTL,
+        crucially treating a timeout as transient rather than delisted.
+
+  • classify_error(exc, output) -> "permanent" | "transient"
+        the lower-level primitive classify_failure is built on: looks at the
+        exception (and optionally a None/empty result) and decides whether
+        the symbol is permanently bad (delisted, unknown) or just having a
+        temporary hiccup. Use it directly only when you have a genuine
+        returned-empty result rather than a run_with_timeout failure.
 
   • TIMEOUT_S — default per-call ceiling (4 seconds). Tuned so 12 parallel
     workers fanning out across a 40-stock portfolio finish in <20s even if
@@ -36,9 +42,11 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutTimeout
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +55,16 @@ logger = logging.getLogger(__name__)
 # worker here, plus headroom for the news/watchlist/portfolio endpoints that
 # also fan out 12 threads in parallel. Was 32 — dropped to 16 to save ~150 MB
 # of idle-thread overhead on Render Starter's 512 MB cap.
-_yf_executor = ThreadPoolExecutor(max_workers=16, thread_name_prefix="yf-safe")
+_YF_MAX_WORKERS = 16
+_yf_executor = ThreadPoolExecutor(max_workers=_YF_MAX_WORKERS, thread_name_prefix="yf-safe")
+
+# ThreadPoolExecutor's queue is unbounded. A timed-out Future keeps running, so
+# without an admission gate a large outer fan-out can enqueue dozens of already-
+# abandoned calls behind 16 stuck workers. Those queued calls then consume their
+# caller-side timeout before they even start and create a self-sustaining outage.
+# Hold each permit until the underlying Future really finishes (not merely until
+# its caller gives up) so abandoned work can never grow beyond executor capacity.
+_yf_capacity = threading.BoundedSemaphore(_YF_MAX_WORKERS)
 
 
 def fanout_workers(default: int) -> int:
@@ -106,12 +123,20 @@ def run_with_timeout(
       ok=False  — fn timed out OR raised. result is None on timeout, or
                   the exception object if it raised within the budget.
 
-    The worker thread is NOT killed on timeout (Python doesn't support
-    that). It will finish whenever yfinance gives up. The cost is one
-    leaked thread for a few extra seconds — acceptable given the executor
-    pool is sized generously.
+    The worker thread is NOT killed on timeout (Python doesn't support that).
+    Its executor-capacity permit remains held until it really finishes, which
+    prevents timed-out work from accumulating in the executor's unbounded queue.
+    Waiting for a free permit has the same bounded timeout as the call itself;
+    in the worst saturated case total caller wall time is at most 2× timeout_s.
     """
-    fut = _yf_executor.submit(fn, *args, **kwargs)
+    if not _yf_capacity.acquire(timeout=timeout_s):
+        return None, False
+    try:
+        fut = _yf_executor.submit(fn, *args, **kwargs)
+    except Exception as e:
+        _yf_capacity.release()
+        return e, False
+    fut.add_done_callback(lambda _fut: _yf_capacity.release())
     try:
         return fut.result(timeout=timeout_s), True
     except FutTimeout:
@@ -148,6 +173,64 @@ def classify_error(exc: Exception | None, result: Any = "__sentinel__") -> Liter
         if result is None or (hasattr(result, "empty") and getattr(result, "empty", False)):
             return "permanent"
     return "transient"
+
+
+def classify_failure(result: Any) -> Literal["permanent", "transient"]:
+    """Pick a negative-cache TTL from what `run_with_timeout` returned with ok=False.
+
+    Pass `result` through verbatim. The two failure legs are not the same
+    kind of evidence:
+
+      • result is an Exception — the call got far enough to raise, so its
+        message is real evidence about the symbol. Pattern-match it via
+        classify_error().
+      • result is None — the call TIMED OUT. That is a statement about our
+        wall clock, never about the symbol. A delisted ticker fails *fast*
+        (Yahoo answers "no data" promptly); it does not hang. So a timeout
+        is always transient.
+
+    That second leg is the entire reason this function exists. Call sites
+    used to spell the classification inline as:
+
+        exc = result if isinstance(result, Exception) else None
+        kind = classify_error(exc, None if exc is None else "__sentinel__")
+
+    On the timeout leg that passes `result=None` into classify_error, which
+    reads a None result as "the caller saw an empty response" — its
+    documented delisted signal — and returns "permanent". So every timeout
+    was negative-cached for 24 HOURS.
+
+    On a laptop that never fires: Yahoo answers in well under the budget.
+    In production it fires constantly — higher RTT from a shared cloud IP,
+    plus every outer fan-out pool in this codebase bottlenecking on
+    _yf_executor's 16 slots, so the per-call budget gets eaten by queue wait
+    before yfinance is even called. One bad minute then blackholes the whole
+    ticker universe for a day, which is exactly the "works locally, empty in
+    prod" shape this project kept hitting.
+
+    NOTE: this takes the raw `result`, so it is only correct on the ok=False
+    path. When ok=True and the function *returned* None, the caller must decide
+    what that means from its own operation: an empty history may be evidence of
+    a dead symbol, while an empty quote after a shared-IP throttle is still
+    ambiguous and should remain transient.
+    """
+    if isinstance(result, Exception):
+        return classify_error(result, "__sentinel__")
+    return "transient"
+
+
+def describe_failure(result: Any, timeout_s: float | None = None) -> str:
+    """Human-readable reason for an ok=False result, for log lines.
+
+    Exists so the timeout leg stops being invisible: most call sites guarded
+    their log behind `if exc is not None`, which is never true on a timeout,
+    so the single most common production failure logged nothing at all.
+    """
+    if isinstance(result, Exception):
+        return f"{type(result).__name__}: {result}"
+    if timeout_s is not None:
+        return f"timed out after {timeout_s:g}s"
+    return "timed out"
 
 
 # Cache-TTL constants — callers import these so the policy lives in one place.

@@ -137,10 +137,10 @@ backend/app/
                         lazy-init lives in one place.
     prompt_registry.py   Path-back leg 3b: fetches Langfuse-managed prompts
                         by `production` label with a hardcoded fallback,
-                        never raises. Only wired to the two prompts that
-                        produce judged predictions (portfolio_intelligence.py
-                        tomorrow-watch + news-feed annotation) — see its
-                        module docstring before adding a third call site.
+                        never raises. Wired to tomorrow-watch + news-feed
+                        annotation (market-judged) and Movers attribution
+                        (grounding-fixture judged) — see its module docstring
+                        before adding another call site.
     eval_runner.py        Path-back leg 3b, Phase 1: runs a deterministic-
                         outcome `EvalCase` N times (default 5) and reports a
                         pass rate, not a boolean — no LLM judges anything.
@@ -202,6 +202,14 @@ backend/app/
                         reverts/promotes/writes a prompt, unlike prompt_
                         monitor.py; see its module docstring for why that
                         stays a human call.
+    grounding_monitor.py  Independent fast trigger for deterministic contract
+                        failures (schema/citations/confidence). Aggregates
+                        private prompt-call scores into grounding_alert_log;
+                        never replaces or modifies accuracy_monitor.py.
+    grounding_fixtures.py Replays an exact private prompt_call_log transcript
+                        for a failed contract score as an EvalCase. Its table
+                        holds the rule + private call FK, not another copy of
+                        user CONTEXT.
     miss_fixtures.py       Path-back leg 3d: daily job (see routers/miss_
                         fixtures.py + scripts/run_miss_fixtures.py) turning
                         each market-graded miss into a permanent eval
@@ -212,12 +220,12 @@ backend/app/
                         rule 9 above for why the context they carry can
                         never touch a public table.
     prompt_drafter.py       Path-back leg 3e: the draft/test/(maybe)publish
-                        agent — the piece that closes the loop accuracy_
-                        monitor.py (3c) opens. Two daily jobs (routers/
+                        agent — the piece that consumes the independent
+                        accuracy and grounding alert queues. Two daily jobs (routers/
                         prompt_drafter.py + scripts/run_prompt_drafter.py):
-                        run-pending drafts a revised prompt for each newly
-                        flagged segment, tests it against prompt_eval_
-                        cases.py + miss_fixtures.py's cases via prompt_
+                        run-pending drafts a targeted revision for each newly
+                        flagged segment, tests it against prompt_eval_cases.py
+                        + miss_fixtures.py + grounding_fixtures.py via prompt_
                         gate.py, and — only if the gate says IMPROVED —
                         creates a Langfuse `candidate` version and PAUSES;
                         check-approvals resumes a paused run once a human

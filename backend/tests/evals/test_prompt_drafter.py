@@ -24,7 +24,13 @@ from app.services.llm import ai_client
 from app.services.notify import telegram_bot
 from app.services.observability import langfuse_client, prompt_registry
 from app.services.outcomes import outcome_ledger
-from app.services.pathback import miss_fixtures, prompt_drafter, prompt_draft_store, prompt_gate
+from app.services.pathback import (
+    grounding_fixtures,
+    miss_fixtures,
+    prompt_draft_store,
+    prompt_drafter,
+    prompt_gate,
+)
 from app.services.pathback.eval_runner import CaseResult
 from app.services.pathback.prompt_gate import CaseComparison, GateReport, Verdict
 
@@ -76,7 +82,10 @@ def _common_mocks(monkeypatch):
     Supabase. Individual tests override what they need."""
     monkeypatch.setattr(prompt_registry, "get_prompt", lambda name, fb, **kw: _FakePromptResult())
     monkeypatch.setattr(outcome_ledger, "graded_misses", lambda horizon="1d", days=30: [])
+    monkeypatch.setattr(outcome_ledger, "recent_grounding_alerts", lambda days=14: [])
     monkeypatch.setattr(miss_fixtures, "load_miss_fixture_cases", lambda prompt_name, limit=50: [])
+    monkeypatch.setattr(grounding_fixtures, "load_grounding_fixture_cases", lambda prompt_name, limit=50: [])
+    monkeypatch.setattr(grounding_fixtures, "build_drafting_evidence", lambda prompt_name, limit=8: "fixture")
     monkeypatch.setattr(telegram_bot, "send_admin_alert", lambda *a, **kw: True)
     monkeypatch.setattr(prompt_draft_store, "create_run", lambda *a, **kw: True)
     monkeypatch.setattr(prompt_draft_store, "update_run", lambda *a, **kw: True)
@@ -323,7 +332,7 @@ def test_run_pending_drafts_starts_a_run_for_a_flagged_prompt(monkeypatch):
     monkeypatch.setattr(outcome_ledger, "recent_accuracy_alerts", lambda days=14: [alert])
     monkeypatch.setattr(prompt_draft_store, "active_run_for_prompt", lambda name, days=7: None)
     started = []
-    monkeypatch.setattr(prompt_drafter, "start_draft_run", lambda name, reason: started.append((name, reason)) or {})
+    monkeypatch.setattr(prompt_drafter, "start_draft_run", lambda name, reason, **kw: started.append((name, reason)) or {})
 
     result = prompt_drafter.run_pending_drafts()
     assert result["runs_started"] == 1
@@ -336,7 +345,7 @@ def test_run_pending_drafts_skips_prompt_with_active_run(monkeypatch):
     monkeypatch.setattr(outcome_ledger, "recent_accuracy_alerts", lambda days=14: [alert])
     monkeypatch.setattr(prompt_draft_store, "active_run_for_prompt", lambda name, days=7: {"thread_id": "t1"})
     started = []
-    monkeypatch.setattr(prompt_drafter, "start_draft_run", lambda name, reason: started.append(name) or {})
+    monkeypatch.setattr(prompt_drafter, "start_draft_run", lambda name, reason, **kw: started.append(name) or {})
 
     result = prompt_drafter.run_pending_drafts()
     assert result["skipped_active_run"] == 1
@@ -351,7 +360,7 @@ def test_run_pending_drafts_dedupes_multiple_alerts_for_same_prompt(monkeypatch)
     monkeypatch.setattr(outcome_ledger, "recent_accuracy_alerts", lambda days=14: alerts)
     monkeypatch.setattr(prompt_draft_store, "active_run_for_prompt", lambda name, days=7: None)
     started = []
-    monkeypatch.setattr(prompt_drafter, "start_draft_run", lambda name, reason: started.append(name) or {})
+    monkeypatch.setattr(prompt_drafter, "start_draft_run", lambda name, reason, **kw: started.append(name) or {})
 
     result = prompt_drafter.run_pending_drafts()
     assert result["alerts_scanned"] == 2
@@ -363,7 +372,7 @@ def test_run_pending_drafts_skips_unmonitored_prompt_name(monkeypatch):
     alert = {"source": "weird", "prompt_name": "portfolio.something_else", "message": "x", "drop_pp": 20.0}
     monkeypatch.setattr(outcome_ledger, "recent_accuracy_alerts", lambda days=14: [alert])
     started = []
-    monkeypatch.setattr(prompt_drafter, "start_draft_run", lambda name, reason: started.append(name) or {})
+    monkeypatch.setattr(prompt_drafter, "start_draft_run", lambda name, reason, **kw: started.append(name) or {})
 
     result = prompt_drafter.run_pending_drafts()
     assert result["skipped_unmonitored"] == 1
@@ -376,6 +385,52 @@ def test_run_pending_drafts_never_raises_when_alert_fetch_fails(monkeypatch):
     monkeypatch.setattr(outcome_ledger, "recent_accuracy_alerts", _boom)
     result = prompt_drafter.run_pending_drafts()
     assert result["errors"] == 1
+
+
+def test_run_pending_drafts_consumes_grounding_queue_with_explicit_tag(monkeypatch):
+    alert = {
+        "prompt_name": "portfolio.movers_attribution",
+        "violation_type": "grounding.citation_validity",
+        "failure_n": 8,
+        "recent_n": 10,
+        "failure_rate_pct": 80.0,
+        "message": "bad paths",
+    }
+    monkeypatch.setattr(outcome_ledger, "recent_accuracy_alerts", lambda days=14: [])
+    monkeypatch.setattr(outcome_ledger, "recent_grounding_alerts", lambda days=14: [alert])
+    monkeypatch.setattr(prompt_draft_store, "active_run_for_prompt", lambda name, days=7: None)
+    started = []
+    monkeypatch.setattr(
+        prompt_drafter, "start_draft_run",
+        lambda name, reason, **kw: started.append((name, reason, kw)) or {},
+    )
+
+    result = prompt_drafter.run_pending_drafts()
+    assert result["grounding_alerts_scanned"] == 1
+    assert result["runs_started"] == 1
+    assert started[0][0] == "portfolio.movers_attribution"
+    assert started[0][2] == {
+        "trigger_type": "grounding",
+        "trigger_key": "grounding.citation_validity",
+    }
+
+
+def test_grounding_trigger_uses_grounding_specific_meta_prompt(monkeypatch):
+    captured = []
+    monkeypatch.setattr(
+        ai_client, "generate_text",
+        lambda prompt, **kw: captured.append(prompt) or "REVISED PROMPT",
+    )
+    state = {
+        "prompt_name": "portfolio.movers_attribution",
+        "trigger_reason": "citation validity failed",
+        "trigger_type": "grounding",
+        "baseline_text": "BASELINE",
+        "evidence": "EXACT CONTEXT AND OUTPUT",
+    }
+    assert prompt_drafter._draft_candidate(state)["draft_text"] == "REVISED PROMPT"
+    assert "Does NOT game".lower() in captured[0].lower()
+    assert "EXACT CONTEXT AND OUTPUT" in captured[0]
 
 
 # ---------------------------------------------------------------------------

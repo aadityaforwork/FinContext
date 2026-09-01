@@ -84,7 +84,8 @@ def get_live_quote(ticker: str) -> dict | None:
     Returns dict with: current_price, change_percent, market_cap_cr, day_high, day_low, volume
     Falls back to seed data if yfinance fails.
 
-    Hardened with yf_safe — 5s wall timeout, 24h cache for delisted symbols.
+    Hardened with yf_safe — 5s wall timeout plus chart fallback when Yahoo's
+    quote endpoint is rate-limited. Ambiguous empty responses retry in 60s.
     """
     cache_key = f"quote_{ticker}"
     if cache_key in _price_cache:
@@ -98,16 +99,10 @@ def get_live_quote(ticker: str) -> dict | None:
         return None
 
     def _inner() -> dict | None:
-        try:
-            stock = yf.Ticker(yf_symbol)
-            info = stock.fast_info
-            current_price = float(info.last_price) if hasattr(info, 'last_price') else float(info.get("lastPrice", 0)) # type: ignore
-            prev_close = float(info.previous_close) if hasattr(info, 'previous_close') else float(info.get("previousClose", 0)) # type: ignore
-            market_cap = float(info.market_cap) / 1e7 if hasattr(info, 'market_cap') and info.market_cap else None
-        except Exception:
-            return None
+        current_price, prev_close, market_cap_raw = yf_safe.read_quote(yf.Ticker(yf_symbol))
         if not current_price or not prev_close:
             return None
+        market_cap = market_cap_raw / 1e7 if market_cap_raw else None
         change_pct = ((current_price - prev_close) / prev_close * 100) if prev_close else 0
         return {
             "current_price": round(current_price, 2),
@@ -117,17 +112,18 @@ def get_live_quote(ticker: str) -> dict | None:
 
     result, ok = yf_safe.run_with_timeout(_inner, timeout_s=5.0)
     if not ok:
-        exc = result if isinstance(result, Exception) else None
-        kind = yf_safe.classify_error(exc, None if exc is None else "__sentinel__")
+        kind = yf_safe.classify_failure(result)
         if kind == "permanent":
             _price_neg_perm[cache_key] = True
         else:
             _price_neg_transient[cache_key] = True
-        if exc is not None:
-            logger.warning(f"yfinance quote failed for {ticker} ({yf_symbol}): {exc}")
+        logger.warning(
+            "yfinance quote failed for %s (%s) - %s - caching %s",
+            ticker, yf_symbol, yf_safe.describe_failure(result, 5.0), kind,
+        )
         return None
     if result is None:
-        _price_neg_perm[cache_key] = True
+        _price_neg_transient[cache_key] = True
         return None
     _price_cache[cache_key] = result
     return result
@@ -175,14 +171,15 @@ def get_price_history(ticker: str, period: str = "1mo") -> list[dict]:
     # 8s budget — history is heavier than fast_info (downloads bars).
     result, ok = yf_safe.run_with_timeout(_inner, timeout_s=8.0)
     if not ok:
-        exc = result if isinstance(result, Exception) else None
-        kind = yf_safe.classify_error(exc, None if exc is None else "__sentinel__")
+        kind = yf_safe.classify_failure(result)
         if kind == "permanent":
             _history_neg_perm[cache_key] = True
         else:
             _history_neg_transient[cache_key] = True
-        if exc is not None:
-            logger.warning(f"yfinance history failed for {ticker} ({yf_symbol}): {exc}")
+        logger.warning(
+            "yfinance history failed for %s (%s) - %s - caching %s",
+            ticker, yf_symbol, yf_safe.describe_failure(result, 8.0), kind,
+        )
         return []
     if result is None:
         _history_neg_perm[cache_key] = True
@@ -230,14 +227,24 @@ def get_market_indices() -> list[dict]:
             continue
         out, ok = yf_safe.run_with_timeout(_fetch_one_index, symbol, timeout_s=5.0)
         if not ok or out is None:
-            exc = out if isinstance(out, Exception) else None
-            kind = yf_safe.classify_error(exc, None if exc is None else "__sentinel__")
+            # Two different failures, deliberately kept apart:
+            #   ok=False      -> timed out or raised; classify_failure decides.
+            #   ok=True, None -> Yahoo answered with no data. That IS the
+            #                    delisted signal, so cache it permanently.
+            if not ok:
+                kind = yf_safe.classify_failure(out)
+                reason = yf_safe.describe_failure(out, 5.0)
+            else:
+                kind = "permanent"
+                reason = "returned no data"
             if kind == "permanent":
                 _index_neg_perm[cache_key] = True
             else:
                 _index_neg_transient[cache_key] = True
-            if exc is not None:
-                logger.warning(f"Index fetch failed for {label} ({symbol}): {exc}")
+            logger.warning(
+                "Index fetch failed for %s (%s) - %s - caching %s",
+                label, symbol, reason, kind,
+            )
             results.append({"label": label, "value": "—", "change": "—", "positive": True})
             continue
 

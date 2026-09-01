@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import {
   ComposableMap,
   Geographies,
@@ -11,6 +11,7 @@ import {
 
 import { API_BASE as _SHARED_API_BASE } from "../lib/api";
 import { claimText, claimSource } from "../lib/claim";
+import { useUniverse } from "../context/UniverseContext";
 const API_BASE = _SHARED_API_BASE;
 const GEO_URL = "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json";
 
@@ -75,6 +76,13 @@ const GLOBE_STYLES = `
 `;
 
 export default function GlobeNewsSection() {
+  const { positions, ready } = useUniverse();
+  const portfolioTickers = useMemo(
+    () => ready
+      ? [...new Set((positions || []).map((p) => p.ticker?.toUpperCase()).filter(Boolean))]
+      : [],
+    [positions, ready],
+  );
   const [rotation, setRotation] = useState([-30, -20, 0]);
   const [scale, setScale] = useState(190);
   const [selected, setSelected] = useState(null);
@@ -129,35 +137,6 @@ export default function GlobeNewsSection() {
     return () => clearInterval(autoRotateRef.current);
   }, [autoRotate, selected]);
 
-  // Keyboard navigation
-  useEffect(() => {
-    const handleKey = (e) => {
-      if (!containerRef.current?.contains(document.activeElement) && document.activeElement !== document.body) return;
-      const codes = Object.keys(COUNTRY_INFO);
-      switch (e.key) {
-        case "ArrowLeft": e.preventDefault(); setRotation(p => [p[0] + 15, p[1], 0]); setAutoRotate(false); break;
-        case "ArrowRight": e.preventDefault(); setRotation(p => [p[0] - 15, p[1], 0]); setAutoRotate(false); break;
-        case "ArrowUp": e.preventDefault(); setRotation(p => [p[0], Math.min(60, p[1] + 10), 0]); setAutoRotate(false); break;
-        case "ArrowDown": e.preventDefault(); setRotation(p => [p[0], Math.max(-60, p[1] - 10), 0]); setAutoRotate(false); break;
-        case "+": case "=": e.preventDefault(); setScale(s => Math.min(300, s + 20)); break;
-        case "-": case "_": e.preventDefault(); setScale(s => Math.max(100, s - 20)); break;
-        case "Escape": setSelected(null); setNews([]); setImpact(null); setAutoRotate(true); break;
-        case "Tab":
-          if (!selected) {
-            e.preventDefault();
-            handleSelect(codes[0]);
-          } else {
-            e.preventDefault();
-            const idx = codes.indexOf(selected);
-            handleSelect(codes[(idx + 1) % codes.length]);
-          }
-          break;
-      }
-    };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [selected]);
-
   // Drag handlers
   const handlePointerDown = (e) => {
     isDragging.current = true;
@@ -180,6 +159,19 @@ export default function GlobeNewsSection() {
     setAutoRotate(false);
   }, []);
 
+  const fetchImpact = useCallback(async (code, headlines) => {
+    setLoadingImpact(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/global-news/portfolio-impact`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ country_code: code, headlines, tickers: portfolioTickers }),
+      });
+      if (res.ok) setImpact(await res.json());
+    } catch (e) {
+      console.warn("Impact fetch failed:", e?.message || e);
+    } finally { setLoadingImpact(false); }
+  }, [portfolioTickers]);
+
   // Fetch news
   const fetchNews = useCallback(async (code) => {
     setLoadingNews(true); setNews([]); setImpact(null);
@@ -193,20 +185,7 @@ export default function GlobeNewsSection() {
       // Backend unreachable — degrade silently. console.warn (not error) so Next dev overlay stays quiet.
       console.warn("News fetch failed:", e?.message || e);
     } finally { setLoadingNews(false); }
-  }, []);
-
-  const fetchImpact = async (code, headlines) => {
-    setLoadingImpact(true);
-    try {
-      const res = await fetch(`${API_BASE}/api/global-news/portfolio-impact`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ country_code: code, headlines }),
-      });
-      if (res.ok) setImpact(await res.json());
-    } catch (e) {
-      console.warn("Impact fetch failed:", e?.message || e);
-    } finally { setLoadingImpact(false); }
-  };
+  }, [fetchImpact]);
 
   const handleSelect = useCallback((code) => {
     setSelected(code); setAutoRotate(false);
@@ -214,6 +193,31 @@ export default function GlobeNewsSection() {
     const info = COUNTRY_INFO[code];
     if (info) setRotation([-info.coords[0], -info.coords[1], 0]);
   }, [fetchNews]);
+
+  // Keyboard navigation lives after handleSelect so the effect can track the
+  // current portfolio-aware fetch callback instead of closing over the first
+  // render forever.
+  useEffect(() => {
+    const handleKey = (e) => {
+      if (!containerRef.current?.contains(document.activeElement) && document.activeElement !== document.body) return;
+      const codes = Object.keys(COUNTRY_INFO);
+      switch (e.key) {
+        case "ArrowLeft": e.preventDefault(); setRotation(p => [p[0] + 15, p[1], 0]); setAutoRotate(false); break;
+        case "ArrowRight": e.preventDefault(); setRotation(p => [p[0] - 15, p[1], 0]); setAutoRotate(false); break;
+        case "ArrowUp": e.preventDefault(); setRotation(p => [p[0], Math.min(60, p[1] + 10), 0]); setAutoRotate(false); break;
+        case "ArrowDown": e.preventDefault(); setRotation(p => [p[0], Math.max(-60, Math.min(60, p[1] - 10)), 0]); setAutoRotate(false); break;
+        case "+": case "=": e.preventDefault(); setScale(s => Math.min(300, s + 20)); break;
+        case "-": case "_": e.preventDefault(); setScale(s => Math.max(100, s - 20)); break;
+        case "Escape": setSelected(null); setNews([]); setImpact(null); setAutoRotate(true); break;
+        case "Tab":
+          e.preventDefault();
+          handleSelect(selected ? codes[(codes.indexOf(selected) + 1) % codes.length] : codes[0]);
+          break;
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [handleSelect, selected]);
 
   const info = selected ? COUNTRY_INFO[selected] : null;
   const hoveredInfo = hovered ? COUNTRY_INFO[hovered] : null;

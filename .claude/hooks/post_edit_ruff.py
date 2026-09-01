@@ -45,6 +45,9 @@ def main() -> int:
     if not file_path:
         return 0
 
+    if not os.path.isabs(file_path):
+        file_path = os.path.join(REPO_ROOT, file_path)
+    file_path = os.path.abspath(file_path)
     norm = file_path.replace("\\", "/")
     if not norm.endswith(".py"):
         return 0

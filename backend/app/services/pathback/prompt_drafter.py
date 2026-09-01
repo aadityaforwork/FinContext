@@ -1,11 +1,10 @@
 """
 Prompt drafter — path-back leg 3e: draft / test / approve agent
 ====================================================================
-The piece that was "designed, not built" going into this session: when a
-segment gets flagged (accuracy_monitor.py's drift alert), draft a revised
-prompt, test it against the eval suite (prompt_gate.py — hand-written cases
-in prompt_eval_cases.py PLUS the market-caught cases miss_fixtures.py has
-been accumulating), and — if it clears the gate — create a Langfuse
+When a segment gets flagged by either independent queue — market accuracy
+or grounding-contract compliance — draft a targeted revised prompt, test it
+against the eval suite (hand-written cases PLUS market miss fixtures PLUS
+grounding fixtures), and — if it clears the gate — create a Langfuse
 `candidate` version and PAUSE, waiting for a human to actually promote it by
 moving the label in the Langfuse UI. This is the first component in the
 whole path-back system that has to survive a real wait for a person: a
@@ -23,10 +22,10 @@ have write access to a `production` label anywhere in its code path; the
 only thing it ever confirms is whether a human already did that (see
 check_pending_approvals).
 
-WHAT TRIGGERS A RUN: run_pending_drafts() (a daily job, same admin-token
-endpoint shape as every other path-back cron) scans accuracy_monitor.py's
-alert log for alerts fired in the last ALERT_LOOKBACK_DAYS days. One alert
-= one flagged prompt. A cooldown (prompt_draft_store.active_run_for_prompt)
+WHAT TRIGGERS A RUN: run_pending_drafts() reads accuracy_alert_log and the
+independent grounding_alert_log. Every run is tagged `accuracy` or
+`grounding`, so the drafting instructions and concrete evidence answer the
+right failure question. A cooldown (prompt_draft_store.active_run_for_prompt)
 stops it from starting a second draft attempt for the same prompt while a
 prior one is still awaiting a human, or too soon after the last attempt
 concluded either way.
@@ -107,6 +106,8 @@ from app.services.observability import langfuse_client, prompt_registry
 from app.services.outcomes import outcome_ledger
 from app.services.pathback import (
     accuracy_monitor,
+    grounding_fixtures,
+    grounding_monitor,
     miss_fixtures,
     prompt_draft_store,
     prompt_eval_cases,
@@ -164,10 +165,36 @@ Respond with ONLY the full revised prompt text. No commentary, no markdown code 
 "Here is the revised prompt:" preamble -- just the prompt text itself, ready to use as-is in \
 place of the current one."""
 
+GROUNDING_DRAFT_META_PROMPT = """You are revising an AI product's system prompt because real calls \
+violated its deterministic grounding contract.
+
+CURRENT PROMPT:
+---
+{baseline_text}
+---
+
+WHY THIS NEEDS REVISION:
+{trigger_reason}
+
+CONCRETE GROUNDING EVIDENCE:
+{evidence}
+
+Write a REVISED version of the prompt that:
+- Fixes the specific demonstrated contract violation using the exact CONTEXT shape above.
+- Requires every analytical claim to keep a real, resolvable source path.
+- Does NOT game citation metrics by omitting claims, citing nothing, returning all nulls, or \
+hedging away useful analysis.
+- Preserves the existing schema, allowed enum values, compliance rules, and useful analytical task.
+- Makes only targeted changes and stays roughly the same length and style.
+
+Respond with ONLY the full revised prompt text, ready to use as-is."""
+
 
 class DraftState(TypedDict, total=False):
     prompt_name: str
     trigger_reason: str
+    trigger_type: str
+    trigger_key: str | None
     baseline_text: str
     baseline_version: int | None
     evidence: str
@@ -184,7 +211,7 @@ class DraftState(TypedDict, total=False):
 # what miss_fixtures.py's eval cases are for; this is just grounding text
 # for the drafting LLM call, not something re-checked programmatically).
 # ---------------------------------------------------------------------------
-def _build_evidence(prompt_name: str, days: int = 30, limit: int = 8) -> str:
+def _build_market_evidence(prompt_name: str, days: int = 30, limit: int = 8) -> str:
     source = _PROMPT_TO_SOURCE.get(prompt_name)
     try:
         misses = outcome_ledger.graded_misses(horizon="1d", days=days)
@@ -202,6 +229,12 @@ def _build_evidence(prompt_name: str, days: int = 30, limit: int = 8) -> str:
             f"'{m.get('direction')}' ({reason}) -- actual 1d return was {m.get('return_pct')}%."
         )
     return "\n".join(lines)
+
+
+def _build_evidence(prompt_name: str, trigger_type: str) -> str:
+    if trigger_type == "grounding":
+        return grounding_fixtures.build_drafting_evidence(prompt_name)
+    return _build_market_evidence(prompt_name)
 
 
 def _serialize_gate_report(report: prompt_gate.GateReport) -> dict:
@@ -233,11 +266,13 @@ def _load_baseline(state: DraftState) -> dict:
     # driftable copy (unlike the SCHEMA text duplicated in miss_fixtures.py/
     # prompt_eval_cases.py, which callers actually depend on structurally).
     from app.routers.portfolio_intelligence import (
+        MOVERS_ATTRIBUTION_FALLBACK_PROMPT,
         NEWS_FEED_ANNOTATION_FALLBACK_PROMPT,
         TOMORROW_WATCH_FALLBACK_PROMPT,
     )
 
     fallback = {
+        "portfolio.movers_attribution": MOVERS_ATTRIBUTION_FALLBACK_PROMPT,
         "portfolio.tomorrow_watch": TOMORROW_WATCH_FALLBACK_PROMPT,
         "portfolio.news_feed_annotation": NEWS_FEED_ANNOTATION_FALLBACK_PROMPT,
     }.get(prompt_name, "")
@@ -245,13 +280,14 @@ def _load_baseline(state: DraftState) -> dict:
     return {
         "baseline_text": result.text,
         "baseline_version": result.version,
-        "evidence": _build_evidence(prompt_name),
+        "evidence": _build_evidence(prompt_name, state.get("trigger_type", "accuracy")),
         "status": "running",
     }
 
 
 def _draft_candidate(state: DraftState) -> dict:
-    meta_prompt = DRAFT_META_PROMPT.format(
+    template = GROUNDING_DRAFT_META_PROMPT if state.get("trigger_type") == "grounding" else DRAFT_META_PROMPT
+    meta_prompt = template.format(
         baseline_text=state["baseline_text"],
         trigger_reason=state["trigger_reason"],
         evidence=state["evidence"],
@@ -285,6 +321,10 @@ def _run_gate(state: DraftState) -> dict:
         cases = cases + miss_fixtures.load_miss_fixture_cases(prompt_name)
     except Exception:
         logger.exception("prompt_drafter: loading miss-fixture cases failed for %s", prompt_name)
+    try:
+        cases = cases + grounding_fixtures.load_grounding_fixture_cases(prompt_name)
+    except Exception:
+        logger.exception("prompt_drafter: loading grounding-fixture cases failed for %s", prompt_name)
 
     if not cases:
         return {
@@ -468,7 +508,13 @@ def _load_thread_state(saver: InMemorySaver, thread_id: str, blob_b64: str) -> N
 # ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
-def start_draft_run(prompt_name: str, trigger_reason: str) -> dict:
+def start_draft_run(
+    prompt_name: str,
+    trigger_reason: str,
+    *,
+    trigger_type: str = "accuracy",
+    trigger_key: str | None = None,
+) -> dict:
     """Kick off a new draft-test-(maybe)publish run for `prompt_name`. Runs
     synchronously through load_baseline -> draft_candidate -> run_gate ->
     (blocked | no_change | publish_candidate -> await_approval). Never
@@ -483,7 +529,12 @@ def start_draft_run(prompt_name: str, trigger_reason: str) -> dict:
         graph = _build_graph().compile(checkpointer=saver)
         config = {"configurable": {"thread_id": thread_id}}
         result = graph.invoke(
-            {"prompt_name": prompt_name, "trigger_reason": trigger_reason},
+            {
+                "prompt_name": prompt_name,
+                "trigger_reason": trigger_reason,
+                "trigger_type": trigger_type,
+                "trigger_key": trigger_key,
+            },
             config=config,
         )
     except Exception as e:
@@ -495,6 +546,7 @@ def start_draft_run(prompt_name: str, trigger_reason: str) -> dict:
 
     prompt_draft_store.create_run(
         thread_id, prompt_name, trigger_reason, status=status,
+        trigger_type=trigger_type, trigger_key=trigger_key,
         baseline_version=result.get("baseline_version"),
         candidate_version=result.get("candidate_version"),
         gate_verdict=result.get("verdict"),
@@ -596,31 +648,53 @@ def check_pending_approvals() -> dict:
 
 
 def run_pending_drafts(alert_lookback_days: int = ALERT_LOOKBACK_DAYS) -> dict:
-    """Daily job: scan accuracy_monitor.py's alert log for recently flagged
-    prompts and start a draft-test-approve run for each one that isn't
-    already covered by an active run (see prompt_draft_store.
-    active_run_for_prompt). Never raises.
+    """Consume the independent market and grounding alert queues.
+
+    Dedupe is per (prompt, trigger_type): an accuracy alert and a grounding
+    alert remain distinguishable inputs. The prompt-level active-run guard
+    still prevents competing candidates for the same live prompt.
     """
     summary = {
-        "alerts_scanned": 0, "runs_started": 0,
+        "alerts_scanned": 0, "accuracy_alerts_scanned": 0,
+        "grounding_alerts_scanned": 0, "runs_started": 0,
         "skipped_active_run": 0, "skipped_unmonitored": 0, "errors": 0,
     }
     try:
-        alerts = outcome_ledger.recent_accuracy_alerts(days=alert_lookback_days)
+        accuracy_alerts = outcome_ledger.recent_accuracy_alerts(days=alert_lookback_days)
     except Exception:
-        logger.exception("prompt_drafter: run_pending_drafts alert fetch failed")
+        logger.exception("prompt_drafter: accuracy alert fetch failed")
         summary["errors"] += 1
-        return summary
+        accuracy_alerts = []
+    try:
+        grounding_alerts = outcome_ledger.recent_grounding_alerts(days=alert_lookback_days)
+    except Exception:
+        logger.exception("prompt_drafter: grounding alert fetch failed")
+        summary["errors"] += 1
+        grounding_alerts = []
 
-    seen_prompts: set[str] = set()
-    for alert in alerts:
+    tagged_alerts = [
+        ("accuracy", alert) for alert in accuracy_alerts
+    ] + [
+        ("grounding", alert) for alert in grounding_alerts
+    ]
+    summary["accuracy_alerts_scanned"] = len(accuracy_alerts)
+    summary["grounding_alerts_scanned"] = len(grounding_alerts)
+
+    seen: set[tuple[str, str]] = set()
+    for trigger_type, alert in tagged_alerts:
         summary["alerts_scanned"] += 1
         prompt_name = alert.get("prompt_name")
-        if not prompt_name or prompt_name in seen_prompts:
+        dedupe_key = (prompt_name, trigger_type)
+        if not prompt_name or dedupe_key in seen:
             continue
-        seen_prompts.add(prompt_name)
+        seen.add(dedupe_key)
 
-        if prompt_name not in accuracy_monitor.SOURCE_TO_PROMPT.values():
+        allowed = (
+            set(accuracy_monitor.SOURCE_TO_PROMPT.values())
+            if trigger_type == "accuracy"
+            else set(grounding_monitor.MONITORED_PROMPTS)
+        )
+        if prompt_name not in allowed:
             summary["skipped_unmonitored"] += 1
             continue
 
@@ -633,9 +707,24 @@ def run_pending_drafts(alert_lookback_days: int = ALERT_LOOKBACK_DAYS) -> dict:
             summary["skipped_active_run"] += 1
             continue
 
-        reason = f"accuracy_monitor alert ({alert.get('drop_pp')}pp drop): {alert.get('message') or 'no message'}"
+        if trigger_type == "accuracy":
+            trigger_key = alert.get("source")
+            reason = (
+                f"accuracy_monitor alert ({alert.get('drop_pp')}pp drop): "
+                f"{alert.get('message') or 'no message'}"
+            )
+        else:
+            trigger_key = alert.get("violation_type")
+            reason = (
+                f"grounding_monitor alert ({alert.get('failure_n')}/{alert.get('recent_n')} failures; "
+                f"{alert.get('failure_rate_pct')}%): {trigger_key} — "
+                f"{alert.get('message') or 'no message'}"
+            )
         try:
-            start_draft_run(prompt_name, reason)
+            start_draft_run(
+                prompt_name, reason,
+                trigger_type=trigger_type, trigger_key=trigger_key,
+            )
             summary["runs_started"] += 1
         except Exception:
             logger.exception("prompt_drafter: start_draft_run failed for %s", prompt_name)

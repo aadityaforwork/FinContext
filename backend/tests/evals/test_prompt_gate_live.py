@@ -1,7 +1,8 @@
 """
 Live prompt-gate eval — actually calls the configured LLM provider N times
 per case against the current `production`-labeled (or fallback) text of
-portfolio.tomorrow_watch / portfolio.news_feed_annotation and reports a
+portfolio.movers_attribution / portfolio.tomorrow_watch /
+portfolio.news_feed_annotation and reports a
 pass rate, using eval_runner.py + app/services/prompt_eval_cases.py
 (re-exported here for back-compat via tests/evals/prompt_gate_cases.py).
 
@@ -23,6 +24,7 @@ from __future__ import annotations
 import pytest
 
 from app.routers.portfolio_intelligence import (
+    MOVERS_ATTRIBUTION_FALLBACK_PROMPT,
     NEWS_FEED_ANNOTATION_FALLBACK_PROMPT,
     TOMORROW_WATCH_FALLBACK_PROMPT,
 )
@@ -40,6 +42,7 @@ def test_current_fixtures_pass_rate_at_n5(capsys):
     """Not a strict pass/fail gate (that's Phase 2) — Phase 1 just needs the
     eval runner wired end to end and the pass rates visible."""
     fallback_by_prompt = {
+        "portfolio.movers_attribution": MOVERS_ATTRIBUTION_FALLBACK_PROMPT,
         "portfolio.tomorrow_watch": TOMORROW_WATCH_FALLBACK_PROMPT,
         "portfolio.news_feed_annotation": NEWS_FEED_ANNOTATION_FALLBACK_PROMPT,
     }

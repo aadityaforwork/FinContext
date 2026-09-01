@@ -33,6 +33,7 @@ on:
         options:
           - all
           - accuracy-monitor
+          - grounding-monitor
           - miss-fixtures
           - prompt-monitor
           - prompt-drafter-run-pending
@@ -94,11 +95,13 @@ jobs:
           }
 
           # Order matters — each leg feeds the next.
-          #  3c alerts on drift ..................... writes accuracy_alert_log
+          #  3c market-accuracy drift ............... writes accuracy_alert_log
+          #  3c grounding-contract drift ............ writes grounding_alert_log
           #  3d converts graded misses to fixtures .. writes miss_fixtures
           #  3b compares live prompt versions ....... may REVERT (never promote)
           #  3e drafts against 3c's alerts + 3d's fixtures, then pauses
           run_leg accuracy-monitor              /api/accuracy-monitor/run-daily
+          run_leg grounding-monitor             /api/grounding-monitor/run-daily
           run_leg miss-fixtures                 /api/miss-fixtures/run-daily
           run_leg prompt-monitor                /api/prompt-monitor/run-daily
           run_leg prompt-drafter-run-pending    /api/prompt-drafter/run-pending

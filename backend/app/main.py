@@ -31,6 +31,7 @@ from app.routers import (
     onboarding as onboarding_router,
     prompt_monitor as prompt_monitor_router,
     accuracy_monitor as accuracy_monitor_router,
+    grounding_monitor as grounding_monitor_router,
     miss_fixtures as miss_fixtures_router,
     prompt_drafter as prompt_drafter_router,
 )
@@ -114,6 +115,7 @@ app.include_router(brief_email_router.router)
 app.include_router(onboarding_router.router)
 app.include_router(prompt_monitor_router.router)
 app.include_router(accuracy_monitor_router.router)
+app.include_router(grounding_monitor_router.router)
 app.include_router(miss_fixtures_router.router)
 app.include_router(prompt_drafter_router.router)
 

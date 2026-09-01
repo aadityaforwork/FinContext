@@ -250,20 +250,25 @@ def generate_grounded_json(
             logger.error("generate_grounded_json: invalid JSON. first 500 chars=%s", raw[:500])
             t.record(parse_error=True)
             t.record_content(output=raw)
-            _score_grounded_call(t, {}, context)
+            score_map = _score_grounded_call(t, {}, context)
             if metrics_out is not None:
                 metrics_out.update(
                     confidence=None, data_gaps_count=None, parse_error=True,
                     tokens_in=t.extra.get("tokens_in"), tokens_out=t.extra.get("tokens_out"),
                     duration_ms=round((time.monotonic() - t.started_at) * 1000, 1),
                     trace_id=t.trace_id,
+                    observation_id=t.observation_id,
+                    task_text=task,
+                    schema_description=schema_description,
+                    output_snapshot=raw,
+                    grounding_scores=score_map,
                 )
             return {}
         confidence = parsed.get("confidence") if isinstance(parsed, dict) else None
         data_gaps_count = len(parsed.get("data_gaps") or []) if isinstance(parsed, dict) else None
         t.record(confidence=confidence, data_gaps=data_gaps_count)
         t.record_content(output=parsed)
-        _score_grounded_call(t, parsed, context)
+        score_map = _score_grounded_call(t, parsed, context)
         if metrics_out is not None:
             metrics_out.update(
                 confidence=confidence, data_gaps_count=data_gaps_count, parse_error=False,
@@ -273,11 +278,16 @@ def generate_grounded_json(
                 # prediction from this call stores this so the market's
                 # verdict can be attached to this trace days later.
                 trace_id=t.trace_id,
+                observation_id=t.observation_id,
+                task_text=task,
+                schema_description=schema_description,
+                output_snapshot=parsed,
+                grounding_scores=score_map,
             )
         return parsed
 
 
-def _score_grounded_call(t, parsed: dict, context: dict) -> None:
+def _score_grounded_call(t, parsed: dict, context: dict) -> dict:
     """Attach the deterministic grounding scores to this call's trace.
 
     Runs on both the success and the parse-failure path — the failure case
@@ -292,10 +302,16 @@ def _score_grounded_call(t, parsed: dict, context: dict) -> None:
     try:
         from app.services.observability import langfuse_scores
 
-        for s in langfuse_scores.grounding_scores(parsed, context).values():
+        scores = langfuse_scores.grounding_scores(parsed, context)
+        for s in scores.values():
             t.score(s.name, s.value, data_type=s.data_type, comment=s.comment)
+        return {
+            s.name: {"value": s.value, "data_type": s.data_type, "comment": s.comment}
+            for s in scores.values()
+        }
     except Exception:
         logger.exception("grounded call scoring failed")
+        return {}
 
 
 def verify_claims(output: dict, context: dict, max_tokens: int = 1024) -> dict:

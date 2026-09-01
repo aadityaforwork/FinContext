@@ -9,14 +9,13 @@ deploy, and (once there's real accuracy volume — see the Notion "Self-
 Iterating System" doc, 3c) let a human or eval run flag underperforming
 segments and relabel a candidate prompt into production.
 
-Scope, deliberately narrow to start: only the two prompts that actually
-produce *judged* predictions — portfolio_intelligence.py's tomorrow-watch
-task and news-feed annotation task, the same two sources track_record.py
-already calibrates. NOT the CrewAI crew backstories (narrative/risk-brief) —
-those crews aren't wired to outcome_ledger, so there's no accuracy signal to
-ever justify relabeling them against. Extend this to a new prompt only once
-that prompt's output is actually logged + judged; versioning a prompt with
-no feedback signal is process theater, not a closed loop.
+Scope is deliberately narrow: the two prompts that produce market-judged
+predictions plus Movers attribution, whose deterministic grounding scores
+and exact failure fixtures now provide an independent feedback signal.
+CrewAI backstories remain out of scope because they have neither market nor
+grounding-fixture gate coverage. Extend only when a prompt has a concrete
+feedback signal and hand-written counterweight cases; versioning without
+both is process theater, not a closed loop.
 
 Mechanism:
   - Each prompt lives in Langfuse under a name (e.g. "portfolio.tomorrow_

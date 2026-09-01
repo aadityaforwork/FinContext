@@ -209,6 +209,29 @@ windows — not an error.
 
 ---
 
+## `run_grounding_monitor.py` — daily grounding-contract alert
+
+Triggers `POST /api/grounding-monitor/run-daily`. This is independent of
+`run_accuracy_monitor.py`: it aggregates schema, citation, and confidence-
+honesty failures from private `prompt_call_log`, then writes a separate
+`grounding_alert_log` row when a prompt/rule pair has at least 5 scored calls
+and a failure rate of at least 20% over 7 days. Exact failures already point
+to private transcript fixtures; this job never edits a prompt.
+
+```powershell
+python scripts/run_grounding_monitor.py
+```
+
+For the supplied historical exports, first apply migration 016 and then run
+the explicit backfill (dry-run is the default):
+
+```powershell
+python scripts/import_langfuse_grounding_exports.py scores.json events.json
+python scripts/import_langfuse_grounding_exports.py scores.json events.json --write
+```
+
+---
+
 ## `run_miss_fixtures.py` — daily miss-to-fixture converter
 
 Triggers `POST /api/miss-fixtures/run-daily`. Path-back leg 3d: closes the
@@ -262,8 +285,8 @@ once older, unconvertible predictions age out of the lookback window.
 
 ## `run_prompt_drafter.py` — prompt draft / test / (maybe) publish agent
 
-Path-back leg 3e: the piece that closes the loop `run_accuracy_monitor.py`
-opens. Two separate jobs, both hit through the same script via `--action`:
+Path-back leg 3e consumes the independent market-accuracy and grounding-
+contract queues. Two separate jobs use the same script via `--action`:
 
 ```powershell
 $env:FINCONTEXT_API_BASE   = "https://YOUR-BACKEND.onrender.com"
@@ -273,11 +296,12 @@ python scripts/run_prompt_drafter.py --action check-approvals
 ```
 
 **`run-pending`** (`POST /api/prompt-drafter/run-pending`) — scans
-`accuracy_alert_log` for prompts flagged in the last 14 days and, for each
+`accuracy_alert_log` and `grounding_alert_log` for prompts flagged in the last 14 days and, for each
 one not already covered by an in-flight or recent attempt, drafts a revised
 prompt (`backend/app/services/pathback/prompt_drafter.py`), tests it against
 `backend/app/services/pathback/prompt_eval_cases.py`'s hand-written cases PLUS
-`miss_fixtures.py`'s market-caught cases, and — only if the gate verdict is
+`miss_fixtures.py`'s market-caught cases PLUS `grounding_fixtures.py`'s exact
+contract-failure replays, and — only if the gate verdict is
 `IMPROVED` — creates a Langfuse version labeled `candidate` (never
 `production`) and pushes a Telegram alert. Expected output most days:
 
@@ -304,8 +328,8 @@ days:
 live is a human relabeling it by hand in the Langfuse UI; this script's
 `check-approvals` action only ever *notices* that happened, never causes it.
 
-Run `run-pending` **after** `run_accuracy_monitor.py` on the same daily
-schedule (so today's alerts, if any, are already logged); `check-approvals`
+Run `run-pending` **after** both monitor jobs on the same daily schedule (so
+today's alerts, if any, are already logged); `check-approvals`
 can run on its own, more frequent schedule if you want.
 
 ---

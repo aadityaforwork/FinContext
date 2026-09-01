@@ -47,14 +47,11 @@ _quote_executor = ThreadPoolExecutor(max_workers=16)
 
 
 def _quote_inner(yf_symbol: str) -> tuple[float, float] | None:
-    """Pure yfinance call. Does NOT catch exceptions — see the matching note
-    in routers/portfolio.py._fetch_price_inner."""
-    stock = yf.Ticker(yf_symbol)
-    info = stock.fast_info
-    price = float(info.last_price) if hasattr(info, 'last_price') else 0.0
-    prev = float(info.previous_close) if hasattr(info, 'previous_close') else price
-    if not price:
+    """Quote read with chart fallback; see portfolio._fetch_price_inner."""
+    price, prev, _ = yf_safe.read_quote(yf.Ticker(yf_symbol))
+    if price is None:
         return None
+    prev = prev or price
     change = ((price - prev) / prev * 100) if prev else 0.0
     return (round(price, 2), round(change, 2))
 
@@ -78,17 +75,18 @@ def _get_quote(ticker: str) -> tuple[float, float]:
 
     result, ok = yf_safe.run_with_timeout(_quote_inner, yf_symbol, timeout_s=5.0)
     if not ok:
-        exc = result if isinstance(result, Exception) else None
-        kind = yf_safe.classify_error(exc, None if exc is None else "__sentinel__")
+        kind = yf_safe.classify_failure(result)
         if kind == "permanent":
             _browse_neg_perm[cache_key] = True
         else:
             _browse_neg_transient[cache_key] = True
-        if exc is not None:
-            logger.warning(f"Quote fetch failed for {ticker}: {exc}")
+        logger.warning(
+            "Quote fetch failed for %s (%s) - caching %s",
+            ticker, yf_safe.describe_failure(result, 5.0), kind,
+        )
         return (0.0, 0.0)
     if result is None:
-        _browse_neg_perm[cache_key] = True
+        _browse_neg_transient[cache_key] = True
         return (0.0, 0.0)
     _browse_cache[cache_key] = result
     return result
@@ -125,14 +123,15 @@ def _get_history(ticker: str, period: str = "1mo") -> list[dict]:
     # 8s budget — history is heavier than fast_info.
     result, ok = yf_safe.run_with_timeout(_history_inner, yf_symbol, period, timeout_s=8.0)
     if not ok:
-        exc = result if isinstance(result, Exception) else None
-        kind = yf_safe.classify_error(exc, None if exc is None else "__sentinel__")
+        kind = yf_safe.classify_failure(result)
         if kind == "permanent":
             _history_neg_perm[cache_key] = True
         else:
             _history_neg_transient[cache_key] = True
-        if exc is not None:
-            logger.warning(f"History fetch failed for {ticker}: {exc}")
+        logger.warning(
+            "History fetch failed for %s (%s) - caching %s",
+            ticker, yf_safe.describe_failure(result, 8.0), kind,
+        )
         return []
     if result is None:
         _history_neg_perm[cache_key] = True

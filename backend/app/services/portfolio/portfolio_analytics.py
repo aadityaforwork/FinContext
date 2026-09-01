@@ -18,15 +18,16 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Iterable
+from typing import Any
 
 import pandas as pd
 import yfinance as yf
 
 from app.nse_universe import TICKER_TO_META
 from app.services.cache import make_cache
-from app.services.marketdata import market_data
+from app.services.marketdata import market_data, yf_safe
 from app.services.portfolio import risk_metrics
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,12 @@ DRAWDOWN_WINDOWS = {
     "5y": 1260,
 }
 
+# A five-year chart fetch is heavier than the short quote/history calls used
+# elsewhere, but it still needs a wall-clock ceiling: this function fans out
+# across every holding and one stuck Yahoo request used to hold the entire risk
+# report open indefinitely.
+HISTORY_FETCH_TIMEOUT_S = 12.0
+
 
 # ---------------------------------------------------------------------------
 # Internal: price fetch
@@ -53,21 +60,31 @@ def _fetch_close_series(yf_symbol: str, period: str) -> pd.Series:
     cache_key = f"{yf_symbol}_{period}"
     if cache_key in _history_cache:
         return _history_cache[cache_key]
-    try:
-        hist = yf.Ticker(yf_symbol).history(period=period)
-        if hist is None or hist.empty:
-            empty = pd.Series(dtype=float)
-            _history_cache[cache_key] = empty
-            return empty
-        # Drop tz to keep arithmetic & alignment simple across symbols.
-        if hist.index.tz is not None:
-            hist.index = hist.index.tz_localize(None)
-        s = hist["Close"].astype(float)
-        _history_cache[cache_key] = s
-        return s
-    except Exception as e:
-        logger.warning("price-history fetch failed for %s: %s", yf_symbol, e)
+
+    def _inner():
+        return yf.Ticker(yf_symbol).history(period=period)
+
+    result, ok = yf_safe.run_with_timeout(
+        _inner, timeout_s=HISTORY_FETCH_TIMEOUT_S,
+    )
+    if not ok:
+        logger.warning(
+            "price-history fetch failed for %s (%s)",
+            yf_symbol, yf_safe.describe_failure(result, HISTORY_FETCH_TIMEOUT_S),
+        )
         return pd.Series(dtype=float)
+
+    hist = result
+    if hist is None or hist.empty:
+        empty = pd.Series(dtype=float)
+        _history_cache[cache_key] = empty
+        return empty
+    # Drop tz to keep arithmetic & alignment simple across symbols.
+    if hist.index.tz is not None:
+        hist.index = hist.index.tz_localize(None)
+    s = hist["Close"].astype(float)
+    _history_cache[cache_key] = s
+    return s
 
 
 def _parallel_fetch(symbols: dict[str, str], period: str) -> dict[str, pd.Series]:

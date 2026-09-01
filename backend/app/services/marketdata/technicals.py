@@ -168,14 +168,15 @@ def compute_signals(ticker: str) -> dict | None:
     # can't stall a worker for 30s.
     result, ok = yf_safe.run_with_timeout(_inner, timeout_s=6.0)
     if not ok:
-        exc = result if isinstance(result, Exception) else None
-        kind = yf_safe.classify_error(exc, None if exc is None else "__sentinel__")
+        kind = yf_safe.classify_failure(result)
         if kind == "permanent":
             _tech_neg_perm[ticker] = True
         else:
             _tech_neg_transient[ticker] = True
-        if exc is not None:
-            logger.warning("technical signals failed for %s: %s", ticker, exc)
+        logger.warning(
+            "technical signals failed for %s (%s) - caching %s",
+            ticker, yf_safe.describe_failure(result, 6.0), kind,
+        )
         return None
     if result is None:
         # Empty history → almost certainly delisted/unknown.

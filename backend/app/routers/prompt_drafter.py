@@ -3,8 +3,8 @@ Prompt Drafter Router
 ========================
 Two admin-token-gated endpoints, path-back leg 3e:
 
-  POST /api/prompt-drafter/run-pending     — scan accuracy_monitor.py's
-      alert log for newly flagged prompts and kick off a draft-test-approve
+  POST /api/prompt-drafter/run-pending     — scan the independent market-
+      accuracy and grounding-contract alert queues and kick off a draft-test-approve
       run for each one not already covered by an in-flight/recent attempt.
       Run AFTER accuracy-monitor/run-daily so today's alerts (if any) are
       already logged.

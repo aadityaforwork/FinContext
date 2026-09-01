@@ -5,8 +5,8 @@ run_prompt_drafter.py — manually trigger the prompt-drafter's two jobs.
 Path-back leg 3e: hits both admin-token endpoints on the FinContext backend.
 
   --action run-pending     POST /api/prompt-drafter/run-pending
-                            Scan accuracy_monitor.py's alert log for newly
-                            flagged prompts and start a draft-test-approve
+                            Scan the market-accuracy and grounding-contract
+                            alert queues and start a draft-test-approve
                             run for each one not already in flight.
 
   --action check-approvals POST /api/prompt-drafter/check-approvals

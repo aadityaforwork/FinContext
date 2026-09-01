@@ -107,7 +107,7 @@ def _fast_snapshot_inner(yf_symbol: str) -> dict | None:
     returned but had no usable data (signals delisted → permanent 24h cache).
 
     Critically does NOT catch exceptions: if fast_info access raises (rate
-    limit, network, transient), let it propagate so yf_safe.classify_error
+    limit, network, transient), let it propagate so yf_safe.classify_failure
     can pattern-match the message and use a 60s transient TTL — NOT permanent.
     Earlier version swallowed the exception and poisoned 41 real tickers as
     permanent on a single mid-fanout Yahoo rate-limit blip."""
@@ -146,15 +146,17 @@ def _fetch_fast_snapshot(ticker: str) -> dict:
     # occasional rate-limit retry can push it to 3-4s on healthy symbols.
     result, ok = yf_safe.run_with_timeout(_fast_snapshot_inner, yf_symbol, timeout_s=6.0)
     if not ok:
-        # Timeout OR exception. result is None (timeout) or the exception.
-        exc = result if isinstance(result, Exception) else None
-        kind = yf_safe.classify_error(exc, None if exc is None else "__sentinel__")
+        # Timeout OR exception. result is None (timeout) or the exception --
+        # classify_failure keeps those apart (a timeout is never "delisted").
+        kind = yf_safe.classify_failure(result)
         if kind == "permanent":
             _fast_snap_neg_perm[ticker] = True
         else:
             _fast_snap_neg_transient[ticker] = True
-        if exc is not None:
-            logger.debug("fast snapshot failed for %s: %s", ticker, exc)
+        logger.debug(
+            "fast snapshot failed for %s (%s) - caching %s",
+            ticker, yf_safe.describe_failure(result, 6.0), kind,
+        )
         return {}
     if result is None:
         # Yahoo returned but with no data — almost always delisted/unknown.
@@ -335,19 +337,18 @@ def _fetch_snapshot(ticker: str) -> dict:
     # 2-attempt + 0.4s sleep retry loop was protecting against.
     result, ok = yf_safe.run_with_timeout(_inner, timeout_s=8.0)
     if not ok:
-        exc = result if isinstance(result, Exception) else None
-        kind = yf_safe.classify_error(exc, None if exc is None else "__sentinel__")
+        kind = yf_safe.classify_failure(result)
         if kind == "permanent":
             _snapshot_neg_perm[ticker] = True
         else:
             _snapshot_neg_transient[ticker] = True
-        # A bare timeout (FutTimeout) leaves exc=None — log it too, otherwise
-        # cold-path failures are invisible in prod logs (this was silent
-        # before: a call could return {} with no trace of why).
-        if exc is not None:
-            logger.warning("snapshot failed for %s: %s", ticker, exc)
-        else:
-            logger.warning("snapshot fetch for %s timed out after 8s", ticker)
+        # A bare timeout leaves no exception -- describe_failure still renders
+        # a reason, otherwise cold-path failures are invisible in prod logs
+        # (this was silent before: a call could return {} with no trace of why).
+        logger.warning(
+            "snapshot failed for %s (%s) - caching %s",
+            ticker, yf_safe.describe_failure(result, 8.0), kind,
+        )
         return {}
     if result is _NO_PRICE_ALIVE:
         # Symbol is real, Yahoo just wouldn't quote it this second. Short TTL
@@ -731,14 +732,15 @@ def _fetch_index_change(symbol: str) -> dict | None:
     # the history fallback can be slow if Yahoo is rate-limiting.
     result, ok = yf_safe.run_with_timeout(_inner, timeout_s=5.0)
     if not ok:
-        exc = result if isinstance(result, Exception) else None
-        kind = yf_safe.classify_error(exc, None if exc is None else "__sentinel__")
+        kind = yf_safe.classify_failure(result)
         if kind == "permanent":
             _index_neg_perm[symbol] = True
         else:
             _index_neg_transient[symbol] = True
-        if exc is not None:
-            logger.warning("index fetch failed for %s: %s", symbol, exc)
+        logger.warning(
+            "index fetch failed for %s (%s) - caching %s",
+            symbol, yf_safe.describe_failure(result, 5.0), kind,
+        )
         return None
     if result is None:
         _index_neg_perm[symbol] = True
@@ -962,14 +964,15 @@ def _upcoming_earnings(ticker: str, max_days: int = 14) -> dict | None:
     # 5s budget — earnings_dates endpoint can be slow for some tickers.
     result, ok = yf_safe.run_with_timeout(_inner, timeout_s=5.0)
     if not ok:
-        exc = result if isinstance(result, Exception) else None
-        kind = yf_safe.classify_error(exc, None if exc is None else "__sentinel__")
+        kind = yf_safe.classify_failure(result)
         if kind == "permanent":
             _earnings_neg_perm[ticker] = True
         else:
             _earnings_neg_transient[ticker] = True
-        if exc is not None:
-            logger.debug("earnings lookup failed for %s: %s", ticker, exc)
+        logger.debug(
+            "earnings lookup failed for %s (%s) - caching %s",
+            ticker, yf_safe.describe_failure(result, 5.0), kind,
+        )
         return None
     ed = result
     if ed is None:

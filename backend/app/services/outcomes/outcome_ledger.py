@@ -29,6 +29,12 @@ the private stash of exact-context-at-call-time these fixtures are built
 from — see log_call_metrics' docstring for why that snapshot can never live
 on ai_predictions instead (that table is publicly readable).
 
+Migration 016 extends that same private call log with the exact task/schema/
+output and deterministic grounding scores. `grounding_fixtures` stores only
+the violated rule plus a foreign key back to that transcript, while
+`grounding_alert_log` is the independent contract-failure queue consumed by
+prompt_drafter.py. Raw user context is not duplicated into either table.
+
 Public functions:
     log_predictions(items)              — bulk-upsert prediction rows
     compute_pending_outcomes()          — fill in outcomes for due predictions
@@ -808,6 +814,13 @@ def log_call_metrics(
     tokens_out: int | None = None,
     duration_ms: float | None = None,
     trace_id: str | None = None,
+    observation_id: str | None = None,
+    task_text: str | None = None,
+    schema_description: str | None = None,
+    output_snapshot: Any = None,
+    grounding_scores: dict | None = None,
+    created_at: str | None = None,
+    upsert: bool = False,
 ) -> bool:
     """Best-effort log of one LLM call's deterministic metrics.
 
@@ -858,14 +871,74 @@ def log_call_metrics(
             "tokens_out": tokens_out,
             "duration_ms": duration_ms,
             "trace_id": trace_id,
+            "observation_id": observation_id,
+            "task_text": task_text,
+            "schema_description": schema_description,
+            "output_snapshot": output_snapshot,
+            "grounding_scores": grounding_scores,
         }
         if call_id:
             row["id"] = call_id
-        _client.table("prompt_call_log").insert(row).execute()
+        if created_at:
+            row["created_at"] = created_at
+        query = _client.table("prompt_call_log")
+        if upsert:
+            query.upsert(row, on_conflict="id").execute()
+        else:
+            query.insert(row).execute()
+
+        # Create the concrete failure fixtures immediately after the private
+        # transcript lands. The fixture rows only index the violated rule;
+        # context/output remain in prompt_call_log and never touch the public
+        # ai_predictions table.
+        if call_id and grounding_scores:
+            fixtures = []
+            for name, score in grounding_scores.items():
+                if not _is_grounding_violation(name, score):
+                    continue
+                fixtures.append({
+                    "call_id": call_id,
+                    "prompt_name": prompt_name,
+                    "violation_type": name,
+                    "score_value": _numeric_score_value(score.get("value")),
+                    "violation_detail": score.get("comment"),
+                })
+            if fixtures:
+                try:
+                    _client.table("grounding_fixtures").upsert(
+                        fixtures, on_conflict="call_id,violation_type"
+                    ).execute()
+                except Exception as e:
+                    logger.warning("grounding fixture write failed for call %s: %s", call_id, e)
         return True
     except Exception as e:
         logger.warning("log_call_metrics failed: %s", e)
         return False
+
+
+def _numeric_score_value(value: Any) -> float:
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _is_grounding_violation(name: str, score: dict) -> bool:
+    """True for a strict contract score that is anything less than perfect.
+
+    `grounding.data_gaps` is descriptive, not a violation: admitting missing
+    data is the correct behavior.
+    """
+    if name not in {
+        "grounding.schema_valid",
+        "grounding.citation_coverage",
+        "grounding.citation_validity",
+        "grounding.confidence_honest",
+    }:
+        return False
+    return _numeric_score_value(score.get("value")) < 1.0
 
 
 def call_metrics_rows(prompt_name: str, days: int = 30) -> list[dict]:
@@ -922,6 +995,149 @@ def call_context(call_id: str) -> dict | None:
     except Exception as e:
         logger.warning("call_context fetch failed: %s", e)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Grounding-contract fixtures + alert queue — migration 016.
+# ---------------------------------------------------------------------------
+def grounding_score_rows(days: int = 7) -> list[dict]:
+    """Call-level grounding score maps in the lookback window.
+
+    This is the denominator as well as the numerator for grounding_monitor:
+    a fixture-only query could say how many calls failed but not what share of
+    all eligible calls that represents.
+    """
+    if not _client:
+        return []
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        return (
+            _client.table("prompt_call_log")
+            .select("id,prompt_name,prompt_version,grounding_scores,created_at")
+            .not_.is_("grounding_scores", "null")
+            .gte("created_at", cutoff)
+            .order("created_at", desc=True)
+            .limit(5000)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as e:
+        logger.warning("grounding_score_rows fetch failed: %s", e)
+        return []
+
+
+def grounding_fixture_rows(prompt_name: str, limit: int = 50) -> list[dict]:
+    """Concrete grounding failures plus their private call transcript.
+
+    Supabase resolves the FK relation server-side. The returned context and
+    output are for the drafter/gate only and must never be exposed from a
+    client-facing endpoint.
+    """
+    if not _client:
+        return []
+    try:
+        rows = (
+            _client.table("grounding_fixtures")
+            .select(
+                "id,call_id,prompt_name,violation_type,score_value,"
+                "violation_detail,created_at,"
+                "prompt_call_log(task_text,schema_description,context_snapshot,output_snapshot)"
+            )
+            .eq("prompt_name", prompt_name)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+            .data
+            or []
+        )
+        flattened = []
+        for row in rows:
+            transcript = row.pop("prompt_call_log", None) or {}
+            if isinstance(transcript, list):
+                transcript = transcript[0] if transcript else {}
+            flattened.append({**row, **transcript})
+        return flattened
+    except Exception as e:
+        logger.warning("grounding_fixture_rows fetch failed: %s", e)
+        return []
+
+
+def log_grounding_alert(
+    prompt_name: str,
+    violation_type: str,
+    *,
+    recent_n: int,
+    failure_n: int,
+    failure_rate_pct: float,
+    threshold_pct: float,
+    message: str,
+) -> bool:
+    if not _client:
+        return False
+    try:
+        _client.table("grounding_alert_log").insert({
+            "prompt_name": prompt_name,
+            "violation_type": violation_type,
+            "recent_n": recent_n,
+            "failure_n": failure_n,
+            "failure_rate_pct": failure_rate_pct,
+            "threshold_pct": threshold_pct,
+            "message": message,
+        }).execute()
+        return True
+    except Exception as e:
+        logger.warning("log_grounding_alert failed: %s", e)
+        return False
+
+
+def last_grounding_alert(
+    prompt_name: str, violation_type: str, days: int = 7,
+) -> dict | None:
+    if not _client:
+        return None
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        rows = (
+            _client.table("grounding_alert_log")
+            .select("created_at")
+            .eq("prompt_name", prompt_name)
+            .eq("violation_type", violation_type)
+            .gte("created_at", cutoff)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        return rows[0] if rows else None
+    except Exception as e:
+        logger.warning("last_grounding_alert fetch failed: %s", e)
+        return None
+
+
+def recent_grounding_alerts(days: int = 14) -> list[dict]:
+    """Independent contract-failure queue consumed by prompt_drafter."""
+    if not _client:
+        return []
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        return (
+            _client.table("grounding_alert_log")
+            .select(
+                "prompt_name,violation_type,recent_n,failure_n,"
+                "failure_rate_pct,threshold_pct,message,created_at"
+            )
+            .gte("created_at", cutoff)
+            .order("created_at", desc=True)
+            .limit(200)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as e:
+        logger.warning("recent_grounding_alerts fetch failed: %s", e)
+        return []
 
 
 # ---------------------------------------------------------------------------

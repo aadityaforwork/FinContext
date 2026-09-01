@@ -11,7 +11,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/post_edit_ruff.py",
+            "command": "python",
+            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/post_edit_ruff.py"],
             "timeout": 30,
             "statusMessage": "Running ruff check..."
           }

@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
@@ -24,7 +25,6 @@ from app.services.marketdata import market_data
 from app.services.observability import prompt_registry
 from app.services.outcomes import outcome_ledger, track_record
 from app.services.portfolio import signal_ensemble
-from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/intelligence", tags=["portfolio-intelligence"])
@@ -37,6 +37,32 @@ router = APIRouter(prefix="/api/intelligence", tags=["portfolio-intelligence"])
 # live pass-rate eval (test_prompt_gate_live.py) — no second copy to drift
 # out of sync with what's actually shipped.
 # ---------------------------------------------------------------------------
+MOVERS_ATTRIBUTION_FALLBACK_PROMPT = (
+    "For each holding in CONTEXT.holdings whose mover_bucket is 'strong_gainer' or "
+    "'strong_loser', explain today's price move using EVERY available signal:\n"
+    "  1. PRIMARY DRIVER — one of:\n"
+    "     • 'stock_specific' — cite holdings[i].news[j] or holdings[i].semantic_news[j].\n"
+    "     • 'sector' — cite market.sectors[i] plus the holding's excess_return_today.\n"
+    "     • 'macro' — cite india_headlines[i] or market indices present in CONTEXT.\n"
+    "     • 'flow' — cite market.flows when the move aligns with FII/DII direction.\n"
+    "     • 'technical' — cite holdings[i].technicals fields when no news explains it.\n"
+    "     • 'unexplained' — only when every signal is absent; add a specific data_gaps item.\n"
+    "  2. TECHNICAL CONFIRMATION — copy the mover's rsi_zone, vol_zone, "
+    "momentum_state and sma_state from holdings[i].technicals, then state whether they confirm "
+    "or contradict the move.\n"
+    "  3. ATTRIBUTION — 1-3 items per holding, each with text, an EXACT resolvable source path, "
+    "and weight_pct (1-100).\n\n"
+    "CITATION RULES:\n"
+    "  • Paths are relative to the CONTEXT root: use holdings[0].news[0], NOT "
+    "CONTEXT.holdings[0].news[0].\n"
+    "  • Never invent ticker-keyed aliases such as INFY_news[0] or INFY_sem[0]; those keys do "
+    "not exist. Find the holding's numeric list index and cite holdings[i].news[j] or "
+    "holdings[i].semantic_news[j].\n"
+    "  • Cite market.sectors by numeric list index, never by a sector-name index.\n"
+    "  • Every attribution item must keep a source; do not game validity by returning no claims.\n"
+    "Be specific. 'Positive price movement enhances sentiment' is banned because it says nothing."
+)
+
 NEWS_FEED_ANNOTATION_FALLBACK_PROMPT = (
     "For EACH item in CONTEXT.candidate_news, decide whether it materially affects "
     "the user's portfolio (CONTEXT.user_holdings + CONTEXT.user_watchlist). For items "
@@ -956,31 +982,17 @@ async def _movers_generator(raw_holdings: list[dict]):
         return
 
     # -------- Today attribution --------
-    today_task = (
-        "For each holding in CONTEXT.holdings whose mover_bucket is 'strong_gainer' or "
-        "'strong_loser', explain today's price move using EVERY available signal:\n"
-        "  1. PRIMARY DRIVER — one of:\n"
-        "     • 'stock_specific'  — cite a {TICKER}_news[i] OR a {TICKER}_sem[i] (semantic match: "
-        "       the headline may not name the ticker but pgvector matched it on theme — perfectly "
-        "       valid; cite the semantic id and similarity).\n"
-        "     • 'sector'          — cite CONTEXT.market.sectors[i] + the sign of excess_return_today.\n"
-        "     • 'macro'           — cite CONTEXT.india_headlines[i] or CONTEXT.market.indices.\n"
-        "     • 'flow'            — cite CONTEXT.market.flows (FII/DII) when the move aligns with the day's flow direction.\n"
-        "     • 'technical'       — when there is NO news but technicals explain the move "
-        "       (e.g. RSI oversold bounce, breakout above SMA50 with volume surge, breakdown "
-        "       through 20d low on heavy volume). Cite the holding's technicals fields.\n"
-        "     • 'unexplained'     — ONLY if news, semantic_news, sector, macro, flow, and technicals "
-        "       all fail. Add a specific data_gaps entry naming what was missing.\n"
-        "  2. TECHNICAL CONFIRMATION — for every mover, fill technical_state with:\n"
-        "       rsi_zone, vol_zone, momentum_state, sma_state — copied/derived from "
-        "       CONTEXT.holdings[].technicals. Add a one-line confirms_or_contradicts note "
-        "       (e.g. 'volume surge + extending_up confirms the move' or 'rally on weak volume — "
-        "       move may not stick').\n"
-        "  3. ATTRIBUTION — 1-3 items per holding, each with text + source + weight_pct (1-100).\n"
-        "Be specific. 'Positive price movement enhances sentiment' is BANNED — it says nothing.\n"
-        "Use concrete language: 'crude +3% (sem similarity 0.71) → ONGC realisations boost', "
-        "'sector index +2.1% on PSB earnings beat → BANKBARODA rides the wave on 1.4x avg vol'."
+    _today_prompt = prompt_registry.get_prompt(
+        "portfolio.movers_attribution", MOVERS_ATTRIBUTION_FALLBACK_PROMPT
     )
+    today_task = _today_prompt.text
+    _today_prompt_meta = {
+        "name": "portfolio.movers_attribution",
+        "version": _today_prompt.version,
+        "source": _today_prompt.source,
+    }
+    _today_call_id = str(uuid.uuid4())
+    _today_metrics: dict = {}
     today_schema = """{
   "portfolio_return_today_pct": float | null,
   "top_positive_driver": { "text": str, "source": str } | null,
@@ -1223,7 +1235,9 @@ async def _movers_generator(raw_holdings: list[dict]):
                     "data_gaps": ["No holding moved ≥1.5% today."]}
         return await asyncio.to_thread(
             # 2200 tokens: covers ≤10 movers with technical_state + 1-2 attributions.
-            ai_client.generate_grounded_json, today_task, today_input, today_schema, 2200
+            ai_client.generate_grounded_json, today_task, today_input, today_schema, 2200,
+            0.2, _today_prompt_meta, _today_metrics,
+            prompt_client=_today_prompt.client,
         )
 
     # Heartbeat: emit progress messages while the LLMs grind so the SSE
@@ -1302,6 +1316,13 @@ async def _movers_generator(raw_holdings: list[dict]):
     # Today's attribution is intentionally NOT logged — it's an *explanation*
     # of a move that already happened, not a forecast.
     if outcome_ledger.is_available():
+        # It is still call-level grounding telemetry, but only when _run_today
+        # actually made an LLM request (the no-movers branch short-circuits).
+        if mover_holdings:
+            await asyncio.to_thread(
+                _log_call_metrics_best_effort, _today_prompt_meta, _today_metrics,
+                call_id=_today_call_id, context_snapshot=today_input,
+            )
         try:
             await asyncio.to_thread(
                 _log_tomorrow_predictions, tomorrow_data, movers_ctx, _tomorrow_prompt_meta, _tomorrow_call_id,
@@ -1614,6 +1635,10 @@ async def morning_brief(req: MorningBriefRequest):
 # does on the front page.
 # ---------------------------------------------------------------------------
 _NEWS_FEED_TTL_S = 60 * 60  # 1 hour — see _BRIEF_TTL_S for why this isn't a TTLCache
+_NEWS_FEED_MAX_ITEMS = 20
+_NEWS_FEED_MAX_SHARDS = 4
+_NEWS_FEED_TARGET_CANDIDATES_PER_SHARD = 5
+_NEWS_FEED_SHARD_TIMEOUT_S = 110
 
 
 class NewsFeedRequest(BaseModel):
@@ -1628,6 +1653,151 @@ def _news_feed_cache_key(positions: list[dict], watchlist: list[str]) -> str:
     h_key = ",".join(sorted({(p.get("ticker") or "").upper() for p in positions if p.get("ticker")}))
     w_key = ",".join(sorted({t.upper() for t in watchlist if t}))
     return f"{bucket}|{h_key}|{w_key}"
+
+
+def _partition_news_candidates(candidates: list[dict]) -> list[list[dict]]:
+    """Split candidates into at most four balanced, deterministic shards.
+
+    Round-robin rather than contiguous chunks keeps holding-specific, macro,
+    global and policy candidates distributed when one category dominates the
+    front of the list. Small inputs stay a single call; the measured latency
+    win starts once output genuinely contains several per-item annotations.
+    """
+    if not candidates:
+        return []
+    shard_count = min(
+        _NEWS_FEED_MAX_SHARDS,
+        max(
+            1,
+            (len(candidates) + _NEWS_FEED_TARGET_CANDIDATES_PER_SHARD - 1)
+            // _NEWS_FEED_TARGET_CANDIDATES_PER_SHARD,
+        ),
+    )
+    return [candidates[i::shard_count] for i in range(shard_count)]
+
+
+async def _generate_news_annotation_shards(
+    task: str,
+    annotation_ctx: dict,
+    schema: str,
+    prompt_meta: dict,
+    prompt_client: object | None,
+) -> tuple[dict, dict[str, dict], list[dict]]:
+    """Annotate candidate news concurrently without losing call provenance.
+
+    Returns ``(merged_data, provenance_by_news_id, call_records)``. There is
+    one call record (and therefore one prompt_call_log row) per actual LLM
+    request. ``provenance_by_news_id`` lets the outcome ledger attach every
+    prediction to the exact shard context and Langfuse trace that emitted it.
+    """
+    candidates = list(annotation_ctx.get("candidate_news") or [])
+    shards = _partition_news_candidates(candidates)
+    if not shards:
+        return {}, {}, []
+
+    shard_count = len(shards)
+    # Slightly oversample each shard, then enforce the global top-20 after
+    # deterministic validation/sorting. This avoids reserving exactly five
+    # slots for a weak shard while still bounding completion length.
+    per_shard_quota = (_NEWS_FEED_MAX_ITEMS + shard_count - 1) // shard_count + 1
+
+    async def _run_one(index: int, shard: list[dict]) -> dict:
+        shard_ctx = {**annotation_ctx, "candidate_news": shard}
+        quota = min(len(shard), per_shard_quota)
+        shard_task = (
+            f"{task}\n\n"
+            f"SHARD EXECUTION NOTE: This is subset {index + 1} of {shard_count}. "
+            f"Return at most the {quota} most portfolio-relevant annotations from "
+            "this subset. Keep each news_id exactly as supplied; the backend will "
+            "merge and globally rank all subsets."
+        )
+        metrics: dict = {}
+        call_id = str(uuid.uuid4())
+        record = {
+            "index": index,
+            "call_id": call_id,
+            "context": shard_ctx,
+            "candidate_ids": {c.get("id") for c in shard if c.get("id")},
+            "metrics": metrics,
+            "data": {},
+            "error": None,
+        }
+        # 320 tokens truncated live portfolio JSON in the earlier experiment.
+        # This budget is proportional to the requested records with enough
+        # structural headroom to close the JSON object reliably.
+        max_tokens = min(1600, max(1000, quota * 180))
+        try:
+            record["data"] = await asyncio.wait_for(
+                asyncio.to_thread(
+                    ai_client.generate_grounded_json,
+                    shard_task,
+                    shard_ctx,
+                    schema,
+                    max_tokens,
+                    0.2,
+                    prompt_meta,
+                    metrics,
+                    prompt_client=prompt_client,
+                ),
+                timeout=_NEWS_FEED_SHARD_TIMEOUT_S,
+            )
+        except TimeoutError:
+            record["error"] = "timed out"
+            metrics.update(
+                confidence=None,
+                data_gaps_count=None,
+                parse_error=True,
+                duration_ms=_NEWS_FEED_SHARD_TIMEOUT_S * 1000,
+                trace_id=None,
+            )
+        except Exception as exc:
+            record["error"] = f"{type(exc).__name__}: {exc}"
+            metrics.update(
+                confidence=None,
+                data_gaps_count=None,
+                parse_error=True,
+                trace_id=None,
+            )
+        return record
+
+    # asyncio.to_thread copies the current contextvars context, so all four
+    # generate_grounded_json spans remain children of the router's flow below.
+    records = await asyncio.gather(
+        *(_run_one(i, shard) for i, shard in enumerate(shards))
+    )
+
+    merged_items: list[dict] = []
+    merged_gaps: list[str] = []
+    provenance: dict[str, dict] = {}
+    seen_ids: set[str] = set()
+    successful_calls = 0
+    failed_calls = 0
+    for record in records:
+        data = record.get("data")
+        if not isinstance(data, dict) or not data:
+            failed_calls += 1
+            continue
+        successful_calls += 1
+        for gap in data.get("data_gaps") or []:
+            if isinstance(gap, str) and gap not in merged_gaps:
+                merged_gaps.append(gap)
+        for item in data.get("items") or []:
+            news_id = item.get("news_id") if isinstance(item, dict) else None
+            # A shard may only claim candidates it actually saw. This both
+            # protects grounding and guarantees exact call provenance.
+            if not news_id or news_id not in record["candidate_ids"] or news_id in seen_ids:
+                continue
+            seen_ids.add(news_id)
+            merged_items.append(item)
+            provenance[news_id] = record
+
+    if not successful_calls:
+        return {}, {}, records
+    if failed_calls:
+        merged_gaps.append(
+            f"{failed_calls} of {shard_count} news annotation shards failed"
+        )
+    return {"items": merged_items, "data_gaps": merged_gaps}, provenance, records
 
 
 # Thread pool for parallel quote fetching when building the per-user holdings
@@ -1980,7 +2150,8 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
         sec = (h.get("sector") or "Unknown")
         holdings_by_sector.setdefault(sec, []).append(h.get("ticker"))
 
-    # Build a slim CONTEXT for batch annotation.
+    # Build a slim CONTEXT for sharded annotation. Each LLM call receives the
+    # same portfolio/technical facts but a disjoint candidate_news subset.
     annotation_ctx = {
         "user_holdings": user_holdings,
         "user_watchlist": user_watchlist,
@@ -2006,8 +2177,6 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
         "version": _news_prompt.version,
         "source": _news_prompt.source,
     }
-    # See _tomorrow_call_id above — same join-key purpose, leg 3d.
-    _news_call_id = str(uuid.uuid4())
     schema = """{
   "items": [
     {
@@ -2025,44 +2194,32 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
   "data_gaps": [ str, ... ]
 }"""
 
-    # Filled in place by generate_grounded_json — see _tomorrow_metrics above
-    # for why this matters most on the parse-failure path.
-    _news_metrics: dict = {}
-    try:
-        data = await asyncio.wait_for(
-            asyncio.to_thread(
-                # 2400 tokens: 20 items × ~120 tokens each. Reduced from 3500
-                # after capping items at 20 → faster LLM completion.
-                ai_client.generate_grounded_json, task, annotation_ctx, schema, 2400,
-                0.2, _news_prompt_meta, _news_metrics,
-                # See the tomorrow-watch call — native prompt link, kept out
-                # of the meta dict that gets persisted.
-                prompt_client=_news_prompt.client,
-            ),
-            # 110s on Render's free tier — OpenAI from Render is 2-3× slower
-            # than from a laptop and the request retry loop after a premature
-            # timeout costs the user more than just waiting once.
-            timeout=110,
+    # This is an emit-one-record-per-item task, so completion length grows with
+    # candidate count. Four concurrent shards measured 14.30s -> 6.06s for 20
+    # candidates. One parent trace groups the request; each child call keeps its
+    # own metrics, context snapshot, call_id and trace_id for exact replay.
+    with llm_trace.flow(
+        "news_feed_annotation",
+        tags=["news_feed", "demo" if demo_mode else "user", "sharded"],
+        candidates=len(candidates),
+    ):
+        data, news_provenance, news_call_records = await _generate_news_annotation_shards(
+            task, annotation_ctx, schema, _news_prompt_meta, _news_prompt.client,
         )
-    except asyncio.TimeoutError:
-        return with_disclaimer({
-            "demo_mode": demo_mode,
-            "items": [],
-            "error": "Generation timed out.",
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-        })
 
-    # Logged regardless of whether `data` parsed — a parse failure IS the
-    # signal prompt_monitor.py's schema_validation_failure_rate needs, and
-    # it's the one case _log_news_feed_predictions below never runs for
-    # (there's nothing to log as a prediction). Not awaited via to_thread on
-    # the timeout path above since a real OS thread can't be cancelled once
-    # started — see _log_call_metrics_best_effort call site comments.
+    # One prompt_call_log row per real LLM call. Parse errors and timeouts are
+    # logged too, while successful siblings can still populate the feed.
     if outcome_ledger.is_available():
-        await asyncio.to_thread(
-            _log_call_metrics_best_effort, _news_prompt_meta, _news_metrics,
-            call_id=_news_call_id, context_snapshot=annotation_ctx,
-        )
+        await asyncio.gather(*(
+            asyncio.to_thread(
+                _log_call_metrics_best_effort,
+                _news_prompt_meta,
+                record["metrics"],
+                call_id=record["call_id"],
+                context_snapshot=record["context"],
+            )
+            for record in news_call_records
+        ))
 
     if not data:
         return with_disclaimer({
@@ -2078,7 +2235,7 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
 
     universe = set(user_holdings) | set(user_watchlist)
     cleaned: list[dict] = []
-    for it in (data.get("items") or [])[:20]:
+    for it in data.get("items") or []:
         affected = [t for t in (it.get("affected_tickers") or []) if t in universe]
         if not affected:
             continue  # if no real impact on user, drop it
@@ -2109,7 +2266,16 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
 
     # Sort: high → medium → low (already requested in prompt but enforce server-side).
     impact_order = {"high": 0, "medium": 1, "low": 2}
-    cleaned.sort(key=lambda x: impact_order.get(x["impact_level"], 3))
+    candidate_order = {
+        candidate.get("id"): index
+        for index, candidate in enumerate(candidates)
+        if candidate.get("id")
+    }
+    cleaned.sort(key=lambda x: (
+        impact_order.get(x["impact_level"], 3),
+        candidate_order.get(x.get("news_id"), len(candidates)),
+    ))
+    cleaned = cleaned[:_NEWS_FEED_MAX_ITEMS]
 
     # Multi-signal ensemble — same selectivity rule as Tomorrow. Override each
     # item's direction with consensus of news + technicals + flow, attach a
@@ -2122,14 +2288,28 @@ async def news_feed(req: NewsFeedRequest, background: BackgroundTasks):
     )
 
     # Outcome ledger — fire-and-forget log of every scoreable news item as a
-    # forward-looking prediction (one row per item × affected ticker). Mixed
-    # direction items are skipped inside the helper. UPSERT keyed by
+    # forward-looking prediction (one row per item × affected ticker). Each
+    # group carries the call_id/trace_id of the exact shard that produced it;
+    # miss_fixtures can therefore replay the right private context snapshot.
+    # Mixed direction items are skipped inside the helper. UPSERT keyed by
     # news_feed:{ticker}:{news_id}:{date} so concurrent users don't duplicate.
     if outcome_ledger.is_available():
-        background.add_task(
-            _log_news_feed_predictions, cleaned, tech_by_ticker, _news_prompt_meta, _news_call_id,
-            _news_metrics.get("trace_id"),
-        )
+        items_by_call: dict[str, list[dict]] = {}
+        records_by_call = {r["call_id"]: r for r in news_call_records}
+        for item in cleaned:
+            provenance = news_provenance.get(item.get("news_id"))
+            if provenance:
+                items_by_call.setdefault(provenance["call_id"], []).append(item)
+        for call_id, shard_items in items_by_call.items():
+            record = records_by_call[call_id]
+            background.add_task(
+                _log_news_feed_predictions,
+                shard_items,
+                tech_by_ticker,
+                _news_prompt_meta,
+                call_id,
+                record["metrics"].get("trace_id"),
+            )
 
     # Filter for the user-facing list AFTER logging (so the ledger sees everything).
     user_items = [it for it in cleaned if not it.get("hidden_low_conviction")]

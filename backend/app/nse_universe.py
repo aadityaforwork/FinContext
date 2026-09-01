@@ -301,9 +301,13 @@ _probe_log = _logging.getLogger(__name__)
 
 # Hit cache: 6 hours — ticker metadata doesn't change intraday.
 _probe_cache: _TTLCache = _TTLCache(maxsize=2000, ttl=6 * 60 * 60)
-# Miss cache: 30 min — short enough that a Yahoo blip recovers, long enough that
-# typos don't keep paying the network round-trip.
-_probe_neg_cache: _TTLCache = _TTLCache(maxsize=2000, ttl=30 * 60)
+# Negative caches are split for the same reason as the quote/history caches:
+# a confirmed empty Yahoo response is useful evidence that a symbol is bad,
+# while a timeout or network error says nothing about the symbol. Keeping the
+# latter for only a minute prevents a brief production slowdown from making an
+# otherwise valid uncurated NSE ticker disappear from search for half an hour.
+_probe_neg_perm: _TTLCache = _TTLCache(maxsize=2000, ttl=24 * 60 * 60)
+_probe_neg_transient: _TTLCache = _TTLCache(maxsize=2000, ttl=60)
 
 # Yahoo Search API cache. Key is the lowercased query string. Hit TTL is 1h
 # (search results are stable but new listings happen) and miss TTL is short
@@ -404,7 +408,7 @@ def _probe_yf_ticker(query: str) -> dict | None:
         return None
     if q in _probe_cache:
         return _probe_cache[q]
-    if q in _probe_neg_cache:
+    if q in _probe_neg_perm or q in _probe_neg_transient:
         return None
     try:
         # Lazy import — yfinance import is heavy; we don't want module-load
@@ -435,12 +439,21 @@ def _probe_yf_ticker(query: str) -> dict | None:
             }
 
         result, ok = yf_safe.run_with_timeout(_inner, timeout_s=3.0)
-        if not ok or result is None:
-            _probe_neg_cache[q] = True
+        if not ok:
+            kind = yf_safe.classify_failure(result)
+            target = _probe_neg_perm if kind == "permanent" else _probe_neg_transient
+            target[q] = True
+            _probe_log.debug(
+                "yf probe failed for %s (%s) - caching %s",
+                q, yf_safe.describe_failure(result, 3.0), kind,
+            )
+            return None
+        if result is None:
+            _probe_neg_perm[q] = True
             return None
         _probe_cache[q] = result
         return result
     except Exception as e:
         _probe_log.debug("yf probe failed for %s: %s", q, type(e).__name__)
-        _probe_neg_cache[q] = True
+        _probe_neg_transient[q] = True
         return None

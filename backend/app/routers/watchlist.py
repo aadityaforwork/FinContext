@@ -5,6 +5,7 @@ No auth required — data scoping is handled by Supabase RLS on the frontend.
 """
 
 import asyncio
+import logging
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter
@@ -14,6 +15,7 @@ import yfinance as yf
 from app.nse_universe import TICKER_TO_YF, TICKER_TO_META, resolve_yf_symbol
 from app.services.marketdata import yf_safe
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])
 
 _price_cache: TTLCache = TTLCache(maxsize=300, ttl=180)
@@ -27,12 +29,8 @@ class PriceRequest(BaseModel):
 
 
 def _fetch_inner(yf_symbol: str) -> tuple[float | None, float | None] | None:
-    """Pure yfinance call. Does NOT catch exceptions — see the matching note
-    in routers/portfolio.py._fetch_price_inner. Swallowing the exception here
-    poisons real tickers as permanent (24h) on transient rate limits."""
-    info = yf.Ticker(yf_symbol).fast_info
-    price = float(info.last_price) if hasattr(info, "last_price") else None
-    prev = float(info.previous_close) if hasattr(info, "previous_close") else None
+    """Quote read with chart fallback; see portfolio._fetch_price_inner."""
+    price, prev, _ = yf_safe.read_quote(yf.Ticker(yf_symbol))
     if price is None or prev is None or prev == 0:
         return None
     return (round(price, 2), round((price - prev) / prev * 100, 2))
@@ -55,15 +53,18 @@ def _get_price(ticker: str) -> tuple[float | None, float | None]:
 
     result, ok = yf_safe.run_with_timeout(_fetch_inner, yf_symbol, timeout_s=5.0)
     if not ok:
-        exc = result if isinstance(result, Exception) else None
-        kind = yf_safe.classify_error(exc, None if exc is None else "__sentinel__")
+        kind = yf_safe.classify_failure(result)
         if kind == "permanent":
             _price_neg_perm[ticker] = True
         else:
             _price_neg_transient[ticker] = True
+        logger.warning(
+            "watchlist price fetch failed for %s (%s) - caching %s",
+            ticker, yf_safe.describe_failure(result, 5.0), kind,
+        )
         return (None, None)
     if result is None:
-        _price_neg_perm[ticker] = True
+        _price_neg_transient[ticker] = True
         return (None, None)
     _price_cache[ticker] = result
     return result

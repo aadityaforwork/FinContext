@@ -20,7 +20,7 @@ outcome_ledger.py (duplicated rather than imported — these two modules
 should be able to evolve independently, and the init is 5 lines).
 
 Public functions:
-    create_run(thread_id, prompt_name, trigger_reason, *, status, ...)
+    create_run(thread_id, prompt_name, trigger_reason, *, trigger_type, status, ...)
     update_run(thread_id, **fields)
     get_run(thread_id) -> dict | None
     active_run_for_prompt(prompt_name, days) -> dict | None
@@ -69,6 +69,8 @@ def create_run(
     trigger_reason: str,
     *,
     status: str,
+    trigger_type: str = "accuracy",
+    trigger_key: str | None = None,
     baseline_version: int | None = None,
     candidate_version: int | None = None,
     gate_verdict: str | None = None,
@@ -82,6 +84,8 @@ def create_run(
             "thread_id": thread_id,
             "prompt_name": prompt_name,
             "trigger_reason": trigger_reason,
+            "trigger_type": trigger_type,
+            "trigger_key": trigger_key,
             "status": status,
             "baseline_version": baseline_version,
             "candidate_version": candidate_version,

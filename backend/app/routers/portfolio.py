@@ -6,6 +6,7 @@ No auth required — scoping is done on the frontend via Supabase.
 """
 
 import asyncio
+import logging
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter
@@ -15,6 +16,7 @@ import yfinance as yf
 from app.nse_universe import TICKER_TO_YF, TICKER_TO_META, resolve_yf_symbol
 from app.services.marketdata import yf_safe
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
 
 # Positive cache 3 min; negative caches split between permanent (delisted —
@@ -39,18 +41,14 @@ class EnrichRequest(BaseModel):
 def _fetch_price_inner(yf_symbol: str) -> tuple[float | None, float | None] | None:
     """Pure yfinance call inside yf_safe pool. Returns:
       • (price, change_pct) on success
-      • None when fast_info returned but had no usable data — signals delisted
-        so the outer caller caches as permanent (24h).
+      • None when both fast_info and the chart fallback had no usable data.
 
-    Critically does NOT catch exceptions: if fast_info access raises (rate
-    limit, network), let it propagate so yf_safe.classify_error can pattern-
-    match the message and pick the right cache TTL (transient 60s for rate-
-    limited tickers, NOT permanent 24h — that bug just poisoned every real
-    ticker for an entire day when Yahoo rate-limited once mid-fanout).
+    Uses yf_safe.read_quote so a rate-limited quote endpoint can recover from
+    Yahoo's chart endpoint. If both sources are empty the caller treats that
+    ambiguity as transient; resolve_yf_symbol already handled unknown symbols.
+    The timeout leg remains distinct via yf_safe.classify_failure.
     """
-    info = yf.Ticker(yf_symbol).fast_info
-    price = float(info.last_price) if hasattr(info, "last_price") else None
-    prev = float(info.previous_close) if hasattr(info, "previous_close") else None
+    price, prev, _ = yf_safe.read_quote(yf.Ticker(yf_symbol))
     if price is None or prev is None or prev == 0:
         return None
     return (round(price, 2), round((price - prev) / prev * 100, 2))
@@ -73,15 +71,21 @@ def _get_live_price(ticker: str) -> tuple[float | None, float | None]:
 
     result, ok = yf_safe.run_with_timeout(_fetch_price_inner, yf_symbol, timeout_s=5.0)
     if not ok:
-        exc = result if isinstance(result, Exception) else None
-        kind = yf_safe.classify_error(exc, None if exc is None else "__sentinel__")
+        kind = yf_safe.classify_failure(result)
         if kind == "permanent":
             _price_neg_perm[ticker] = True
         else:
             _price_neg_transient[ticker] = True
+        logger.warning(
+            "price fetch failed for %s (%s) - caching %s",
+            ticker, yf_safe.describe_failure(result, 5.0), kind,
+        )
         return (None, None)
     if result is None:
-        _price_neg_perm[ticker] = True
+        # A shared production IP can lose both Yahoo quote and chart responses
+        # briefly. The resolved NSE symbol is valid; retry rather than calling
+        # an ambiguous empty response "delisted" for 24 hours.
+        _price_neg_transient[ticker] = True
         return (None, None)
     _price_cache[ticker] = result
     return result

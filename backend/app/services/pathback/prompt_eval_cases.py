@@ -1,7 +1,7 @@
 """
-Eval cases for the two Langfuse-managed prompts (path-back leg 3b) that
-actually produce judged predictions: portfolio.tomorrow_watch and
-portfolio.news_feed_annotation. See eval_runner.py for the runner these
+Hand-written eval cases for the Langfuse-managed prompts: the two prompts
+with market-judged predictions plus portfolio.movers_attribution, which is
+judged by deterministic grounding fixtures. See eval_runner.py for the runner these
 cases are executed through, and prompt_gate.py (Phase 2) for how two prompt
 *versions* get compared against this same set.
 
@@ -29,7 +29,67 @@ for policy items) — no LLM grades anything here.
 
 from __future__ import annotations
 
+from app.services.observability import langfuse_scores
 from app.services.pathback.eval_runner import EvalCase
+
+# ---------------------------------------------------------------------------
+# portfolio.movers_attribution
+# ---------------------------------------------------------------------------
+_MOVERS_SCHEMA = """{
+  "portfolio_return_today_pct": float | null,
+  "top_positive_driver": { "text": str, "source": str } | null,
+  "top_negative_driver": { "text": str, "source": str } | null,
+  "movers": [
+    {
+      "ticker": str, "move_percent": float,
+      "primary_driver": "stock_specific" | "sector" | "macro" | "flow" | "technical" | "unexplained",
+      "attribution": [ { "text": str, "source": str, "weight_pct": int } ],
+      "technical_state": {
+        "rsi_zone": str | null, "vol_zone": str | null,
+        "momentum_state": str | null, "sma_state": str | null,
+        "confirms_or_contradicts": str
+      }
+    }
+  ],
+  "confidence": "low" | "medium" | "high",
+  "data_gaps": [ str, ... ]
+}"""
+
+
+def _mover_keeps_useful_resolvable_attribution(result: dict) -> bool:
+    movers = result.get("movers") or []
+    item = next((m for m in movers if m.get("ticker") == "TESTCO"), None)
+    if not item or not item.get("attribution"):
+        return False
+    scores = langfuse_scores.grounding_scores(result, CASE_MOVERS_CITATION_PATHS.context)
+    coverage = scores.get("grounding.citation_coverage")
+    validity = scores.get("grounding.citation_validity")
+    return bool(coverage and validity and coverage.value == 1.0 and validity.value == 1.0)
+
+
+CASE_MOVERS_CITATION_PATHS = EvalCase(
+    id="movers_attribution.uses_real_context_paths",
+    prompt_name="portfolio.movers_attribution",
+    context={
+        "portfolio_return_today_pct": 1.4,
+        "holdings": [{
+            "ticker": "TESTCO", "sector": "IT", "change_percent_today": 3.2,
+            "sector_index_return_today": 0.8, "excess_return_today": 2.4,
+            "mover_bucket": "strong_gainer",
+            "news": [{"id": "n1", "source": "Test Wire", "headline": "TESTCO wins export order"}],
+            "semantic_news": [],
+            "technicals": {"rsi_zone": "strong", "vol_zone": "surge",
+                           "momentum_state": "extending_up", "sma_state": "above_sma50"},
+        }],
+        "market": {"sectors": [{"sector": "IT", "change_percent": 0.8}], "flows": None},
+        "india_headlines": [],
+    },
+    schema_description=_MOVERS_SCHEMA,
+    check=_mover_keeps_useful_resolvable_attribution,
+    max_tokens=600,
+)
+
+MOVERS_ATTRIBUTION_CASES = [CASE_MOVERS_CITATION_PATHS]
 
 # ---------------------------------------------------------------------------
 # portfolio.tomorrow_watch
@@ -221,4 +281,4 @@ CASE_NEWS_POLICY_SECTOR_MAPPING = EvalCase(
 
 NEWS_FEED_ANNOTATION_CASES = [CASE_NEWS_TECHNICALS_CONTRADICT_MIXED, CASE_NEWS_POLICY_SECTOR_MAPPING]
 
-ALL_CASES = TOMORROW_WATCH_CASES + NEWS_FEED_ANNOTATION_CASES
+ALL_CASES = MOVERS_ATTRIBUTION_CASES + TOMORROW_WATCH_CASES + NEWS_FEED_ANNOTATION_CASES
