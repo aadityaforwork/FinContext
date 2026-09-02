@@ -11,7 +11,7 @@ Provides:
 """
 
 import logging
-from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
 import yfinance as yf
 from cachetools import TTLCache
@@ -74,6 +74,16 @@ _history_neg_perm: TTLCache = TTLCache(maxsize=200, ttl=yf_safe.NEG_TTL_PERMANEN
 _history_neg_transient: TTLCache = TTLCache(maxsize=100, ttl=yf_safe.NEG_TTL_TRANSIENT_S)
 # index cache: 3 min TTL
 _index_cache = TTLCache(maxsize=10, ttl=180)
+
+# The one key get_market_indices() stores its whole result list under.
+# A named constant rather than a local: the old code opened with
+# `cache_key = "market_indices"`, then REUSED that same local inside its
+# per-index loop (`cache_key = f"idx_{symbol}"`). By the time it reached the
+# closing `_index_cache[cache_key] = results`, the variable held the last
+# symbol's key — so the list was filed under "idx_INR=X" and the lookup at
+# the top never found anything. The 3-minute cache was dead from the day it
+# was written, and every dashboard load re-fetched all four indices.
+_ALL_INDICES_KEY = "market_indices"
 _index_neg_perm: TTLCache = TTLCache(maxsize=20, ttl=yf_safe.NEG_TTL_PERMANENT_S)
 _index_neg_transient: TTLCache = TTLCache(maxsize=20, ttl=yf_safe.NEG_TTL_TRANSIENT_S)
 
@@ -193,9 +203,8 @@ def get_market_indices() -> list[dict]:
     Get live market index values for the dashboard overview.
     Returns list of {label, value, change, positive} dicts.
     """
-    cache_key = "market_indices"
-    if cache_key in _index_cache:
-        return _index_cache[cache_key] # type: ignore
+    if _ALL_INDICES_KEY in _index_cache:
+        return _index_cache[_ALL_INDICES_KEY] # type: ignore
 
     def _fetch_one_index(symbol: str) -> tuple[float, float] | None:
         tk = yf.Ticker(symbol)
@@ -219,12 +228,16 @@ def get_market_indices() -> list[dict]:
             return None
         return (price, prev)
 
-    results = []
-    for label, symbol in INDEX_MAP.items():
-        cache_key = f"idx_{symbol}"
-        if cache_key in _index_neg_perm or cache_key in _index_neg_transient:
-            results.append({"label": label, "value": "—", "change": "—", "positive": True})
-            continue
+    def _blank(label: str) -> dict:
+        return {"label": label, "value": "—", "change": "—", "positive": True}
+
+    def _resolve(item: tuple[str, str]) -> dict:
+        """One index, start to finish. Returns the row to render — never raises."""
+        label, symbol = item
+        neg_key = f"idx_{symbol}"
+        if neg_key in _index_neg_perm or neg_key in _index_neg_transient:
+            return _blank(label)
+
         out, ok = yf_safe.run_with_timeout(_fetch_one_index, symbol, timeout_s=5.0)
         if not ok or out is None:
             # Two different failures, deliberately kept apart:
@@ -238,25 +251,47 @@ def get_market_indices() -> list[dict]:
                 kind = "permanent"
                 reason = "returned no data"
             if kind == "permanent":
-                _index_neg_perm[cache_key] = True
+                _index_neg_perm[neg_key] = True
             else:
-                _index_neg_transient[cache_key] = True
+                _index_neg_transient[neg_key] = True
             logger.warning(
                 "Index fetch failed for %s (%s) - %s - caching %s",
                 label, symbol, reason, kind,
             )
-            results.append({"label": label, "value": "—", "change": "—", "positive": True})
-            continue
+            return _blank(label)
 
         price, prev = out
         change_pct = ((price - prev) / prev * 100) if prev else 0
         value = f"{price:.2f}" if label == "INR/USD" else f"{price:,.2f}"
-        results.append({
+        return {
             "label": label,
             "value": value,
             "change": f"{'+'if change_pct >= 0 else ''}{change_pct:.2f}%",
             "positive": change_pct >= 0,
-        })
+        }
 
-    _index_cache[cache_key] = results
+    # Fan out. This used to be a serial `for` loop — the only fetch in the
+    # whole ingestion path that didn't parallelise — so four indices at a 5s
+    # ceiling each could cost 20s of wall time on the dashboard's critical
+    # path. Measured 10.0s cold on a laptop; worse on Render's shared IP.
+    #
+    # Pool is created per call, not at module scope, deliberately: with the
+    # cache above actually working this function runs at most once per 3
+    # minutes, so a permanent set of idle threads would be pure overhead on
+    # the 512 MB box (see yf_safe.fanout_workers' note). Same per-call
+    # pattern portfolio_analytics._parallel_fetch already uses.
+    #
+    # `ex.map` preserves INDEX_MAP's order, which the UniverseRail strip
+    # renders positionally — don't swap it for as_completed.
+    with ThreadPoolExecutor(
+        max_workers=len(INDEX_MAP), thread_name_prefix="mkt-idx"
+    ) as ex:
+        results = list(ex.map(_resolve, INDEX_MAP.items()))
+
+    # Only cache a result that actually has something in it. Caching an
+    # all-blank strip would pin "—" across every index for the full 3
+    # minutes even if Yahoo recovered a second later; the per-index negative
+    # caches (60s transient) already stop a retry storm on their own.
+    if any(row["value"] != "—" for row in results):
+        _index_cache[_ALL_INDICES_KEY] = results
     return results
