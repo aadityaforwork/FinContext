@@ -33,6 +33,12 @@ VIOLATION_TYPES = (
     "grounding.schema_valid",
     "grounding.citation_coverage",
     "grounding.citation_validity",
+    # Sibling of citation_validity, and the one that catches a wrong number
+    # sitting behind a real citation. Note it is ABSENT from a call's score
+    # map whenever nothing numeric was checkable, so its denominator here is
+    # naturally smaller than the others' — that is handled for free by the
+    # per-score MIN_SAMPLE_SIZE gate rather than by special-casing it.
+    "grounding.value_match",
     "grounding.confidence_honest",
 )
 

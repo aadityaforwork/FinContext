@@ -68,6 +68,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # grounding.citation_coverage   NUMERIC 0..1  share of claims carrying a source
 # grounding.citation_validity   NUMERIC 0..1  share of cited paths that resolve
+# grounding.value_match         NUMERIC 0..1  share of numeric claims quoting the
+#                                             value actually stored at their path
+#                                             (absent when nothing was checkable)
 # grounding.confidence_honest   BOOLEAN       "high" only when nothing is missing
 # grounding.data_gaps           NUMERIC >=0   count of self-reported gaps
 # grounding.schema_valid        BOOLEAN       response parsed at all
@@ -97,6 +100,48 @@ _PATH_PART = re.compile(r"^([A-Za-z0-9_\-]+)((?:\[\d+\])*)$")
 _INDEX = re.compile(r"\[(\d+)\]")
 
 
+def resolve_source_value(path: str, context: Any) -> tuple[bool, Any]:
+    """Walk `path` through `context` and return (found, value_at_path).
+
+    Same traversal resolve_source_path() has always done — this version just
+    keeps what it landed on instead of discarding it. That value is what
+    `grounding.value_match` needs: knowing the shelf exists is a different
+    question from knowing the model copied the right thing off it.
+
+    `found=False` always pairs with `value=None`. Note the reverse is not
+    true: a path CAN resolve to a genuine None (see resolve_source_path's
+    note on empty-but-present fields), so callers must branch on `found`,
+    never on `value is None`.
+
+    Never raises — any malformed path is simply not found.
+    """
+    if not path or not isinstance(path, str):
+        return (False, None)
+    try:
+        cur = context
+        for raw in path.strip().split("."):
+            m = _PATH_PART.match(raw.strip())
+            if not m:
+                return (False, None)
+            key, idx_blob = m.group(1), m.group(2)
+            if isinstance(cur, dict):
+                if key not in cur:
+                    return (False, None)
+                cur = cur[key]
+            else:
+                return (False, None)
+            for idx in _INDEX.findall(idx_blob or ""):
+                if not isinstance(cur, (list, tuple)):
+                    return (False, None)
+                i = int(idx)
+                if i >= len(cur):
+                    return (False, None)
+                cur = cur[i]
+        return (True, cur)
+    except Exception:
+        return (False, None)
+
+
 def resolve_source_path(path: str, context: Any) -> bool:
     """True if `path` names something that actually exists in `context`.
 
@@ -114,31 +159,214 @@ def resolve_source_path(path: str, context: Any) -> bool:
 
     Never raises — any malformed path is simply invalid.
     """
-    if not path or not isinstance(path, str):
-        return False
+    return resolve_source_value(path, context)[0]
+
+
+# ---------------------------------------------------------------------------
+# Value matching — did the model copy the RIGHT number off the shelf?
+# ---------------------------------------------------------------------------
+# citation_validity proves the address exists. It says nothing about whether
+# the number in the prose is the number stored there: a model can write "P/E
+# of 42", cite snapshot.pe_ratio, and score a perfect 1.0 while the context
+# says 18.4. Every other grounding check passes too — the JSON is valid, the
+# claim is sourced, the path resolves, the confidence is honest. Nothing
+# compares 42 against 18.4. That is the hole this closes.
+#
+# The whole design problem here is FALSE ALARMS, not detection. Flagging a
+# correct claim is worse than missing a wrong one, because the alert feeds
+# grounding_monitor -> prompt_drafter, and a prompt rewritten to chase a
+# phantom mismatch is a real regression. Hence the conservative rule below.
+
+# A number as it appears in prose, with an optional scale/unit suffix.
+_NUM_IN_TEXT = re.compile(
+    r"(?<![A-Za-z0-9_.])"                       # not mid-identifier / mid-decimal
+    r"(-?\d{1,3}(?:,\d{2,3})+|-?\d+)"           # 1,23,456 / 1,234 / 1234
+    r"(\.\d+)?"                                 # optional decimals
+    r"\s*"
+    r"(%|pp|bps|crore|cr|lakhs|lakh|billion|bn|million|mn|trillion|tn|k)?",
+    re.IGNORECASE,
+)
+
+# Multipliers for the scale words that actually show up in Indian market
+# copy. `bps` is handled separately — it is a unit conversion (50bps = 0.5%),
+# not a magnitude, so it produces an extra candidate rather than replacing.
+_SCALE = {
+    "crore": 1e7, "cr": 1e7,
+    "lakh": 1e5, "lakhs": 1e5,
+    "billion": 1e9, "bn": 1e9,
+    "million": 1e6, "mn": 1e6,
+    "trillion": 1e12, "tn": 1e12,
+    "k": 1e3,
+}
+
+_MAX_CONTEXT_NUMBERS = 400   # ceiling per claim, so a huge cited node can't stall scoring
+
+
+@dataclass(frozen=True)
+class _Stated:
+    """One number as the model wrote it, plus every reading of it we'd accept."""
+
+    raw: str
+    decimals: int          # how precisely it was written — drives rounding tolerance
+    candidates: tuple[float, ...]
+
+
+def _stated_numbers(text: str) -> list[_Stated]:
+    """Numbers a claim's prose actually asserts.
+
+    Skips things that are labels rather than measurements — bare 4-digit
+    years, and any number written with no decimals and no unit that happens
+    to look like a year. Those are never the value being cited, and counting
+    them would manufacture mismatches out of "Q2 2026".
+    """
+    out: list[_Stated] = []
+    if not isinstance(text, str):
+        return out
+    for m in _NUM_IN_TEXT.finditer(text):
+        int_part, dec_part, suffix = m.group(1), m.group(2) or "", (m.group(3) or "").lower()
+        raw = f"{int_part}{dec_part}"
+        try:
+            base = float(int_part.replace(",", "") + dec_part)
+        except ValueError:
+            continue
+        decimals = len(dec_part) - 1 if dec_part else 0
+        if not suffix and not dec_part and 1900 <= abs(base) <= 2100:
+            continue  # a year, not a measurement
+        cands = {base}
+        if suffix in _SCALE:
+            cands.add(base * _SCALE[suffix])
+        if suffix == "bps":
+            cands.add(base / 100.0)   # 50bps == 0.5%
+        out.append(_Stated(raw=raw + (suffix or ""), decimals=decimals,
+                           candidates=tuple(sorted(cands))))
+    return out
+
+
+def _context_numbers(value: Any, depth: int = 0, label: str = "") -> list[tuple[str, float]]:
+    """Every number reachable from a resolved citation target.
+
+    A citation can point at a scalar (`snapshot.pe_ratio` -> 18.4) or at a
+    whole object (`holdings[0]` -> a dict of a dozen fields). Both are legal
+    under the grounding contract, so both have to be searched — otherwise
+    citing the object and quoting one of its fields would read as a mismatch.
+
+    Strings are mined too: `news[0].headline` resolves to text, and "TCS wins
+    $1.2bn order" genuinely contains the number a claim may quote.
+    """
+    found: list[tuple[str, float]] = []
+
+    def walk(node: Any, d: int, lbl: str) -> None:
+        if d > 4 or len(found) >= _MAX_CONTEXT_NUMBERS:
+            return
+        if isinstance(node, bool):
+            return                                   # True/False are not measurements
+        if isinstance(node, (int, float)):
+            found.append((lbl, float(node)))
+        elif isinstance(node, str):
+            for s in _stated_numbers(node):
+                for c in s.candidates:
+                    found.append((lbl, c))
+        elif isinstance(node, dict):
+            for k, v in node.items():
+                walk(v, d + 1, f"{lbl}.{k}" if lbl else str(k))
+        elif isinstance(node, (list, tuple)):
+            for i, v in enumerate(node):
+                walk(v, d + 1, f"{lbl}[{i}]")
+
     try:
-        cur = context
-        for raw in path.strip().split("."):
-            m = _PATH_PART.match(raw.strip())
-            if not m:
-                return False
-            key, idx_blob = m.group(1), m.group(2)
-            if isinstance(cur, dict):
-                if key not in cur:
-                    return False
-                cur = cur[key]
-            else:
-                return False
-            for idx in _INDEX.findall(idx_blob or ""):
-                if not isinstance(cur, (list, tuple)):
-                    return False
-                i = int(idx)
-                if i >= len(cur):
-                    return False
-                cur = cur[i]
-        return True
+        walk(value, depth, label)
     except Exception:
-        return False
+        logger.exception("_context_numbers walk failed")
+    return found
+
+
+def _agrees(stated: _Stated, actual: float) -> bool:
+    """Would a careful human call this the same number?
+
+    Three ways to agree, in order of how often they matter:
+
+      1. Exactly equal.
+      2. The model rounded. "3.2%" against a stored 3.24 is CORRECT
+         reporting, not a fabrication — so the stored value is rounded to
+         the precision the model chose to write before comparing. This is
+         the single most important rule here; without it every sensibly
+         rounded number reads as a lie.
+      3. Float noise — a hair of relative tolerance.
+
+    Sign is compared loosely on purpose: prose carries direction in words
+    ("fell 3.2%" against a stored -3.2), so magnitude agreement counts. A
+    genuinely inverted sign is a direction error, which the market outcome
+    scores already judge far more authoritatively than string matching could.
+    """
+    for cand in stated.candidates:
+        for c, a in ((cand, actual), (abs(cand), abs(actual))):
+            if c == a:
+                return True
+            if round(a, stated.decimals) == round(c, stated.decimals):
+                return True
+            if a != 0 and abs(c - a) / abs(a) <= 0.005:
+                return True
+    return False
+
+
+def value_match_score(claims: list[dict], context: Any) -> Score | None:
+    """Share of checkable numeric claims that quoted the right number.
+
+    CHECKABLE means both sides carry a number: the prose asserts one, and the
+    cited path resolves to something containing at least one. Anything else is
+    skipped rather than counted — a claim with no numbers is not evidence of
+    anything, and neither is one citing a path that holds only text.
+
+    Returns None when nothing was checkable. That is deliberate and matches
+    citation_validity's behaviour: emitting 1.0 for "we found nothing to
+    check" would launder an absence of evidence into a perfect score, and
+    prompt_monitor would then read it as a real signal.
+
+    KNOWN AND ACCEPTED FALSE POSITIVE: a derived number. "beat its sector by
+    2.4pp" where 3.2 - 0.8 = 2.4 cites a real path, states a correct number,
+    and matches nothing stored there. We do not try to re-derive arithmetic —
+    that way lies a checker nobody can reason about. The comment names the
+    exact stated-vs-resolved pair so a human can dismiss it in seconds, and
+    the monitor's threshold is set well above zero for exactly this reason.
+    """
+    checkable = 0
+    mismatches: list[str] = []
+
+    for claim in claims:
+        path = str(claim.get("source") or "").strip()
+        if not path:
+            continue
+        stated = _stated_numbers(claim.get("text"))
+        if not stated:
+            continue                      # no number asserted — nothing to check
+        found, value = resolve_source_value(path, context)
+        if not found:
+            continue                      # citation_validity's job, not ours
+        actuals = _context_numbers(value, label=path)
+        if not actuals:
+            continue                      # cited a non-numeric field — not checkable
+
+        checkable += 1
+        unmatched = [s for s in stated if not any(_agrees(s, a) for _lbl, a in actuals)]
+        if unmatched:
+            near = ", ".join(f"{lbl}={a:g}" for lbl, a in actuals[:3])
+            mismatches.append(
+                f"said {'/'.join(s.raw for s in unmatched)} citing {path} (holds {near})"
+            )
+
+    if not checkable:
+        return None
+
+    matched = checkable - len(mismatches)
+    return Score(
+        "grounding.value_match",
+        round(matched / checkable, 3),
+        "NUMERIC",
+        None if not mismatches else (
+            f"{len(mismatches)}/{checkable} numeric claims disagree with the cited value: "
+            + "; ".join(mismatches[:5])
+        )[:400],
+    )
 
 
 def collect_claims(parsed: Any) -> list[dict]:
@@ -217,6 +445,14 @@ def grounding_scores(parsed: dict | None, context: dict | None) -> dict[str, Sco
             "grounding.citation_validity", validity, "NUMERIC",
             None if not bad else "unresolvable: " + ", ".join(sorted(set(bad))[:8])[:400],
         )
+
+        # Sibling to the check above, and the reason it isn't redundant:
+        # citation_validity proves the address exists, this proves the model
+        # copied the right thing off it. Omitted entirely (not zero, not one)
+        # when no claim was checkable — see value_match_score.
+        vm = value_match_score(sourced, context)
+        if vm is not None:
+            scores["grounding.value_match"] = vm
 
     # Rule 3: "high" is only allowed when every field used is actually in
     # context. We approximate "every field used" as "every citation resolves

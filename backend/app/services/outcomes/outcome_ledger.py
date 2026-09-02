@@ -935,6 +935,7 @@ def _is_grounding_violation(name: str, score: dict) -> bool:
         "grounding.schema_valid",
         "grounding.citation_coverage",
         "grounding.citation_validity",
+        "grounding.value_match",
         "grounding.confidence_honest",
     }:
         return False
