@@ -34,6 +34,7 @@ from app.routers import (
     grounding_monitor as grounding_monitor_router,
     miss_fixtures as miss_fixtures_router,
     prompt_drafter as prompt_drafter_router,
+    debug_memory,
 )
 from app.agents import base as agents_base
 from app.core.config import settings
@@ -118,6 +119,7 @@ app.include_router(accuracy_monitor_router.router)
 app.include_router(grounding_monitor_router.router)
 app.include_router(miss_fixtures_router.router)
 app.include_router(prompt_drafter_router.router)
+app.include_router(debug_memory.router)
 
 
 @app.on_event("startup")
