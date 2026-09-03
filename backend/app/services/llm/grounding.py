@@ -1181,6 +1181,14 @@ def build_movers_context(holdings: list[dict], market_ctx: dict | None = None) -
                     "source": n.get("source"),
                     "headline": n.get("headline"),
                     "snippet": (n.get("snippet") or "")[:200],
+                    # Age, not the raw date: the model has no reliable sense of
+                    # "today", so a date string is not something it can weigh,
+                    # while "this is 6 days old" is. Until this line the field
+                    # was fetched, used to sort, then discarded — so a stale
+                    # headline arrived indistinguishable from this morning's
+                    # and the prompt had no way to prefer the recent one.
+                    # None means undated, which is not the same as fresh.
+                    "age_days": news_sources.age_days(n.get("published_date")),
                 })
         except Exception as e:
             logger.warning("news fetch failed in movers for %s: %s", t, e)
@@ -1349,7 +1357,14 @@ def build_morning_brief_context(
             logger.warning("morning brief: news fetch failed for %s: %s", t, e)
             return []
         return [
-            {"id": f"{t}_news[{i}]", "source": n.get("source"), "headline": n.get("headline")}
+            {
+                "id": f"{t}_news[{i}]",
+                "source": n.get("source"),
+                "headline": n.get("headline"),
+                # See the matching field in build_movers_context for why age
+                # rather than date, and why it wasn't here before.
+                "age_days": news_sources.age_days(n.get("published_date")),
+            }
             for i, n in enumerate(raw)
         ]
 

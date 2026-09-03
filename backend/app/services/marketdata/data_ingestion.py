@@ -7,18 +7,16 @@ It is STRICTLY DECOUPLED from the LLM generation layer (llm_engine.py).
 Architecture:
     Raw Data Sources → data_ingestion.py → Context Docs → llm_engine.py → User
 
-Current: Fetches real news from Google News RSS + falls back to seed data.
+Current: Fetches real, freshness-filtered news via news_sources' multi-source
+pipeline. There is deliberately NO synthetic fallback — see retrieve_context.
 Production: Will add embedding generation + vector store integration.
 """
 
 import logging
-from urllib.parse import quote
 
-import feedparser
 from cachetools import TTLCache
 
 from app.nse_universe import TICKER_TO_META
-from app.seed_data import NEWS_CORPUS
 
 logger = logging.getLogger(__name__)
 
@@ -35,67 +33,6 @@ _news_cache = TTLCache(maxsize=20, ttl=900)
 # ---------------------------------------------------------------------------
 
 
-def _fetch_google_news(query: str, num_results: int = 8) -> list[dict]:
-    """
-    Fetch news articles from Google News RSS feed.
-    
-    Args:
-        query: Search query string
-        num_results: Max number of results to return
-    
-    Returns:
-        List of dicts with: source, headline, snippet, published_date
-    """
-    try:
-        encoded_query = quote(query)
-        url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-IN&gl=IN&ceid=IN:en"
-
-        # feedparser.parse(url) has no timeout — on a slow Google News response
-        # this would hang the calling thread indefinitely and stall the whole
-        # Context Engine SSE. Fetch bytes with a hard timeout instead.
-        import requests as _rq
-        r = _rq.get(url, timeout=5.0, headers={"User-Agent": "FinContext/1.0"})
-        r.raise_for_status()
-        feed = feedparser.parse(r.content)
-        
-        results = []
-        for entry in feed.entries[:num_results]:
-            # Google News title format: "Headline - Source Name"
-            title_parts = entry.title.rsplit(" - ", 1)
-            headline = title_parts[0].strip()
-            source = title_parts[1].strip() if len(title_parts) > 1 else "Google News"
-            
-            # Extract date
-            published = ""
-            if hasattr(entry, "published"):
-                try:
-                    from datetime import datetime
-                    from email.utils import parsedate_to_datetime
-                    dt = parsedate_to_datetime(entry.published)
-                    published = dt.strftime("%Y-%m-%d")
-                except Exception:
-                    published = entry.published[:10] if len(entry.published) >= 10 else ""
-            
-            # Extract snippet from description (strip HTML)
-            snippet = ""
-            if hasattr(entry, "summary"):
-                import re
-                snippet = re.sub(r"<[^>]+>", "", entry.summary).strip()[:300]
-            
-            results.append({
-                "source": source,
-                "headline": headline,
-                "snippet": snippet if snippet else headline,
-                "relevance_score": round(0.95 - (len(results) * 0.05), 2),  # Decreasing relevance
-                "published_date": published,
-            })
-        
-        return results
-    except Exception as e:
-        logger.warning(f"Google News fetch failed for query '{query}': {e}")
-        return []
-
-
 def retrieve_context(ticker: str, query: str | None = None, top_k: int = 5) -> list[dict]:
     """
     Retrieve relevant context documents for a given ticker.
@@ -106,11 +43,27 @@ def retrieve_context(ticker: str, query: str | None = None, top_k: int = 5) -> l
        AND Google News, dedupes by normalized title, sorts by freshness.
     2. If the user passed an explicit `query`, supplement with a targeted
        Google search on that query.
-    3. Fall back to seed data only if every source returns empty.
+    3. Return whatever survived — possibly nothing.
 
     The previous version pulled from Google News only — which meant the same
     5 articles ranked for any IT-stock query (TCS/INFY/WIPRO/HCLTECH) showed
     up identically, making the news feed feel stuck.
+
+    NO SYNTHETIC FALLBACK, deliberately. This used to end with "if fewer than
+    2 items, return NEWS_CORPUS[ticker]" — hand-written MVP demo headlines,
+    served to the LLM as if they were real reporting. It was near-unreachable
+    while every source was unfiltered (something always came back), and it
+    happened to be inert for most portfolios because its keys are the old demo
+    names ("TATAMOTORS-TMCV", not "TMCV"). Adding the freshness filter to the
+    per-ticker path made "fewer than 2 items" the common case, which would
+    have turned a dormant landmine into the default answer for every quiet
+    stock. An empty list is the honest result: the attribution surface already
+    has an `unexplained` bucket and `data_gaps` for exactly this, and a real
+    "no recent catalyst" beats an invented one (AGENTS.md rule 1).
+
+    Callers must handle []. Nothing here has ever guaranteed a non-empty list
+    — every source could already fail at once — so this widens an existing
+    case rather than introducing a new one.
 
     Args:
         ticker: Stock ticker symbol
@@ -153,16 +106,16 @@ def retrieve_context(ticker: str, query: str | None = None, top_k: int = 5) -> l
     for i, item in enumerate(news):
         item.setdefault("relevance_score", round(0.95 - i * 0.05, 2))
 
-    if len(news) >= 2:
+    # Cache only a non-empty result. An empty list is far more often "the feed
+    # hiccuped" than "this company has no news", and the upstream Google call
+    # is already cached inside news_sources for 10 min, so re-asking costs
+    # nothing on the common path while letting a transient failure recover.
+    if news:
         _news_cache[cache_key] = news
         logger.info(f"Retrieved {len(news)} multi-source news items for {ticker}")
-        return news[:top_k]
-
-    # 3. Fall back to seed data only if everything else came up empty
-    logger.info(f"Falling back to seed data for {ticker}")
-    corpus = NEWS_CORPUS.get(ticker, [])
-    fallback = sorted(corpus, key=lambda x: x["relevance_score"], reverse=True)[:top_k]
-    return fallback
+    else:
+        logger.info(f"No news inside the freshness window for {ticker}")
+    return news[:top_k]
 
 
 def ingest_news_batch(articles: list[dict]) -> int:

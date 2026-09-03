@@ -38,6 +38,7 @@ import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from urllib.parse import quote
 
@@ -167,6 +168,44 @@ def _parse_published_ts(entry) -> float:
         except Exception:
             pass
     return 0.0
+
+
+def _ts_from_published_date(value: str | None) -> float:
+    """Unix ts back out of the `published_date` string `_parse_published` writes.
+
+    The private `_ts` is stripped at every public boundary of this module (see
+    `fetch_india_market_pool`), so anything re-ranking items downstream has
+    only the display string left. Parsing it back is strictly better than the
+    lexical `sort(key=published_date)` this replaced: `_parse_published` falls
+    back to a raw `val[:16]` fragment when a feed's date won't parse, and a
+    fragment starting with a letter ("Mon, 01 Sep…") sorts ABOVE every ISO
+    date, so one malformed item used to pin itself to the top of the list.
+    Unparseable now scores 0.0 and sorts to the bottom, where it belongs.
+    """
+    if not value:
+        return 0.0
+    try:
+        return (
+            datetime.strptime(value[:16], "%Y-%m-%d %H:%M")
+            .replace(tzinfo=UTC)
+            .timestamp()
+        )
+    except Exception:
+        return 0.0
+
+
+def age_days(published_date: str | None) -> int | None:
+    """Whole days between `published_date` and now; None when undated.
+
+    Public because the context builders need it: an item's age never used to
+    survive into the LLM's CONTEXT at all (grounding.py shipped only id /
+    source / headline / snippet), so a prompt could not weigh recency even in
+    principle and a months-old headline read exactly like this morning's.
+    """
+    ts = _ts_from_published_date(published_date)
+    if not ts:
+        return None
+    return max(0, int((time.time() - ts) // 86400))
 
 
 def _strip_html(s: str | None) -> str:
@@ -389,13 +428,36 @@ def google_news_for_query(query: str, hl: str = "en-IN", gl: str = "IN",
                 "snippet":        _strip_html(getattr(entry, "summary", "") or "")[:240] or clean_headline,
                 "url":            getattr(entry, "link", "") or "",
                 "published_date": _parse_published(entry),
+                "_ts":            _parse_published_ts(entry),
             })
+        # The freshness contract fetch_feed has always had, extended to this
+        # path — it was missing here, and this is the path per-ticker company
+        # news actually comes down. `_drop_stale` keys off `_ts`, which this
+        # function never set, so the 7-day window silently applied to the
+        # curated market feeds ONLY. Measured 2026-09-03 on FILATEX: all six
+        # returned items were 20-122 days old, the freshest was a 20-day-old
+        # penalty notice about a DIFFERENT listed company, and it landed at
+        # holdings[0].news[0] where the model cited it as the sole driver of
+        # a +6.14% move. Every grounding score passed — citation_validity and
+        # value_match both check fidelity to the context, never whether the
+        # context was true, so nothing downstream could have caught it.
+        #
+        # One log key for every query, not one per ticker: this runs once per
+        # holding, so keying on the query would turn a 51-stock portfolio into
+        # 51 warnings per process instead of the one-line-per-process
+        # discipline the rest of this module keeps.
+        out = _drop_stale(out, "Google News (per-ticker)", "gnews")
         _feed_cache[cache_key] = out
         # Copies, same reason as fetch_feed: `data_ingestion.retrieve_context`
         # writes `relevance_score` onto whatever it gets back, and that used to
         # land in the shared cache — so one ticker's freshness ranking leaked
         # into the next ticker's cached items.
-        return [dict(it) for it in out[:n]]
+        #
+        # `_ts` is stripped on the way out (kept in the cache, where it is
+        # private) because build_market_context spreads these dicts wholesale
+        # into india_news via `{"id": ..., **n}` — anything left on them ships
+        # to the LLM as context.
+        return [{k: v for k, v in it.items() if k != "_ts"} for it in out[:n]]
     except Exception as e:
         logger.warning("Google News fetch failed for '%s': %s", query, e)
         return []
@@ -413,9 +475,21 @@ def fetch_for_ticker(ticker: str, company_name: str, sector: str | None,
     Returns up to `n` items.
     """
     company_q = company_name or ticker
-    # 1. Google — specific query
+    # 1. Google — specific query.
+    #
+    # `when:7d` matters more than it looks, and has to match _MAX_ITEM_AGE_S.
+    # Without it Google ranks by relevance over all time, which for a query
+    # ending "stock NSE" means evergreen SEO pages ("X Share Price Today",
+    # "X Stock Prediction 2026") outrank actual reporting — so the response
+    # was mostly items that _drop_stale then discarded, and the ticker ended
+    # up with no news at all. Measured 2026-09-03 across 17 holdings once the
+    # freshness window went live on this path: 4/17 had any item inside the
+    # window with the old query, 17/17 with this one, and the items are real
+    # desk reporting (RIL market cap, NTPC dividend record date) rather than
+    # price-widget pages. build_market_context's India query has always used
+    # the same operator; the per-ticker path just never picked it up.
     google_items = google_news_for_query(
-        f"{company_q} stock NSE", hl="en-IN", gl="IN", ceid="IN:en", n=n + 2
+        f"{company_q} share price news when:7d", hl="en-IN", gl="IN", ceid="IN:en", n=n + 2
     )
 
     # 2. General pool — filter by ticker / company-name mention
@@ -436,11 +510,11 @@ def fetch_for_ticker(ticker: str, company_name: str, sector: str | None,
 
     merged = google_items + pool_matches
     merged = dedup_items(merged)
-    # Sort by freshness (items without dates fall to bottom).
-    merged.sort(
-        key=lambda x: x.get("published_date") or "",
-        reverse=True,
-    )
+    # Sort by freshness (items without a parseable date fall to the bottom).
+    # Both inputs have had `_ts` stripped at their own public boundary, so the
+    # key is recovered from `published_date` — see `_ts_from_published_date`
+    # for why comparing those strings directly was wrong.
+    merged.sort(key=lambda x: _ts_from_published_date(x.get("published_date")), reverse=True)
     return merged[:n]
 
 

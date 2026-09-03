@@ -60,6 +60,14 @@ MOVERS_ATTRIBUTION_FALLBACK_PROMPT = (
     "holdings[i].semantic_news[j].\n"
     "  • Cite market.sectors by numeric list index, never by a sector-name index.\n"
     "  • Every attribution item must keep a source; do not game validity by returning no claims.\n"
+    "RECENCY:\n"
+    "  • News items carry age_days. A move TODAY is not explained by a headline from last "
+    "week — treat anything with age_days > 2 as background, never as the primary driver, and "
+    "say how old it is in the text when you do cite it ('reported 5 days ago, ...').\n"
+    "  • age_days null means the item is undated; treat it as background too.\n"
+    "  • If the only news is stale, the primary driver is 'technical' or 'unexplained' — "
+    "whichever the data supports. A holding with no fresh catalyst is a normal, correct "
+    "answer; do not promote an old headline to fill the slot.\n"
     "Be specific. 'Positive price movement enhances sentiment' is banned because it says nothing."
 )
 
