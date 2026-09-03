@@ -250,6 +250,98 @@ def test_scoring_survives_a_deeply_nested_context():
 
 
 # ---------------------------------------------------------------------------
+# The gate case — checked BEFORE a drafted prompt can be promoted
+# ---------------------------------------------------------------------------
+# Live behaviour, measured 2026-09-02 at n=5 against gpt-4o-mini:
+#
+#     prompt                       value_match   citation_paths
+#     live movers prompt              5/5            5/5
+#     same + "quote the sector's      2/5            5/5
+#     figure as the stock's move"
+#
+# The second row is the argument for the case existing. The sloppy prompt
+# keeps every citation legal — the old case cannot see it at all — while
+# value_match drops 60pp, comfortably past prompt_gate's 34pp
+# CASE_REGRESSION_BLOCK. A candidate that starts misquoting numbers now gets
+# blocked instead of promoted.
+def _case():
+    from app.services.pathback import prompt_eval_cases
+    return prompt_eval_cases.CASE_MOVERS_VALUE_MATCH
+
+
+def _mover_result(text: str, source: str = "holdings[0]") -> dict:
+    return {"movers": [{"ticker": "TESTCO", "move_percent": 4.37,
+                        "primary_driver": "sector",
+                        "attribution": [{"text": text, "source": source,
+                                         "weight_pct": 100}]}],
+            "confidence": "medium", "data_gaps": []}
+
+
+def test_gate_case_passes_when_the_number_is_right():
+    case = _case()
+    assert case.check(_mover_result("outperformed its sector by 3.25pp")) is True
+
+
+def test_gate_case_fails_a_misquoted_number_on_a_field_citation():
+    """Quote the sector's 1.12 as if it were the stock's own move, citing the
+    field that holds 4.37. This is the sharp version of the check."""
+    case = _case()
+    assert case.check(
+        _mover_result("the stock moved 1.12% today", "holdings[0].change_percent_today")
+    ) is False
+
+
+def test_object_level_citation_is_deliberately_coarser():
+    """KNOWN AND ACCEPTED LIMITATION, documented so nobody reads the score as
+    sharper than it is.
+
+    Citing a whole object means every number inside it is a legal match, so
+    quoting the sector's 1.12 while citing `holdings[0]` PASSES — 1.12 really
+    is in that dict, under sector_index_return_today. Only a field-level
+    citation makes the check precise.
+
+    This is the direct cost of the "citing an object searches inside it" rule,
+    which exists so that quoting a field while citing its parent isn't a false
+    alarm. Live evidence that it still bites in aggregate: a prompt told to
+    misquote the sector figure while citing `holdings[0]` scored 2/5 rather
+    than 5/5, because the model doesn't reliably stay at the object level.
+
+    The lever, if this ever needs to be sharper, is the PROMPT — push it
+    toward field-level citations — not a looser matcher here."""
+    case = _case()
+    assert case.check(_mover_result("the stock moved 1.12% today", "holdings[0]")) is True
+
+
+def test_gate_case_fails_when_no_number_is_stated():
+    """Absent score must NOT pass here, even though the live monitor
+    deliberately stays silent on it. Otherwise "state no numbers" is the
+    cheapest way for a drafted prompt to clear this case."""
+    case = _case()
+    assert case.check(_mover_result("momentum carried the move")) is False
+
+
+def test_gate_case_fails_an_empty_or_unparseable_response():
+    case = _case()
+    assert case.check({}) is False
+    assert case.check({"movers": []}) is False
+
+
+def test_gate_case_accepts_a_correctly_rounded_number():
+    case = _case()
+    assert case.check(_mover_result("up about 4.4% on the day")) is True
+
+
+def test_gate_case_is_registered_for_the_movers_prompt():
+    from app.services.pathback import prompt_eval_cases
+
+    ids = [c.id for c in prompt_eval_cases.ALL_CASES]
+    assert "movers_attribution.quotes_the_cited_value" in ids
+    assert len(ids) == len(set(ids)), "duplicate eval case id"
+    case = _case()
+    assert case.prompt_name == "portfolio.movers_attribution"
+
+
+# ---------------------------------------------------------------------------
 # Wiring — the score has to actually reach the loop
 # ---------------------------------------------------------------------------
 def test_a_mismatch_counts_as_a_grounding_violation():

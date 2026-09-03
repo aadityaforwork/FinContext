@@ -89,7 +89,61 @@ CASE_MOVERS_CITATION_PATHS = EvalCase(
     max_tokens=600,
 )
 
-MOVERS_ATTRIBUTION_CASES = [CASE_MOVERS_CITATION_PATHS]
+def _mover_quotes_the_value_it_cites(result: dict) -> bool:
+    """Every number the model states must be the number stored at the path it
+    cited. Sibling of the case above, and deliberately not folded into it:
+    that one asks "is the address real", this one asks "did you copy the
+    right thing off it". A candidate can pass either while failing the other.
+
+    ABSENT SCORE COUNTS AS A FAILURE, which is the whole point of running
+    this as a gate case rather than only watching it in production.
+    grounding.value_match is omitted when no claim carried a checkable
+    number — correct for a live monitor (no evidence, no opinion) but wrong
+    here, because "state no numbers at all" would then be the cheapest way
+    for a drafted prompt to pass. This context is built so a real
+    attribution has a number in it; a candidate that answers without one has
+    dodged the question, not satisfied it.
+    """
+    movers = result.get("movers") or []
+    if not next((m for m in movers if m.get("ticker") == "TESTCO"), None):
+        return False
+    score = langfuse_scores.grounding_scores(
+        result, CASE_MOVERS_VALUE_MATCH.context
+    ).get("grounding.value_match")
+    return bool(score and score.value == 1.0)
+
+
+CASE_MOVERS_VALUE_MATCH = EvalCase(
+    id="movers_attribution.quotes_the_cited_value",
+    prompt_name="portfolio.movers_attribution",
+    # Numbers here are deliberately awkward — 4.37 / 1.12 / 3.25 rather than
+    # round figures — for two reasons. A model reciting a plausible-sounding
+    # number instead of reading one gets caught, and the values are far
+    # enough apart that quoting the wrong FIELD (sector's 1.12 where the
+    # holding's 4.37 belongs) is a mismatch rather than a coincidence.
+    # The prompt asks a 'sector' driver to cite excess_return_today, so a
+    # correct answer has a number in its prose without being told to add one.
+    context={
+        "portfolio_return_today_pct": 2.05,
+        "holdings": [{
+            "ticker": "TESTCO", "sector": "IT", "change_percent_today": 4.37,
+            "sector_index_return_today": 1.12, "excess_return_today": 3.25,
+            "mover_bucket": "strong_gainer",
+            "news": [{"id": "n1", "source": "Test Wire",
+                      "headline": "TESTCO wins 1,250 crore export order"}],
+            "semantic_news": [],
+            "technicals": {"rsi_zone": "strong", "vol_zone": "surge",
+                           "momentum_state": "extending_up", "sma_state": "above_sma50"},
+        }],
+        "market": {"sectors": [{"sector": "IT", "change_percent": 1.12}], "flows": None},
+        "india_headlines": [],
+    },
+    schema_description=_MOVERS_SCHEMA,
+    check=_mover_quotes_the_value_it_cites,
+    max_tokens=600,
+)
+
+MOVERS_ATTRIBUTION_CASES = [CASE_MOVERS_CITATION_PATHS, CASE_MOVERS_VALUE_MATCH]
 
 # ---------------------------------------------------------------------------
 # portfolio.tomorrow_watch
